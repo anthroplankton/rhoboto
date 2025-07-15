@@ -1,0 +1,22 @@
+# Core bot library
+discord.py>=2.5.2
+
+# Code quality tools
+black==25.1.0
+pre-commit==4.2.0
+ruff==0.12.4
+
+# Runtime libraries
+async_lru>=2.0.2
+python-dotenv>=1.1.1
+rich>=14.0.0
+
+# database/ORM backends
+tortoise-orm>=0.20.0
+
+# Google Sheets & DataFrame
+google-auth>=2.0.0
+gspread_asyncio>=1.3.0
+pandas>=2.0.0
+
+
