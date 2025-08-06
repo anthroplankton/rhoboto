@@ -232,6 +232,29 @@ class TeamRegister(
 
         await interaction.followup.send(embed=build_summary_embed(summary_df))
 
+    @app_commands.command(
+        name="settings",
+        description="Show and edit current feature settings for this channel.",
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+    )
+    async def settings(self, interaction: Interaction) -> None:
+        """Slash command to show and edit current feature settings."""
+        await interaction.response.defer(ephemeral=True)
+        await self.setup_after_enable(interaction)
+
+    @app_commands.command(
+        name="help",
+        description="Show the all language how to register your data for this feature.",
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+    )
+    async def help(self, interaction: Interaction) -> None:
+        await self._help_callback(interaction)
+
+
     help_text_en = """### 📋 How to Register Your Teams
 
 Each line represents a team. The format is `LeaderSkill/InternalSkill/TeamPower`, and you may add notes at the end of each line.

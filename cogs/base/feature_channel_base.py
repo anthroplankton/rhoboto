@@ -94,12 +94,6 @@ class FeatureChannelBase(
     def __init__(self, bot: Rhoboto) -> None:
         self.bot = bot
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.settings.add_check(
-            FeatureChannelBase.feature_enabled_app_command_predicate(self.feature_name)
-        )
-        self.help.add_check(
-            FeatureChannelBase.feature_enabled_app_command_predicate(self.feature_name)
-        )
         self.context_menu = app_commands.ContextMenu(
             name=f"{self.feature_name} upsert", callback=self.on_message_context
         )
@@ -176,15 +170,6 @@ class FeatureChannelBase(
         await self.setup_after_enable(interaction)
 
     @app_commands.command(
-        name="settings",
-        description="Show and edit current feature settings for this channel.",
-    )
-    async def settings(self, interaction: Interaction) -> None:
-        """Slash command to show and edit current feature settings."""
-        await interaction.response.defer(ephemeral=True)
-        await self.setup_after_enable(interaction)
-
-    @app_commands.command(
         name="disable",
         description="Disable this feature in the current channel (soft disable).",
     )
@@ -254,11 +239,7 @@ class FeatureChannelBase(
     help_text_ja: str
     help_text_zh_tw: str
 
-    @app_commands.command(
-        name="help",
-        description="Show the all language how to register your data for this feature.",
-    )
-    async def help(self, interaction: Interaction) -> None:
+    async def _help_callback(self, interaction: Interaction) -> None:
         """
         Show help for this feature.
         This method should be implemented by subclasses to provide

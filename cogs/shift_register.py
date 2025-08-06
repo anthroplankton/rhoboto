@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
+from discord import app_commands
+
 from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
 from components.ui_shift_register import (
@@ -153,6 +155,28 @@ class ShiftRegister(
             await message.add_reaction("✅")
 
         return shift
+
+    @app_commands.command(
+        name="settings",
+        description="Show and edit current feature settings for this channel.",
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+    )
+    async def settings(self, interaction: Interaction) -> None:
+        """Slash command to show and edit current feature settings."""
+        await interaction.response.defer(ephemeral=True)
+        await self.setup_after_enable(interaction)
+
+    @app_commands.command(
+        name="help",
+        description="Show the all language how to register your data for this feature.",
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+    )
+    async def help(self, interaction: Interaction) -> None:
+        await self._help_callback(interaction)
 
     help_text_en = """### 📋 How to Register Your Shifts
 
