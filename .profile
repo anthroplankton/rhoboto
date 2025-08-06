@@ -1,1 +1,1 @@
-echo "${GOOGLE_CREDENTIALS}" > /bot/service_account.json
+echo "${GOOGLE_CREDENTIALS}" > bot/service_account.json
