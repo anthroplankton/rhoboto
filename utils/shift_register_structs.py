@@ -142,7 +142,7 @@ class ShiftParser:
     HOUR_SLOTS: ClassVar[list[int]] = list(range(SPLIT_HOUR, SPLIT_HOUR + 24))
     HOUR_LABELS: ClassVar[list[str]] = [f"{h}-{h + 1}" for h in HOUR_SLOTS]
 
-    PATTERN = re.compile(r"(?P<start>\d+)\s*[-－]\s*(?P<end>\d+)")  # noqa: RUF001
+    PATTERN = re.compile(r"(?P<start>\d+)\s*[-－~～]\s*(?P<end>\d+)")  # noqa: RUF001
 
     @classmethod
     def standardize(cls, hour: int) -> int:
