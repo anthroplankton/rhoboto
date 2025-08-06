@@ -38,6 +38,7 @@ def setup(
     )
 
     # Console Handler
+    console_handler: logging.Handler
     if use_rich:
         console_handler = RichHandler(
             console=Console(stderr=True),
@@ -53,7 +54,7 @@ def setup(
         )
     else:
         console_handler = logging.StreamHandler()
-        console_handler.setFormatter(plain_formatter, datefmt=datefmt)
+        console_handler.setFormatter(plain_formatter)
     handlers.append(console_handler)
 
     # File Handler
