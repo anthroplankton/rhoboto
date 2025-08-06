@@ -1,0 +1,1 @@
+echo "${GOOGLE_CREDENTIALS}" > /bot/service_account.json
