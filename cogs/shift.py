@@ -41,6 +41,18 @@ class Shift(
         await manager.upsert_or_delete_user_shift(user_info, None, metadata)
 
     @app_commands.command(
+        name=locale_str("delete"),
+        description=locale_str(
+            "Delete your registration data for this feature in this channel."
+        ),
+    )
+    @app_commands.check(
+            FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+    )
+    async def delete(self, interaction: Interaction) -> None:
+        await self.delete_callback(interaction)
+
+    @app_commands.command(
         name=locale_str("help"),
         description=locale_str("Show how to register your shifts."),
     )

@@ -471,23 +471,13 @@ class FeatureChannelUserBase(
     def __init__(self, bot: Rhoboto) -> None:
         self.bot = bot
         self.logger = logging.getLogger(self.__class__.__name__)
-        # Add the feature enabled check for the delete command
-        self.delete.add_check(
-            FeatureChannelBase.feature_enabled_app_command_predicate(self.feature_name)
-        )
 
     @abstractmethod
     async def _delete_user_data(
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
-    @app_commands.command(
-        name=locale_str("delete"),
-        description=locale_str(
-            "Delete your registration data for this feature in this channel."
-        ),
-    )
-    async def delete(self, interaction: Interaction) -> None:
+    async def delete_callback(self, interaction: Interaction) -> None:
         """
         Delete the user's data for this feature in this channel.
         """
