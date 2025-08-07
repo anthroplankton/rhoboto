@@ -257,7 +257,7 @@ class FeatureChannelBase(
             )
             raise ValueError(msg)
 
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
 
         feature_channel = await FeatureChannel.get(
             guild_id=interaction.guild.id,
