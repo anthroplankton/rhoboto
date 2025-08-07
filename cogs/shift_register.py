@@ -190,8 +190,11 @@ class ShiftRegister(
         day_number: int,
         month: int,
         day: int,
+        deadline_day: int,
         deadline_hour: int,
+        draft_day: int,
         draft_hour: int,
+        final_day: int,
         final_hour: int,
     ) -> None:
         month_name = calendar.month_name[month]
@@ -207,8 +210,11 @@ class ShiftRegister(
                     month_name=month_name,
                     month=month,
                     day=day,
+                    deadline_day=deadline_day,
                     deadline_hour=deadline_hour,
+                    draft_day=draft_day,
                     draft_hour=draft_hour,
+                    final_day=final_day,
                     final_hour=final_hour,
                 )
                 for text in info_text.values()
@@ -223,9 +229,9 @@ Shift Entry Time Slot: 【4-28 (JST)】
 - If you have requests such as "no consecutive shifts," "no skipping," or "no encore," please include them together. (If you do not specify "up to X consecutive hours," all submitted time slots may be adopted. Please be aware.)
 - After the entry deadline, automatic processing will stop. If you wish to make changes, or if you haven’t submitted your shift yet, please feel free to mention me in the channel before the shift for the day starts. Additional submissions are always welcome.
 
-Entry Deadline ⇒ {day}th, {deadline_hour}:00 (JST)
-Draft Shift ⇒ {day}th, {draft_hour}:00 (JST)
-Final Shift ⇒ {day}th, {final_hour}:00 (JST)
+Entry Deadline ⇒ {deadline_day}th, {deadline_hour}:00 (JST)
+Draft Shift ⇒ {draft_day}th, {draft_hour}:00 (JST)
+Final Shift ⇒ {final_day}th, {final_hour}:00 (JST)
 """
 
     info_text_ja = """🐧 **{day_number}日目（{month}月{day}日）シフト登録のお知らせ** 🐧
@@ -235,9 +241,9 @@ Final Shift ⇒ {day}th, {final_hour}:00 (JST)
 - 連続、飛び、アンコ不可などの要望がありましたら併せてご記入ください（「連続〇時間まで」の記載がない場合、提出していただいた時間全てを採用させていただく場合がございます。ご注意ください。）
 - 募集〆切後は自動処理を停止いたします。当日シフトが始まる前まで、修正をご希望の場合や、まだ提出されていない方も、どうぞご遠慮なくチャンネルで私にメンションしてご連絡ください。追加提出も歓迎いたします。
 
-募集〆 ⇒ {day}日{deadline_hour}時 (JST)
-仮シフト ⇒ {day}日{draft_hour}時 (JST)
-確定シフト ⇒ {day}日{final_hour}時 (JST)
+募集〆 ⇒ {deadline_day}日{deadline_hour}時 (JST)
+仮シフト ⇒ {draft_day}日{draft_hour}時 (JST)
+確定シフト ⇒ {final_day}日{final_hour}時 (JST)
 """
 
     info_text_zh_tw = """- 不設待機時段
