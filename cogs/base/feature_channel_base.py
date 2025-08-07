@@ -280,9 +280,11 @@ class FeatureChannelBase(
             "zh_tw": self.help_text_zh_tw,
             "ja": self.help_text_ja,
         }
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
         for text in help_text.values():
             await interaction.followup.send(
-                text.format(sheet_config.sheet_url), ephemeral=False
+                text.format(bot=bot_mention, sheet_url=sheet_config.sheet_url),
+                ephemeral=False,
             )
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
@@ -576,6 +578,8 @@ class FeatureChannelUserBase(
         else:
             context = help_text_en
 
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
         await interaction.response.send_message(
-            context.format(sheet_config.sheet_url), ephemeral=True
+            context.format(bot=bot_mention, sheet_url=sheet_config.sheet_url),
+            ephemeral=True,
         )
