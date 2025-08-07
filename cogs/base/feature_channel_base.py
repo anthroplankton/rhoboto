@@ -5,7 +5,6 @@ from abc import ABCMeta, abstractmethod
 from typing import TYPE_CHECKING, Callable, Generic, TypeVar
 
 from discord import Interaction, Message, app_commands
-from discord.app_commands import locale_str
 from discord.ext import commands
 
 from bot import config
@@ -95,8 +94,13 @@ class FeatureChannelBase(
         self.bot = bot
         self.logger = logging.getLogger(self.__class__.__name__)
         self.context_menu = app_commands.ContextMenu(
-            name=f"{self.feature_name} upsert", callback=self.on_message_context
+            name=f"{self.feature_name} upsert",
+            callback=self.upsert_from_content_menu,
         )
+        self.context_menu.add_check(
+            self.feature_enabled_app_command_predicate(self.feature_name)
+        )
+        self.context_menu.error(self.cog_app_command_error)
         bot.tree.add_command(self.context_menu)
 
     @abstractmethod
@@ -111,7 +115,8 @@ class FeatureChannelBase(
         msg = "Subclasses must implement this method."
         raise NotImplementedError(msg)
 
-    async def on_message_context(
+    @app_commands.default_permissions(administrator=True, manage_channels=True)
+    async def upsert_from_content_menu(
         self, interaction: Interaction, message: Message
     ) -> None:
         """
