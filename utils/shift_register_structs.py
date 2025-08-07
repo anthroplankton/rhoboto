@@ -23,6 +23,8 @@ class Period:
     def __init__(self, start: int, end: int) -> None:
         self.start = start % 24
         self.end = end % 24
+        if self.start > self.end or (self.start == self.end and start < end):
+            self.end += 24
 
     def __iter__(self) -> Generator[int, None, None]:
         start = self.start
@@ -162,7 +164,9 @@ class ShiftParser:
         )
 
     @classmethod
-    def parse_lines(cls, user_info: UserInfo, lines: list[str]) -> Shift:
+    def parse_lines(
+        cls, user_info: UserInfo, lines: list[str]
+    ) -> tuple[Shift, list[Period]]:
         """
         Parse multiple lines into a Shift object.
 
@@ -174,18 +178,20 @@ class ShiftParser:
             Shift: Parsed Shift object.
         """
         matches = (cls.PATTERN.finditer(line) for line in lines)
-        shifts = set().union(
-            *(
-                Period(int(m.group("start")), int(m.group("end")))
-                for match in matches
-                for m in match
-            )
-        )
-        return Shift(
-            username=user_info.username,
-            display_name=user_info.display_name,
-            original_message=" / ".join(lines),
-            shifts=shifts,
+        periods = [
+            Period(int(m.group("start")), int(m.group("end")))
+            for match in matches
+            for m in match
+        ]
+        shifts = set().union(*periods)
+        return (
+            Shift(
+                username=user_info.username,
+                display_name=user_info.display_name,
+                original_message=" / ".join(lines),
+                shifts=shifts,
+            ),
+            periods,
         )
 
 

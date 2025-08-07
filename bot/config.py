@@ -23,6 +23,7 @@ class Config:
 
     DEFAULT_EMBED_COLOR = 0x99CCFF
     PROCESSING_EMOJI = "<:haruka_math:1402204882492063825>"
+    CONFUSED_EMOJI = "<:haruka_confused:1402850801608556574>"
 
 
 config = Config()

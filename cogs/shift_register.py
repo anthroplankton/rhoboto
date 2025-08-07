@@ -13,7 +13,7 @@ from components.ui_shift_register import (
 from models.feature_channel import FeatureChannel
 from utils.key_async_lock import KeyAsyncLock
 from utils.shift_register_manager import ShiftRegisterManager
-from utils.shift_register_structs import Shift, ShiftParser
+from utils.shift_register_structs import Period, Shift, ShiftParser
 from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 
 
 class ShiftRegister(
-    FeatureChannelBase[ShiftRegisterManager, Shift], group_name="shift_register"
+    FeatureChannelBase[ShiftRegisterManager, Shift | list[Period]],
+    group_name="shift_register",
 ):
 
     feature_name = "shift_register"
@@ -82,7 +83,9 @@ class ShiftRegister(
             await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
     @override
-    async def process_upsert_from_message(self, message: Message) -> Shift | None:
+    async def process_upsert_from_message(
+        self, message: Message
+    ) -> Shift | list[Period] | None:
         """
         Listen for messages to provide a button for shift register setup/edit.
         This is used in channels where the feature is enabled.
@@ -107,8 +110,10 @@ class ShiftRegister(
             username=message.author.name,
             display_name=message.author.display_name,
         )
-        shift = ShiftParser.parse_lines(user_info, message.content.splitlines())
-        if not shift:
+        shift, periods = ShiftParser.parse_lines(
+            user_info, message.content.splitlines()
+        )
+        if not periods:
             return None
 
         self.logger.info(
@@ -119,6 +124,10 @@ class ShiftRegister(
             message.author.display_name,
             shift,
         )
+
+        if not shift:
+            await message.add_reaction(config.CONFUSED_EMOJI)
+            return periods
 
         feature_channel = await FeatureChannel.get_or_none(
             guild_id=message.guild.id,
