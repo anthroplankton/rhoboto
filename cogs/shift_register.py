@@ -197,6 +197,29 @@ class ShiftRegister(
         final_day: int,
         final_hour: int,
     ) -> None:
+        if interaction.channel is None or interaction.guild is None:
+            msg = (
+                "Interaction channel or guild is None. "
+                "Cannot proceed with help command."
+            )
+            raise ValueError(msg)
+
+        feature_channel = await FeatureChannel.get(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            feature_name=self.feature_name,
+        )
+
+        manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
+
+        sheet_config = await manager.get_sheet_config_or_none()
+        if sheet_config is None:
+            await interaction.followup.send(
+                content=f"`{self.feature_name}` is not configured for this channel.",
+                ephemeral=True,
+            )
+            return
+
         month_name = calendar.month_name[month]
         info_text = {
             "en": self.info_text_en,
@@ -206,6 +229,7 @@ class ShiftRegister(
         await interaction.response.send_message(
             "\n".join(
                 text.format(
+                    bot=self.bot.user.mention if self.bot.user is not None else "@bot",
                     day_number=day_number,
                     month_name=month_name,
                     month=month,
@@ -216,6 +240,7 @@ class ShiftRegister(
                     draft_hour=draft_hour,
                     final_day=final_day,
                     final_hour=final_hour,
+                    sheet_url=sheet_config.sheet_url,
                 )
                 for text in info_text.values()
             ),
@@ -232,6 +257,8 @@ Shift Entry Time Slot: 【4-28 (JST)】
 Entry Deadline ⇒ {deadline_day}th, {deadline_hour}:00 (JST)
 Draft Shift ⇒ {draft_day}th, {draft_hour}:00 (JST)
 Final Shift ⇒ {final_day}th, {final_hour}:00 (JST)
+
+After registration, {bot} will automatically process your shifts and record the results in [Google Sheets]({sheet_url}) for you to view and confirm.
 """
 
     info_text_ja = """🐧 **{day_number}日目（{month}月{day}日）シフト登録のお知らせ** 🐧
@@ -244,12 +271,15 @@ Final Shift ⇒ {final_day}th, {final_hour}:00 (JST)
 募集〆 ⇒ {deadline_day}日{deadline_hour}時 (JST)
 仮シフト ⇒ {draft_day}日{draft_hour}時 (JST)
 確定シフト ⇒ {final_day}日{final_hour}時 (JST)
+
+登録後、{bot}が自動で処理し、結果を [Google Sheets]({sheet_url}) に記録しますので、確認・閲覧できます。
 """
 
     info_text_zh_tw = """- 不設待機時段
 - 如果「不可連續、跳班、安可」，請一併填寫（若未註明「連續〇小時為限」，則提交的所有時段可能都會採用，請特別注意）
 - 募集截止後將停止自動解析。在當日班表開始前，如需修改請在頻道 tag 我訊息，想要再提出班表也沒問題。
 """
+
 
     @app_commands.command(
         name="help",
