@@ -21,7 +21,7 @@ class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
                 DataFrame containing worksheet data.
                 Empty if worksheet is empty.
         """
-        values = await self.get_all_values()
+        values = await self.get(value_render_option="FORMULA")
         if not values:
             return pd.DataFrame()
         return pd.DataFrame(values[1:], columns=values[0])
@@ -35,7 +35,7 @@ class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
         """
         df = df.fillna("")
         values = [df.columns.tolist(), *df.to_numpy().tolist()]
-        await self.update(values)
+        await self.update(values, raw=False)
 
 
 class GoogleSheet:
