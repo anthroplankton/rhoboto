@@ -165,3 +165,6 @@ bot/service_account.json
 # Rotated log files (e.g., app.log.1, app.log.2, gzipped archives)
 *.log.[0-9]*
 *.log.*.gz
+
+# Project runtime data (SQLite DB, logs, generated artifacts)
+data/
