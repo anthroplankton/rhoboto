@@ -24,7 +24,18 @@ class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
         values = await self.get(value_render_option="FORMULA")
         if not values:
             return pd.DataFrame()
-        return pd.DataFrame(values[1:], columns=values[0])
+
+        header = values[0]
+        expected_cols = len(header)
+        data = values[1:]
+
+        # Pad rows with empty strings to match the header length
+        # gspread omits trailing empty cells, which causes pandas to fail
+        for row in data:
+            if len(row) < expected_cols:
+                row.extend([""] * (expected_cols - len(row)))
+
+        return pd.DataFrame(data, columns=header)
 
     async def update_from_dataframe(self, df: pd.DataFrame) -> None:
         """
