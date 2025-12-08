@@ -222,8 +222,8 @@ class ShiftRegister(
 
         month_name = calendar.month_name[month]
         info_text = {
-            "en": self.info_text_en,
-            "zh_tw": self.info_text_zh_tw,
+            # "en": self.info_text_en,
+            # "zh_tw": self.info_text_zh_tw,
             "ja": self.info_text_ja,
         }
         await interaction.response.send_message(
