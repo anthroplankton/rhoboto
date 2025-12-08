@@ -50,7 +50,7 @@ class Team(
         ),
     )
     @app_commands.check(
-            FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
     )
     async def delete(self, interaction: Interaction) -> None:
         await self.delete_callback(interaction)

@@ -284,7 +284,7 @@ After registration, {bot} will automatically process your teams and record the r
 例：
 ```
 150/740/33.4 これは内部編成
-140/680/35.3 HP判定なし
+140/680/35.3 裏ライフ依存1枚
 150/700/39 アンコール、その他備考
 ```
 順番は問いません。{bot}が自動で判定します：

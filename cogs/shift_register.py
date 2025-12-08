@@ -280,7 +280,6 @@ After registration, {bot} will automatically process your shifts and record the 
 - 募集截止後將停止自動解析。在當日班表開始前，如需修改請在頻道 tag 我訊息，想要再提出班表也沒問題。
 """
 
-
     @app_commands.command(
         name="help",
         description="Show the all language how to register your data for this feature.",

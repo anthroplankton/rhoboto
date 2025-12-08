@@ -160,7 +160,7 @@ class EncoreRoleMultiSelect(Select):
             1384730491269156995,
             1384731871082184925,
             1384732120311795822,
-            1384732256974671973
+            1384732256974671973,
         ]
         options = [
             SelectOption(
@@ -168,7 +168,8 @@ class EncoreRoleMultiSelect(Select):
                 value=str(role.id),
                 default=role.id in encore_role_ids,
             )
-            for role in roles if role.id in hardcoded_role_ids
+            for role in roles
+            if role.id in hardcoded_role_ids
         ]
         super().__init__(
             placeholder="🔧 Select Encore Roles",

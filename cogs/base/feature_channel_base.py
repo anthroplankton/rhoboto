@@ -276,8 +276,8 @@ class FeatureChannelBase(
             return
 
         help_text = {
-            "en": self.help_text_en,
-            "zh_tw": self.help_text_zh_tw,
+            # "en": self.help_text_en,
+            # "zh_tw": self.help_text_zh_tw,
             "ja": self.help_text_ja,
         }
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
