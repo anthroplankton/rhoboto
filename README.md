@@ -10,16 +10,20 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 - **Settings & UI**: Uses Discord Modal/View interactions. All settings/edit commands require both administrator and manage_channels permissions.
 
 ## Quick Start
-1. Install dependencies:
+1. Install uv if needed:
    ```shell
-   pip install -r requirements.txt
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
-2. Configure environment variables (can use a `.env` file):
+2. Install dependencies:
+   ```shell
+   uv sync
+   ```
+3. Configure environment variables (can use a `.env` file):
    - `DISCORD_TOKEN`: Your Discord Bot Token
    - `GOOGLE_SERVICE_ACCOUNT_PATH`: Path to your Google service account JSON
-3. Start the bot:
+4. Start the bot:
    ```shell
-   python main.py
+   uv run python main.py
    ```
 
 ## Main Features
@@ -32,6 +36,12 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 - [Black](https://github.com/psf/black) (line length 88, Python 3.13)
 - [Ruff](https://github.com/astral-sh/ruff) (all rules except D, COM812)
 - Google Python style docstrings
+
+Run local checks with:
+```shell
+uv run ruff check --no-fix .
+uv run black --check main.py bot cogs components models utils
+```
 
 ## Key Files
 - `main.py`: Entrypoint, auto-loads all cogs
@@ -48,4 +58,3 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 
 ---
 For detailed developer conventions, see `.github/copilot-instructions.md`.
-
