@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABCMeta, abstractmethod
-from typing import TYPE_CHECKING, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 from discord import Interaction, Message, app_commands
 from discord.ext import commands
@@ -11,9 +11,12 @@ from bot import config
 from components.ui_feature_channel import DisableAndClearConfirmView
 from models.feature_channel import FeatureChannel
 from utils.manager_base import ManagerBase
+from utils.message_templates import locale_to_template_code, render_message_template
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from bot import Rhoboto
     from utils.key_async_lock import KeyAsyncLock
 
@@ -42,7 +45,6 @@ class FeatureNotEnabled(commands.CheckFailure, app_commands.CheckFailure):
 
 
 class FeatureChannelErrorHandler:
-
     async def cog_command_error(self, ctx: commands.Context, error: Exception) -> None:
         """Handle command errors for this cog."""
         if isinstance(error, FeatureNotEnabled):
@@ -240,9 +242,7 @@ class FeatureChannelBase(
                 "No response received. Operation timed out.", ephemeral=True
             )
 
-    help_text_en: str
-    help_text_ja: str
-    help_text_zh_tw: str
+    help_template_key: str
 
     async def _help_callback(self, interaction: Interaction) -> None:
         """
@@ -275,17 +275,16 @@ class FeatureChannelBase(
             )
             return
 
-        help_text = {
-            # "en": self.help_text_en,
-            # "zh_tw": self.help_text_zh_tw,
-            "ja": self.help_text_ja,
-        }
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
-        for text in help_text.values():
-            await interaction.followup.send(
-                text.format(bot=bot_mention, sheet_url=sheet_config.sheet_url),
-                ephemeral=False,
-            )
+        await interaction.followup.send(
+            render_message_template(
+                self.help_template_key,
+                "ja",
+                bot=bot_mention,
+                sheet_url=sheet_config.sheet_url,
+            ),
+            ephemeral=False,
+        )
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
         """
@@ -539,9 +538,7 @@ class FeatureChannelUserBase(
     async def send_help_message(
         self,
         interaction: Interaction,
-        help_text_en: str,
-        help_text_ja: str,
-        help_text_zh_tw: str,
+        template_key: str,
     ) -> None:
         """
         Show help for team registration.
@@ -553,6 +550,8 @@ class FeatureChannelUserBase(
                 "Cannot proceed with help command."
             )
             raise ValueError(msg)
+
+        await interaction.response.defer(ephemeral=True)
 
         feature_channel = await FeatureChannel.get(
             guild_id=interaction.guild.id,
@@ -570,16 +569,14 @@ class FeatureChannelUserBase(
             )
             return
 
-        locale = interaction.locale.value
-        if locale.startswith("zh"):
-            context = help_text_zh_tw
-        elif locale.startswith("ja"):
-            context = help_text_ja
-        else:
-            context = help_text_en
-
+        locale = locale_to_template_code(interaction.locale.value)
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
-        await interaction.response.send_message(
-            context.format(bot=bot_mention, sheet_url=sheet_config.sheet_url),
+        await interaction.followup.send(
+            render_message_template(
+                template_key,
+                locale,
+                bot=bot_mention,
+                sheet_url=sheet_config.sheet_url,
+            ),
             ephemeral=True,
         )

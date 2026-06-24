@@ -9,7 +9,6 @@ from utils.google_sheets import GoogleSheet
 from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
-
     from models.feature_channel import FeatureChannel
 
 TSheetConfig = TypeVar("TSheetConfig", bound=SheetConfigBase)
@@ -30,7 +29,6 @@ class SheetConfigNotFoundError(Exception):
 
 
 class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
-
     SheetConfigType: type[TSheetConfig]
     GoogleSheetsMetadataType: type[TGoogleSheetsMetadata]
 
@@ -153,10 +151,6 @@ class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
         metadata: TGoogleSheetsMetadata,
         counts: dict[type[WorksheetMetadata], int] | None = None,
     ) -> TGoogleSheetsMetadata:
-
-        # if all(ws.worksheet is not None for ws in metadata):
-        #     return metadata
-
         ensured_metadata = self.GoogleSheetsMetadataType.assign_missing_default_titles(
             metadata, counts
         )

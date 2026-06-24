@@ -25,9 +25,11 @@ class Config:
     PROCESSING_EMOJI = "<:haruka_math:1402204882492063825>"
     CONFUSED_EMOJI = "<:haruka_confused:1402850801608556574>"
 
+    def validate_runtime(self) -> None:
+        """Validate settings required to start the bot process."""
+        if not self.DISCORD_TOKEN:
+            error_message = "DISCORD_TOKEN is required"
+            raise ValueError(error_message)
+
 
 config = Config()
-
-if not config.DISCORD_TOKEN:
-    error_message = "DISCORD_TOKEN is required"
-    raise ValueError(error_message)

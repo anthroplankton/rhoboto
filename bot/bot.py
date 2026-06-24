@@ -49,10 +49,11 @@ class Rhoboto(commands.Bot):
             name (str): The module name of the extension to load (e.g., 'cogs.hello').
         """
         try:
-            await super().load_extension(name)
+            await super().load_extension(name, package=package)
             logger.info("Loaded cog: `%s`", name)
         except Exception:
             logger.exception("Failed to load cog `%s`", name)
+            raise
 
     @override
     async def setup_hook(self) -> None:

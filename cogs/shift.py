@@ -21,7 +21,6 @@ class Shift(
     ],
     group_name=locale_str("shift"),
 ):
-
     feature_name = ShiftRegister.feature_name
 
     FeatureChannelType = ShiftRegister
@@ -67,9 +66,7 @@ class Shift(
         """
         await self.send_help_message(
             interaction,
-            ShiftRegister.help_text_en,
-            ShiftRegister.help_text_ja,
-            ShiftRegister.help_text_zh_tw,
+            ShiftRegister.help_template_key,
         )
 
 

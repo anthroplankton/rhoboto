@@ -20,6 +20,8 @@ dependencies = [
 dev = [
     "black==25.1.0",
     "pre-commit==4.2.0",
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
     "ruff==0.12.4",
 ]
 
@@ -36,7 +38,13 @@ fix = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D", "COM812"]
+ignore = ["D", "COM812", "UP046"]
+
+[tool.ruff.lint.per-file-ignores]
+"cogs/shift_register.py" = ["PLR0913"]
+"components/ui_shift_register.py" = ["PLR0913"]
+"components/ui_team_register.py" = ["PLR0913"]
+"tests/**/*.py" = ["S101"]
 
 [tool.ruff.format]
 docstring-code-format = true

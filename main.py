@@ -14,6 +14,8 @@ logger = logger.setup(
     },
 )
 
+config.validate_runtime()
+
 
 def get_cogs_modules(package: str = "cogs") -> list[str]:
     cogs_path = Path(package)

@@ -19,14 +19,13 @@ if TYPE_CHECKING:
 
 
 class Period:
-
     def __init__(self, start: int, end: int) -> None:
         self.start = start % 24
         self.end = end % 24
         if self.start > self.end or (self.start == self.end and start < end):
             self.end += 24
 
-    def __iter__(self) -> Generator[int, None, None]:
+    def __iter__(self) -> Generator[int]:
         start = self.start
         end = self.end
         if end < start:
@@ -40,7 +39,6 @@ class Period:
 
 @dataclass
 class Shift(OriginalMessage, UserInfo):
-
     shifts: InitVar[set[int]]
 
     def __post_init__(self, shifts: set[int]) -> None:
@@ -64,7 +62,7 @@ class Shift(OriginalMessage, UserInfo):
 
     def __repr__(self) -> str:
         ranges = self._merge_ranges()
-        shifts = ", ".join(f"{start}-{end+1}" for start, end in ranges)
+        shifts = ", ".join(f"{start}-{end + 1}" for start, end in ranges)
         return f"Shift({self.user}, shifts={shifts})"
 
     def __bool__(self) -> bool:
@@ -160,7 +158,9 @@ class ShiftParser:
         return (
             hour + 24
             if hour < cls.SPLIT_HOUR
-            else hour if hour < cls.SPLIT_HOUR + 24 else hour - 24
+            else hour
+            if hour < cls.SPLIT_HOUR + 24
+            else hour - 24
         )
 
     @classmethod
@@ -229,7 +229,7 @@ class EntryWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for the summary worksheet.
 
@@ -274,7 +274,7 @@ class DraftWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for the summary worksheet.
 
@@ -319,7 +319,7 @@ class FinalScheduleWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for the summary worksheet.
 
@@ -366,7 +366,7 @@ class ShiftRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
             )
             raise ValueError(msg)
         for (ws_attr, ws_type), ws in zip(
-            self.WORKSHEET_METADATA_TYPES.items(), self.worksheets
+            self.WORKSHEET_METADATA_TYPES.items(), self.worksheets, strict=False
         ):
             new = ws_type(ws.id, ws.title, ws.worksheet)
             setattr(self, ws_attr, new)
@@ -405,7 +405,6 @@ class ShiftRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
 
 
 class EntryWorksheetContent(WorksheetContentBase[Shift]):
-
     COLUMNS: ClassVar[list[str]] = (
         [f.name for f in dataclasses.fields(UserInfo)]
         + [str(hour) for hour in ShiftParser.HOUR_LABELS]

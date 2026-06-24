@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, overload, override
 from utils.structs_base import validate_anchor_cell
 
 if TYPE_CHECKING:
-
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
@@ -20,7 +19,6 @@ from utils.shift_register_structs import (
 class ShiftRegisterManager(
     ManagerBase[ShiftRegisterConfig, ShiftRegisterGoogleSheetsMetadata]
 ):
-
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 

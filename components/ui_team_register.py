@@ -153,23 +153,23 @@ class EncoreRoleMultiSelect(Select):
     ) -> None:
         roles = roles or []
         encore_role_ids = encore_role_ids or []
-        roles = [r for r in roles if not r.is_default() and not r.managed]
-        hardcoded_role_ids = [
-            1384728889233768560,
-            1384728806857773096,
-            1384730491269156995,
-            1384731871082184925,
-            1384732120311795822,
-            1384732256974671973,
-        ]
+        encore_role_id_set = set(encore_role_ids)
+        roles = sorted(
+            (r for r in roles if not r.is_default() and not r.managed),
+            key=lambda role: (
+                role.id not in encore_role_id_set,
+                -role.position,
+                role.name.casefold(),
+                role.id,
+            ),
+        )[:25]
         options = [
             SelectOption(
                 label=role.name,
                 value=str(role.id),
-                default=role.id in encore_role_ids,
+                default=role.id in encore_role_id_set,
             )
             for role in roles
-            if role.id in hardcoded_role_ids
         ]
         super().__init__(
             placeholder="🔧 Select Encore Roles",
@@ -339,7 +339,7 @@ def build_summary_embed(summary_dataframe: pd.DataFrame) -> Embed:
         pairs = [
             f"`{value:.0f}/{power:.1f}`"
             for value, power in it.batched(
-                row.drop(["display_name", "encore_roles"]), n=2
+                row.drop(["display_name", "encore_roles"]), n=2, strict=False
             )
             if pd.notna(value) and pd.notna(power)
         ]

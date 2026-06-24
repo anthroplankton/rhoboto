@@ -70,9 +70,7 @@ class Team(
         """
         await self.send_help_message(
             interaction,
-            TeamRegister.help_text_en,
-            TeamRegister.help_text_ja,
-            TeamRegister.help_text_zh_tw,
+            TeamRegister.help_template_key,
         )
 
 

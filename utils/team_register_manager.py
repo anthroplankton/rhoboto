@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, overload, override
 import pandas as pd
 
 if TYPE_CHECKING:
-
     from discord import Member, Role
 
     from utils.google_sheets import AsyncioGspreadWorksheet
@@ -29,7 +28,6 @@ from utils.team_register_structs import (
 class TeamRegisterManager(
     ManagerBase[TeamRegisterConfig, TeamRegisterGoogleSheetsMetadata]
 ):
-
     SheetConfigType = TeamRegisterConfig
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
 
@@ -320,7 +318,7 @@ class TeamRegisterManager(
         new = SummaryWorksheetContent.generate_from_team_dataframes(
             team_df_by_titles={
                 ws.title: df
-                for ws, df in zip(metadata.team_worksheets, team_dfs)
+                for ws, df in zip(metadata.team_worksheets, team_dfs, strict=False)
                 if ws.title is not None
             }
         )

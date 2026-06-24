@@ -71,8 +71,7 @@ class ShiftRegisterSheetModal(Modal):
         self.final_schedule_anchor_cell: TextInput = TextInput(
             label="Final Schedule Anchor Cell",
             placeholder=(
-                "e.g. A1. "
-                "Will be used to anchor the final schedule in the worksheet."
+                "e.g. A1. Will be used to anchor the final schedule in the worksheet."
             ),
             default=final_schedule_anchor_cell,
             required=True,

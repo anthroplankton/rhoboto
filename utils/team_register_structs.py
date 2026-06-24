@@ -142,7 +142,9 @@ class Team(OriginalMessage, TeamInfo, UserInfo):
         )
 
     @classmethod
-    def compute_effective_skill_value(cls, leader_skill, internal_skill):
+    def compute_effective_skill_value(
+        cls, leader_skill: float, internal_skill: float
+    ) -> float:
         return leader_skill + (internal_skill - leader_skill) / 5
 
 
@@ -362,7 +364,7 @@ class TeamWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for team worksheets.
 
@@ -409,7 +411,7 @@ class SummaryWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for the summary worksheet.
 
@@ -478,7 +480,6 @@ class TeamRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
 
 
 class TeamWorksheetContent(WorksheetContentBase[Team]):
-
     COLUMNS: ClassVar[list[str]] = [f.name for f in dataclasses.fields(Team)]
     DTYPES: ClassVar[dict[str, str]] = {
         f.name: str(f.type) for f in dataclasses.fields(Team)
@@ -488,7 +489,6 @@ class TeamWorksheetContent(WorksheetContentBase[Team]):
 
 
 class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
-
     COLUMNS: ClassVar[list[str]] = [
         f.name for f in dataclasses.fields(UserInfoWithEncoreRoles)
     ]
