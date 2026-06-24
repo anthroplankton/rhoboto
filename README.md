@@ -39,7 +39,8 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 
 Run local checks with:
 ```shell
-uv run ruff check --no-fix .
+uv run ruff check .
+uv run ruff format --check .
 uv run black --check main.py bot cogs components models utils
 ```
 
@@ -57,4 +58,4 @@ uv run black --check main.py bot cogs components models utils
 - Debug using Discord UI and log files
 
 ---
-For detailed developer conventions, see `.github/copilot-instructions.md`.
+For detailed developer conventions, see `AGENTS.md`.
