@@ -8,7 +8,7 @@ from models.feature_channel import FeatureChannel
 
 
 class SheetConfigBase(models.Model, TimestampMixin):
-    id: int = fields.IntField(pk=True)
+    id: int = fields.IntField(primary_key=True)
     feature_channel: ForeignKeyRelation[FeatureChannel] = fields.ForeignKeyField(
         "models.FeatureChannel"
     )
