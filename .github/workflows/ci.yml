@@ -40,7 +40,15 @@ jobs:
         run: uv run ruff format --check .
 
       - name: Run tests
-        run: uv run pytest
+        run: >
+          uv run pytest
+          --cov=bot
+          --cov=cogs
+          --cov=components
+          --cov=models
+          --cov=utils
+          --cov-report=term-missing
+          --cov-fail-under=35
 
       - name: Compile Python modules
         run: uv run python -m compileall -q main.py bot cogs components models utils

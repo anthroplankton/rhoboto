@@ -36,3 +36,23 @@ async def test_load_extension_re_raises_startup_failures(
             await bot.load_extension("cogs.missing", package="pkg")
     finally:
         await bot.close()
+
+
+@pytest.mark.asyncio
+async def test_close_uses_configured_db_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    async def fake_close_db(db_url: str) -> None:
+        calls.append(db_url)
+
+    async def fake_bot_close(self: commands.Bot) -> None:
+        assert self is bot
+        calls.append("super.close")
+
+    bot = Rhoboto(command_prefix="$", db_url="sqlite://:memory:", initial_cogs=[])
+    monkeypatch.setattr("bot.bot.close_db", fake_close_db)
+    monkeypatch.setattr(commands.Bot, "close", fake_bot_close)
+
+    await bot.close()
+
+    assert calls == ["sqlite://:memory:", "super.close"]

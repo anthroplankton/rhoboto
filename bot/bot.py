@@ -6,10 +6,9 @@ from typing import override
 
 from discord import Intents
 from discord.ext import commands
-from tortoise import Tortoise
 
 from bot.translator import Translator
-from utils.db import init_db
+from utils.db import close_db, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +85,6 @@ class Rhoboto(commands.Bot):
         Closes Tortoise ORM connections and shuts down the Discord bot.
         """
         logger.info("Closing Tortoise ORM connections...")
-        await Tortoise.close_connections()
+        await close_db(self.db_url)
         logger.info("Tortoise ORM connections closed. Shutting down Discord bot.")
         await super().close()
