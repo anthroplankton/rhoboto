@@ -10,12 +10,20 @@ class FakeDiscordResponse:
     def __init__(self) -> None:
         self.deferred: list[bool] = []
         self.messages: list[tuple[str | None, dict[str, object]]] = []
+        self.modals: list[object] = []
+        self.edits: list[tuple[str | None, dict[str, object]]] = []
 
     async def defer(self, *, ephemeral: bool = False) -> None:
         self.deferred.append(ephemeral)
 
     async def send_message(self, content: str | None = None, **kwargs: object) -> None:
         self.messages.append((content, kwargs))
+
+    async def send_modal(self, modal: object) -> None:
+        self.modals.append(modal)
+
+    async def edit_message(self, content: str | None = None, **kwargs: object) -> None:
+        self.edits.append((content, kwargs))
 
 
 class FakeDiscordFollowup:
@@ -26,10 +34,43 @@ class FakeDiscordFollowup:
         self.messages.append((content, kwargs))
 
 
+@dataclass(frozen=True)
+class FakePermissions:
+    administrator: bool = True
+    manage_channels: bool = True
+
+
+class FakeGuild:
+    def __init__(
+        self, *, guild_id: int = 111, roles: list[object] | None = None
+    ) -> None:
+        self.id = guild_id
+        self.roles = roles or []
+
+    def get_role(self, role_id: int) -> object | None:
+        return next((role for role in self.roles if role.id == role_id), None)
+
+
 class FakeInteraction:
-    def __init__(self, *, locale: str = "en-US") -> None:
+    def __init__(
+        self,
+        *,
+        locale: str = "en-US",
+        administrator: bool = True,
+        manage_channels: bool = True,
+        guild: object | None = None,
+        roles: list[object] | None = None,
+    ) -> None:
         self.channel = SimpleNamespace(id=222)
-        self.guild = SimpleNamespace(id=111)
+        self.guild = guild if guild is not None else FakeGuild(roles=roles)
+        self.user = SimpleNamespace(
+            name="alice",
+            display_name="Alice",
+            guild_permissions=FakePermissions(
+                administrator=administrator,
+                manage_channels=manage_channels,
+            ),
+        )
         self.locale = SimpleNamespace(value=locale)
         self.response = FakeDiscordResponse()
         self.followup = FakeDiscordFollowup()

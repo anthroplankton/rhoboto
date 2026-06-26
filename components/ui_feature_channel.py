@@ -2,6 +2,8 @@ import discord
 from discord import ButtonStyle, Interaction
 from discord.ui import Button, View
 
+from components.ui_permissions import require_settings_permissions
+
 
 class DisableAndClearConfirmView(View):
     """
@@ -17,6 +19,11 @@ class DisableAndClearConfirmView(View):
 
     @discord.ui.button(label="Confirm", style=ButtonStyle.danger)
     async def confirm(self, interaction: Interaction, _: Button) -> None:
+        if not await require_settings_permissions(interaction):
+            self.value = False
+            self.stop()
+            return
+
         self.value = True
         await interaction.response.edit_message(
             content="Confirmed. Clearing settings...",

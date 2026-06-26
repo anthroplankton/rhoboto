@@ -6,6 +6,7 @@ from discord import ButtonStyle, Embed, Interaction, TextStyle
 from discord.ui import Button, Modal, TextInput, View
 
 from bot import config
+from components.ui_permissions import require_settings_permissions
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
@@ -91,6 +92,9 @@ class ShiftRegisterSheetModal(Modal):
         Args:
             interaction (Interaction): Discord interaction object.
         """
+        if not await require_settings_permissions(interaction):
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         sheet_url = self.sheet_url.value
@@ -152,6 +156,9 @@ class ShiftRegisterButton(Button):
         self.final_schedule_anchor_cell = final_schedule_anchor_cell
 
     async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
         await interaction.response.send_modal(
             ShiftRegisterSheetModal(
                 shift_register_manager=self.shift_register_manager,

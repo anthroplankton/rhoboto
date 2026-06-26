@@ -8,6 +8,7 @@ from discord import ButtonStyle, Embed, Interaction, Role, SelectOption, TextSty
 from discord.ui import Button, Modal, Select, TextInput, View
 
 from bot import config
+from components.ui_permissions import require_settings_permissions
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -76,6 +77,9 @@ class TeamRegisterSheetModal(Modal):
         Args:
             interaction (Interaction): Discord interaction object.
         """
+        if not await require_settings_permissions(interaction):
+            return
+
         await interaction.response.defer(ephemeral=True)
 
         sheet_url = self.sheet_url.value
@@ -134,6 +138,9 @@ class TeamRegisterButton(Button):
         self.summary_worksheet_title = summary_worksheet_title
 
     async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
         await interaction.response.send_modal(
             TeamRegisterSheetModal(
                 team_register_manager=self.team_register_manager,
@@ -181,6 +188,9 @@ class EncoreRoleMultiSelect(Select):
         self.team_register_manager = team_register_manager
 
     async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
         role_ids = [int(role_id) for role_id in self.values]
         if interaction.guild is not None:
             roles = [interaction.guild.get_role(rid) for rid in role_ids]
