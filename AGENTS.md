@@ -42,6 +42,8 @@ Route Google Sheets work through `GoogleSheet` and the relevant manager APIs. St
 
 CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, Black format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
 
+In managed Codex sandboxes, use the repo-local cache-prefixed validation commands documented in `docs/project_setup.md` instead of the bare local command forms above.
+
 ## Coding Style & Naming Conventions
 
 Use Black formatting with 88-character lines and Ruff settings from `pyproject.toml`. Ruff enables all lint rule families except `D`, `COM812`, and `UP046`; keep imports sorted by Ruff/isort. Use Google-style docstrings for new public modules, classes, and functions where they clarify behavior. Name cogs and feature modules in snake_case, for example `team_register.py`, and keep matching managers and structs in `utils/*_manager.py` and `utils/*_structs.py`. Prefer async APIs for Discord, database, and Google Sheets work.

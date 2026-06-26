@@ -77,6 +77,24 @@ account JSON content. Do not store that JSON in git.
 - `.codex/config.toml` is intentionally tracked for repo-local Codex defaults.
   Keep personal tokens, private paths, and private conversation context out of
   that file.
+- In managed Codex sandboxes, keep the CI commands above as the project
+  contract but run uv and Black through repo-local caches to avoid host cache
+  permission or lock failures:
+
+  ```shell
+  env UV_CACHE_DIR=.cache/uv uv run ruff check --no-fix .
+  env UV_CACHE_DIR=.cache/uv uv run ruff format --check .
+  timeout 30s env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black uv run black --check --workers 1 main.py bot cogs components models utils
+  env UV_CACHE_DIR=.cache/uv uv run pytest --cov=bot --cov=cogs --cov=components --cov=models --cov=utils --cov-report=term-missing --cov-fail-under=35
+  env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q main.py bot cogs components models utils
+  ```
+
+  For Black, use the process exit code rather than the last output line: exit
+  `0` is clean, `1` means files would reformat, `123` is an internal error,
+  and timeout exit `124` is inconclusive even if the output includes `All
+  done`. If the bounded repo-wide Black check times out, run at most one
+  bounded changed-file fallback and report the repo-wide result as
+  environment-inconclusive.
 - `.planning/` is ignored local agent working memory. Records there should
   capture reusable engineering facts, neutral decisions, and validation
   evidence, not secrets, raw environment values, private identifiers, or private
