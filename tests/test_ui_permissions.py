@@ -13,6 +13,7 @@ from components.ui_team_register import (
     TeamRegisterSheetModal,
 )
 from tests.fakes import FakeInteraction, FakeRole
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 
 
 class RecordingTeamRegisterManager:
@@ -75,6 +76,28 @@ class RecordingShiftRegisterManager:
 
     async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
         self.anchor_updates.append(anchor_cell)
+
+
+class FailingTeamRegisterManager(RecordingTeamRegisterManager):
+    async def upsert_sheet_config_and_worksheets(
+        self,
+        **_: object,
+    ) -> SimpleNamespace:
+        raise GoogleSheetsError(
+            GoogleSheetsErrorKind.PERMISSION,
+            "Check the sheet sharing settings and service account access.",
+        )
+
+
+class FailingShiftRegisterManager(RecordingShiftRegisterManager):
+    async def upsert_sheet_config_and_worksheets(
+        self,
+        **_: object,
+    ) -> SimpleNamespace:
+        raise GoogleSheetsError(
+            GoogleSheetsErrorKind.INVALID_URL,
+            "Check the Google Sheet link and save the settings again.",
+        )
 
 
 def unauthorized_interaction() -> FakeInteraction:
@@ -141,6 +164,30 @@ async def test_team_modal_submit_allows_authorized_user() -> None:
     assert interaction.response.deferred == [True]
     assert len(manager.upsert_calls) == 1
     assert len(interaction.followup.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_team_modal_submit_reports_google_sheets_error_safely() -> None:
+    manager = FailingTeamRegisterManager()
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://private.sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages == [
+        (
+            "Google Sheets could not complete this action. "
+            "Check the sheet sharing settings and service account access.",
+            {"ephemeral": True},
+        )
+    ]
+    assert "private.sheet.example" not in str(interaction.followup.messages)
 
 
 @pytest.mark.asyncio
@@ -231,6 +278,33 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
     assert len(manager.upsert_calls) == 1
     assert manager.anchor_updates == ["B2"]
     assert len(interaction.followup.messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_shift_modal_submit_reports_google_sheets_error_safely() -> None:
+    manager = FailingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://private.sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.anchor_updates == []
+    assert interaction.followup.messages == [
+        (
+            "Google Sheets could not complete this action. "
+            "Check the Google Sheet link and save the settings again.",
+            {"ephemeral": True},
+        )
+    ]
+    assert "private.sheet.example" not in str(interaction.followup.messages)
 
 
 @pytest.mark.asyncio

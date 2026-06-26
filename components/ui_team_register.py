@@ -8,7 +8,9 @@ from discord import ButtonStyle, Embed, Interaction, Role, SelectOption, TextSty
 from discord.ui import Button, Modal, Select, TextInput, View
 
 from bot import config
+from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
+from utils.google_sheets_errors import GoogleSheetsError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -88,13 +90,18 @@ class TeamRegisterSheetModal(Modal):
         ]
         summary_worksheet_title = self.summary_worksheet_title.value
 
-        metadata = await self.team_register_manager.upsert_sheet_config_and_worksheets(
-            sheet_url=sheet_url,
-            team_worksheet_titles=team_worksheet_titles,
-            summary_worksheet_title=summary_worksheet_title,
-        )
-
-        team_register = await self.team_register_manager.get_sheet_config()
+        try:
+            metadata = (
+                await self.team_register_manager.upsert_sheet_config_and_worksheets(
+                    sheet_url=sheet_url,
+                    team_worksheet_titles=team_worksheet_titles,
+                    summary_worksheet_title=summary_worksheet_title,
+                )
+            )
+            team_register = await self.team_register_manager.get_sheet_config()
+        except GoogleSheetsError as exc:
+            await send_google_sheets_error(interaction, exc)
+            return
 
         roles = list(interaction.guild.roles) if interaction.guild else []
         encore_role_ids = team_register.encore_role_ids

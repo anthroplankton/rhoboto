@@ -9,7 +9,12 @@ from discord.ext import commands
 
 from bot import config
 from components.ui_feature_channel import DisableAndClearConfirmView
+from components.ui_google_sheets_errors import (
+    mark_google_sheets_message_failure,
+    send_google_sheets_error,
+)
 from models.feature_channel import FeatureChannel
+from utils.google_sheets_errors import GoogleSheetsError
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
@@ -130,7 +135,19 @@ class FeatureChannelBase(
 
         await interaction.response.defer(ephemeral=False)
 
-        result = await self.process_upsert_from_message(message)
+        try:
+            result = await self.process_upsert_from_message(message)
+        except GoogleSheetsError as exc:
+            logger = getattr(self, "logger", None)
+            bot_user = getattr(getattr(self, "bot", None), "user", None)
+            await mark_google_sheets_message_failure(
+                message,
+                bot_user,
+                exc,
+                logger,
+            )
+            await send_google_sheets_error(interaction, exc, ephemeral=False)
+            return
 
         content = (
             f"Failed to upsert for `{self.feature_name}`."
@@ -145,7 +162,15 @@ class FeatureChannelBase(
         Listen for messages to provide a button for team register setup/edit.
         This is used in channels where the feature is enabled.
         """
-        await self.process_upsert_from_message(message)
+        try:
+            await self.process_upsert_from_message(message)
+        except GoogleSheetsError as exc:
+            await mark_google_sheets_message_failure(
+                message,
+                self.bot.user,
+                exc,
+                self.logger,
+            )
 
     @abstractmethod
     async def setup_after_enable(self, interaction: Interaction) -> None:
@@ -518,8 +543,12 @@ class FeatureChannelUserBase(
             return
 
         async with self.FeatureChannelType.lock(interaction.channel.id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            await self._delete_user_data(manager, user_info, metadata)
+            try:
+                metadata = await manager.fetch_google_sheets_metadata()
+                await self._delete_user_data(manager, user_info, metadata)
+            except GoogleSheetsError as exc:
+                await send_google_sheets_error(interaction, exc)
+                return
 
             locale = interaction.locale.value
 

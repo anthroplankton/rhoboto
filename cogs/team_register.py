@@ -7,12 +7,14 @@ from discord import Interaction, Member, Message, app_commands
 
 from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
+from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_team_register import (
     TeamRegisterView,
     build_current_settings_embed,
     build_summary_embed,
 )
 from models.feature_channel import FeatureChannel
+from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import remove_reaction_if_present
 from utils.structs_base import UserInfo
@@ -60,7 +62,11 @@ class TeamRegister(
             embed = None
             view = TeamRegisterView(team_register_manager=manager)
         else:
-            metadata = await manager.fetch_google_sheets_metadata()
+            try:
+                metadata = await manager.fetch_google_sheets_metadata()
+            except GoogleSheetsError as exc:
+                await send_google_sheets_error(interaction, exc)
+                return
             roles = list(interaction.guild.roles) if interaction.guild else []
             encore_role_ids = team_register_config.encore_role_ids
             embed = build_current_settings_embed(
@@ -216,17 +222,22 @@ class TeamRegister(
             return
 
         async with self.lock(interaction.channel.id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            manager.log_missing_worksheet_warnings(metadata)
+            try:
+                metadata = await manager.fetch_google_sheets_metadata()
+                manager.log_missing_worksheet_warnings(metadata)
 
-            metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                metadata,
-                count=0,  # No teams to process, just refresh summary
-            )
+                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
+                    metadata,
+                    count=0,  # No teams to process, just refresh summary
+                )
 
-            summary_df = await manager.refresh_summary_worksheet(
-                metadata, member_by_names={m.name: m for m in interaction.guild.members}
-            )
+                summary_df = await manager.refresh_summary_worksheet(
+                    metadata,
+                    member_by_names={m.name: m for m in interaction.guild.members},
+                )
+            except GoogleSheetsError as exc:
+                await send_google_sheets_error(interaction, exc)
+                return
 
         if summary_df is None:
             await interaction.followup.send(

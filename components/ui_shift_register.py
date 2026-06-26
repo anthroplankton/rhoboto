@@ -6,7 +6,9 @@ from discord import ButtonStyle, Embed, Interaction, TextStyle
 from discord.ui import Button, Modal, TextInput, View
 
 from bot import config
+from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
+from utils.google_sheets_errors import GoogleSheetsError
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
@@ -103,12 +105,18 @@ class ShiftRegisterSheetModal(Modal):
         final_schedule_worksheet_title = self.final_schedule_worksheet_title.value
         final_schedule_anchor_cell = self.final_schedule_anchor_cell.value
 
-        metadata = await self.shift_register_manager.upsert_sheet_config_and_worksheets(
-            sheet_url=sheet_url,
-            entry_worksheet_title=entry_worksheet_title,
-            draft_worksheet_title=draft_worksheet_title,
-            final_schedule_worksheet_title=final_schedule_worksheet_title,
-        )
+        try:
+            metadata = (
+                await self.shift_register_manager.upsert_sheet_config_and_worksheets(
+                    sheet_url=sheet_url,
+                    entry_worksheet_title=entry_worksheet_title,
+                    draft_worksheet_title=draft_worksheet_title,
+                    final_schedule_worksheet_title=final_schedule_worksheet_title,
+                )
+            )
+        except GoogleSheetsError as exc:
+            await send_google_sheets_error(interaction, exc)
+            return
         await self.shift_register_manager.update_final_schedule_anchor_cell(
             final_schedule_anchor_cell
         )

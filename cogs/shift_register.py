@@ -7,11 +7,13 @@ from discord import app_commands
 
 from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
+from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_shift_register import (
     ShiftRegisterView,
     build_current_settings_embed,
 )
 from models.feature_channel import FeatureChannel
+from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.message_templates import render_message_template
 from utils.reactions import remove_reaction_if_present
@@ -64,7 +66,11 @@ class ShiftRegister(
             embed = None
             view = ShiftRegisterView(shift_register_manager=manager)
         else:
-            metadata = await manager.fetch_google_sheets_metadata()
+            try:
+                metadata = await manager.fetch_google_sheets_metadata()
+            except GoogleSheetsError as exc:
+                await send_google_sheets_error(interaction, exc)
+                return
             embed = build_current_settings_embed(
                 sheet_url=shift_register_config.sheet_url,
                 metadata=metadata,

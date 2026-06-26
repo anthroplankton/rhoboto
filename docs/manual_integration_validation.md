@@ -55,6 +55,18 @@ Pass criteria:
 | Admin guard | As the non-admin user, try a settings command. | Discord denies access or the bot returns the permission error. |  |  |
 | Callback guard | As the non-admin user, click a previously visible settings button. | The bot returns an ephemeral permission error and does not open a modal. |  |  |
 
+## Google Sheets Failure Checks
+
+Run these checks with disposable spreadsheets only. Do not paste production
+sheet links or service account details into notes.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Invalid Sheet link | Submit Team or Shift settings with a malformed or inaccessible Sheet URL. | The bot returns a safe ephemeral Google Sheets error and does not show a success settings embed. |  |  |
+| Missing sharing permission | Submit settings for a disposable spreadsheet that is not shared with the service account. | The bot asks to check sharing or service account access and does not expose credential paths, service account JSON, raw traceback, or private Sheet details. |  |  |
+| Missing worksheet | Configure settings, delete or rename one configured worksheet in the disposable spreadsheet, then run the feature settings or summary/delete command. | The bot reports a safe Google Sheets error or shows the worksheet as not found without exposing raw Google API details. |  |  |
+| Message write failure | With an invalid or inaccessible configured sheet, send a Team or Shift registration message. | The processing reaction is removed when present, a failure reaction appears, and no raw Google error is posted to the channel. |  |  |
+
 ## Team Register
 
 Use the team test channel.

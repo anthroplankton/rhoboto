@@ -1,10 +1,38 @@
 from __future__ import annotations
 
+from typing import NoReturn
+
 import gspread_asyncio
 import pandas as pd
 from async_lru import alru_cache
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
+
+from utils.google_sheets_errors import (
+    GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS,
+    GoogleSheetsError,
+    classify_google_sheets_exception,
+)
+
+
+class RhobotoGspreadClientManager(gspread_asyncio.AsyncioGspreadClientManager):
+    async def handle_gspread_error(
+        self,
+        e: Exception,
+        _method: object,
+        _args: object,
+        _kwargs: object,
+    ) -> None:
+        raise e
+
+    async def handle_requests_error(
+        self,
+        e: Exception,
+        _method: object,
+        _args: object,
+        _kwargs: object,
+    ) -> None:
+        raise e
 
 
 class AsyncioGspreadWorksheet:
@@ -39,7 +67,12 @@ class AsyncioGspreadWorksheet:
                 DataFrame containing worksheet data.
                 Empty if worksheet is empty.
         """
-        values = await self._worksheet.get(value_render_option="FORMULA")
+        try:
+            values = await self._worksheet.get(value_render_option="FORMULA")
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
         if not values:
             return pd.DataFrame()
 
@@ -64,7 +97,12 @@ class AsyncioGspreadWorksheet:
         """
         df = df.fillna("")
         values = [df.columns.tolist(), *df.to_numpy().tolist()]
-        await self._worksheet.update(values, raw=False)
+        try:
+            await self._worksheet.update(values, raw=False)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "update_worksheet")
 
 
 class GoogleSheet:
@@ -78,7 +116,7 @@ class GoogleSheet:
         """
         self.sheet_url = sheet_url
         self.service_account_path = service_account_path
-        self._agcm = gspread_asyncio.AsyncioGspreadClientManager(self._get_creds)
+        self._agcm = RhobotoGspreadClientManager(self._get_creds)
 
     @staticmethod
     def _wrap_worksheet(
@@ -95,10 +133,15 @@ class GoogleSheet:
         Returns:
             Credentials: Google API credentials for spreadsheet access.
         """
-        return Credentials.from_service_account_file(
-            self.service_account_path,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
-        )
+        try:
+            return Credentials.from_service_account_file(
+                self.service_account_path,
+                scopes=["https://www.googleapis.com/auth/spreadsheets"],
+            )
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "load_credentials")
 
     @property
     @alru_cache
@@ -109,8 +152,13 @@ class GoogleSheet:
         Returns:
             AsyncioGspreadSpreadsheet: The spreadsheet object.
         """
-        agc = await self._agcm.authorize()
-        return await agc.open_by_url(self.sheet_url)
+        try:
+            agc = await self._agcm.authorize()
+            return await agc.open_by_url(self.sheet_url)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "open_spreadsheet")
 
     async def get_worksheet(self, worksheet_id: int) -> AsyncioGspreadWorksheet | None:
         """
@@ -122,11 +170,15 @@ class GoogleSheet:
         Returns:
             AsyncioGspreadWorksheet | None: The worksheet object, or None if not found.
         """
-        sh = await self.sheet
         try:
+            sh = await self.sheet
             ws = await sh.get_worksheet_by_id(worksheet_id)
         except WorksheetNotFound:
             return None
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "get_worksheet")
         else:
             return self._wrap_worksheet(ws)
 
@@ -143,8 +195,13 @@ class GoogleSheet:
             list[AsyncioGspreadWorksheet | None]:
                 List of worksheet objects or None for not found.
         """
-        sh = await self.sheet
-        all_worksheets = await sh.worksheets()
+        try:
+            sh = await self.sheet
+            all_worksheets = await sh.worksheets()
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "get_worksheets")
         id_to_ws = {ws.id: ws for ws in all_worksheets}
         result = {}
         for ws_id in worksheet_ids:
@@ -171,13 +228,22 @@ class GoogleSheet:
         Returns:
             AsyncioGspreadWorksheet: The worksheet object.
         """
-        sh = await self.sheet
         try:
+            sh = await self.sheet
             ws = await sh.worksheet(worksheet_title)
         except WorksheetNotFound:
-            ws = await sh.add_worksheet(
-                worksheet_title, rows=default_rows, cols=default_cols
-            )
+            try:
+                ws = await sh.add_worksheet(
+                    worksheet_title, rows=default_rows, cols=default_cols
+                )
+            except GoogleSheetsError:
+                raise
+            except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+                _raise_google_sheets_error(exc, "create_worksheet")
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "get_or_create_worksheet")
         return AsyncioGspreadWorksheet(ws)
 
     async def get_or_create_worksheets(
@@ -200,16 +266,30 @@ class GoogleSheet:
             dict[str, AsyncioGspreadWorksheet]:
                 Dictionary of worksheet titles to worksheet objects.
         """
-        sh = await self.sheet
-        all_worksheets = await sh.worksheets()
+        try:
+            sh = await self.sheet
+            all_worksheets = await sh.worksheets()
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "get_or_create_worksheets")
         title_to_ws = {ws.title: ws for ws in all_worksheets}
         result = {}
         for worksheet_title in worksheet_titles:
             ws = title_to_ws.get(worksheet_title)
             if ws is None:
-                ws = await sh.add_worksheet(
-                    worksheet_title, rows=default_rows, cols=default_cols
-                )
+                try:
+                    ws = await sh.add_worksheet(
+                        worksheet_title, rows=default_rows, cols=default_cols
+                    )
+                except GoogleSheetsError:
+                    raise
+                except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+                    _raise_google_sheets_error(exc, "create_worksheet")
             wrapped_ws = AsyncioGspreadWorksheet(ws)
             result[wrapped_ws.title] = wrapped_ws
         return result
+
+
+def _raise_google_sheets_error(exc: Exception, operation: str) -> NoReturn:
+    raise classify_google_sheets_exception(exc, operation=operation) from exc
