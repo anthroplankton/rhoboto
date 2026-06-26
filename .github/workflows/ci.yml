@@ -39,6 +39,9 @@ jobs:
       - name: Check Ruff formatting
         run: uv run ruff format --check .
 
+      - name: Check Black formatting
+        run: uv run black --check --workers 1 main.py bot cogs components models utils
+
       - name: Run tests
         run: >
           uv run pytest

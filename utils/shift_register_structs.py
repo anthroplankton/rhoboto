@@ -155,13 +155,11 @@ class ShiftParser:
         Returns:
             int: Standardized hour.
         """
-        return (
-            hour + 24
-            if hour < cls.SPLIT_HOUR
-            else hour
-            if hour < cls.SPLIT_HOUR + 24
-            else hour - 24
-        )
+        if hour < cls.SPLIT_HOUR:
+            return hour + 24
+        if hour < cls.SPLIT_HOUR + 24:
+            return hour
+        return hour - 24
 
     @classmethod
     def parse_lines(

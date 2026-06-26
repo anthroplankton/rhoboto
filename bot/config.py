@@ -14,7 +14,7 @@ class Config:
     LOG_TO_FILE = os.getenv("LOG_TO_FILE", "False").lower() == "true"
     USE_RICH_LOGGING = os.getenv("USE_RICH_LOGGING", "True").lower() == "true"
     LOG_DIR = os.getenv("LOG_DIR", "data/logs")
-    LOG_FILENAME = "rhoboto.log"
+    LOG_FILENAME = os.getenv("LOG_FILENAME", "rhoboto.log")
     LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG" if BOT_ENV == "dev" else "INFO").upper()
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite://data/db.sqlite3")
     GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv(
