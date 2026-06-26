@@ -53,6 +53,7 @@ Pass criteria:
 | Bot status | Open the dev guild and confirm the bot is online. | Bot appears online and responds to slash commands. |  |  |
 | Feature list | Run `/features` in each test channel. | Embed lists configured features or states that none exist. |  |  |
 | Admin guard | As the non-admin user, try a settings command. | Discord denies access or the bot returns the permission error. |  |  |
+| Callback guard | As the non-admin user, click a previously visible settings button. | The bot returns an ephemeral permission error and does not open a modal. |  |  |
 
 ## Team Register
 
@@ -63,6 +64,8 @@ Use the team test channel.
 | Enable feature | Run `/team_register enable`. | Feature is enabled and setup prompt appears. |  |  |
 | Create settings | Open settings, enter test sheet URL, team worksheet titles, and summary worksheet title. | Bot saves settings and creates or finds worksheets. |  |  |
 | Settings embed | Run `/team_register settings`. | Embed shows worksheet titles together with worksheet IDs and the Google Sheet link. |  |  |
+| Settings callback guard | Remove permissions from the admin test user after opening the Team Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
+| Encore role callback guard | As the non-admin user, use an existing encore role select menu. | The bot returns an ephemeral permission error and does not update encore roles. |  |  |
 | Help text | Run `/team help` and `/team_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Team submission | Send lines such as `150/740/33.4 main`, `140/680/35.3 backup`, and `150/700/39 encore`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
 | Summary refresh | Run `/team_register summary`. | Summary worksheet and summary embed match the submitted teams and encore roles. |  |  |
@@ -77,6 +80,7 @@ Use the shift test channel.
 | Enable feature | Run `/shift_register enable`. | Feature is enabled and setup prompt appears. |  |  |
 | Create settings | Open settings, enter test sheet URL, entry/draft/final worksheet titles, and final schedule anchor cell. | Bot saves settings and creates or finds all worksheets. |  |  |
 | Settings embed | Run `/shift_register settings`. | Embed shows worksheet titles, worksheet IDs, Sheet link, and final schedule anchor cell. |  |  |
+| Settings callback guard | Remove permissions from the admin test user after opening the Shift Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
 | Info message | Run `/shift_register info` with a future event date and deadlines. | Public info message is posted and includes bot mention and Sheet link. |  |  |
 | Help text | Run `/shift help` and `/shift_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Shift submission | Send `15-18 18-20 consecutive not allowed`. | Processing reaction is removed, check reaction is added, and entry worksheet updates. |  |  |
@@ -92,6 +96,7 @@ Run these checks for both feature channels.
 | Soft disable | Run the feature's `/disable` command. | Settings remain stored and message processing stops. |  |  |
 | Re-enable | Run the feature's `/enable` command. | Existing settings are reused without re-entering the Sheet URL. |  |  |
 | Hard clear | Run `/disable_and_clear` and confirm. | Feature settings are deleted; the next settings command shows setup state. |  |  |
+| Hard-clear callback guard | Start `/disable_and_clear` as the admin test user, remove permissions before clicking Confirm, then confirm. | The bot returns an ephemeral permission error and does not clear settings. |  |  |
 
 ## Cleanup
 
