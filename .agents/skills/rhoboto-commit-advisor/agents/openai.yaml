@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rhoboto Commit Advisor"
+  short_description: "Suggest focused Rhoboto commits"
+  default_prompt: "Use $rhoboto-commit-advisor to inspect current Rhoboto changes and suggest focused commit messages and commands."
