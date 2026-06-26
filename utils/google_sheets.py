@@ -7,10 +7,28 @@ from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
 
 
-class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
+class AsyncioGspreadWorksheet:
     """
-    Extension of AsyncioGspreadWorksheet with DataFrame utilities.
+    Adapter for AsyncioGspreadWorksheet with DataFrame utilities.
     """
+
+    def __init__(self, worksheet: gspread_asyncio.AsyncioGspreadWorksheet) -> None:
+        self._worksheet = worksheet
+
+    @property
+    def worksheet(self) -> gspread_asyncio.AsyncioGspreadWorksheet:
+        return self._worksheet
+
+    @property
+    def id(self) -> int:
+        return self._worksheet.id
+
+    @property
+    def title(self) -> str:
+        return self._worksheet.title
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._worksheet, name)
 
     async def to_frame(self) -> pd.DataFrame:
         """
@@ -21,7 +39,7 @@ class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
                 DataFrame containing worksheet data.
                 Empty if worksheet is empty.
         """
-        values = await self.get(value_render_option="FORMULA")
+        values = await self._worksheet.get(value_render_option="FORMULA")
         if not values:
             return pd.DataFrame()
 
@@ -46,7 +64,7 @@ class AsyncioGspreadWorksheet(gspread_asyncio.AsyncioGspreadWorksheet):
         """
         df = df.fillna("")
         values = [df.columns.tolist(), *df.to_numpy().tolist()]
-        await self.update(values, raw=False)
+        await self._worksheet.update(values, raw=False)
 
 
 class GoogleSheet:
@@ -61,6 +79,14 @@ class GoogleSheet:
         self.sheet_url = sheet_url
         self.service_account_path = service_account_path
         self._agcm = gspread_asyncio.AsyncioGspreadClientManager(self._get_creds)
+
+    @staticmethod
+    def _wrap_worksheet(
+        worksheet: gspread_asyncio.AsyncioGspreadWorksheet | None,
+    ) -> AsyncioGspreadWorksheet | None:
+        if worksheet is None:
+            return None
+        return AsyncioGspreadWorksheet(worksheet)
 
     def _get_creds(self) -> Credentials:
         """
@@ -99,13 +125,10 @@ class GoogleSheet:
         sh = await self.sheet
         try:
             ws = await sh.get_worksheet_by_id(worksheet_id)
-            if ws is not None:
-                # Re-wrap as subclass
-                ws.__class__ = AsyncioGspreadWorksheet
         except WorksheetNotFound:
             return None
         else:
-            return ws
+            return self._wrap_worksheet(ws)
 
     async def get_worksheets(
         self, worksheet_ids: list[int]
@@ -126,9 +149,7 @@ class GoogleSheet:
         result = {}
         for ws_id in worksheet_ids:
             ws = id_to_ws.get(ws_id)
-            if ws is not None:
-                ws.__class__ = AsyncioGspreadWorksheet
-            result[ws_id] = ws
+            result[ws_id] = self._wrap_worksheet(ws)
         return result
 
     async def get_or_create_worksheet(
@@ -157,8 +178,7 @@ class GoogleSheet:
             ws = await sh.add_worksheet(
                 worksheet_title, rows=default_rows, cols=default_cols
             )
-        ws.__class__ = AsyncioGspreadWorksheet
-        return ws
+        return AsyncioGspreadWorksheet(ws)
 
     async def get_or_create_worksheets(
         self,
@@ -190,7 +210,6 @@ class GoogleSheet:
                 ws = await sh.add_worksheet(
                     worksheet_title, rows=default_rows, cols=default_cols
                 )
-            if ws is not None:
-                ws.__class__ = AsyncioGspreadWorksheet
-            result[ws.title] = ws
+            wrapped_ws = AsyncioGspreadWorksheet(ws)
+            result[wrapped_ws.title] = wrapped_ws
         return result
