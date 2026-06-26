@@ -74,6 +74,7 @@ class TeamRegister(
                 metadata=metadata,
                 encore_role_ids=encore_role_ids,
                 color=config.DEFAULT_EMBED_COLOR,
+                roles=roles,
             )
             view = TeamRegisterView(
                 team_register_manager=manager,
@@ -83,6 +84,7 @@ class TeamRegister(
                 summary_worksheet_title=metadata.summary_worksheet.title,
                 roles=roles,
                 encore_role_ids=encore_role_ids,
+                metadata=metadata,
             )
 
         if embed is None:

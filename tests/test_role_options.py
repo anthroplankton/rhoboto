@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from components.ui_team_register import EncoreRoleMultiSelect
+from components.ui_team_register import EncoreRoleSelect
 from tests.fakes import FakeRole
 
 
-def test_encore_role_options_are_dynamic_and_defaulted() -> None:
-    select = EncoreRoleMultiSelect(
+def test_encore_role_select_uses_defaults_for_active_stored_roles() -> None:
+    select = EncoreRoleSelect(
         object(),
         roles=[
             FakeRole(id=1, name="@everyone", position=99, default=True),
@@ -17,9 +17,7 @@ def test_encore_role_options_are_dynamic_and_defaulted() -> None:
         encore_role_ids=[11],
     )
 
-    options = {option.value: option for option in select.options}
-
-    assert set(options) == {"10", "11", "12"}
-    assert options["11"].default is True
-    assert [option.value for option in select.options] == ["11", "12", "10"]
+    assert select.min_values == 0
+    assert select.max_values == 25
     assert select.disabled is False
+    assert [default.id for default in select.default_values] == [11]

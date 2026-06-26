@@ -92,10 +92,25 @@ class TeamRegisterManager(
         Args:
             roles (list[Role]): List of encore roles.
         """
+        await self.update_encore_role_ids_record([role.id for role in roles])
+
+    async def update_encore_role_ids_record(self, role_ids: list[int]) -> None:
+        """
+        Update the encore role IDs in the TeamRegister database record.
+
+        Args:
+            role_ids (list[int]): List of encore role IDs.
+        """
         team_register_config = await self.get_sheet_config()
 
-        team_register_config.encore_role_ids = [role.id for role in roles]
+        team_register_config.encore_role_ids = role_ids
         await team_register_config.save()
+
+    async def get_fresh_sheet_config(self) -> TeamRegisterConfig | None:
+        """Return the current Team Register config without using cached state."""
+        self._sheet_config = None
+        self._google_sheet = None
+        return await self.get_sheet_config_or_none()
 
     async def upsert_or_delete_user_team(
         self,
