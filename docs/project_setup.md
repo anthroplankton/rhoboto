@@ -47,7 +47,7 @@ Required and common settings:
 
 - `DISCORD_TOKEN`: required for bot startup.
 - `DATABASE_URL`: defaults to `sqlite://data/db.sqlite3`.
-- `GOOGLE_SERVICE_ACCOUNT_PATH`: defaults to `bot/service_account.json`.
+- `GOOGLE_SERVICE_ACCOUNT_PATH`: defaults to `secrets/service_account.json`.
 - `LOG_TO_FILE`, `LOG_DIR`, `LOG_FILENAME`, and `LOG_LEVEL`: configure logging.
 
 Never commit `.env`, service account JSON files, local databases, logs,
@@ -61,13 +61,25 @@ Deployment is Heroku-oriented:
 - `.github/workflows/deploy.yml` deploys `main` to Heroku through GitHub
   Actions using `HEROKU_API_KEY`, `HEROKU_APP_NAME`, and `HEROKU_EMAIL`
   repository secrets.
-- `.profile` materializes `bot/service_account.json` only when the Heroku
-  config var `GOOGLE_CREDENTIALS` is non-empty.
+- `.profile` materializes the path in `GOOGLE_SERVICE_ACCOUNT_PATH`, defaulting
+  to `secrets/service_account.json`, only when the Heroku config var
+  `GOOGLE_CREDENTIALS` is non-empty.
 
 Set `DISCORD_TOKEN`, `DATABASE_URL`, and `GOOGLE_SERVICE_ACCOUNT_PATH`
 explicitly for deployment. If `GOOGLE_SERVICE_ACCOUNT_PATH` uses the default
-`bot/service_account.json`, also set `GOOGLE_CREDENTIALS` to the service
+`secrets/service_account.json`, also set `GOOGLE_CREDENTIALS` to the service
 account JSON content. Do not store that JSON in git.
+
+Before production deploy, confirm the Heroku app config vars include:
+
+- `DISCORD_TOKEN`: production Discord bot token.
+- `DATABASE_URL`: durable production database URL, not local SQLite.
+- `BOT_ENV=production`.
+- `GOOGLE_SERVICE_ACCOUNT_PATH=secrets/service_account.json`.
+- `GOOGLE_CREDENTIALS`: complete production service account JSON.
+
+GitHub Actions deploy secrets are only used to deploy to Heroku; they do not
+automatically become Heroku runtime config vars.
 
 ## Agent Harness
 

@@ -18,7 +18,7 @@ class Config:
     LOG_LEVEL = os.getenv("LOG_LEVEL", "DEBUG" if BOT_ENV == "dev" else "INFO").upper()
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite://data/db.sqlite3")
     GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv(
-        "GOOGLE_SERVICE_ACCOUNT_PATH", "bot/service_account.json"
+        "GOOGLE_SERVICE_ACCOUNT_PATH", "secrets/service_account.json"
     )
 
     DEFAULT_EMBED_COLOR = 0x99CCFF

@@ -18,6 +18,14 @@ def _reload_config_module() -> ModuleType:
     return importlib.reload(config_module)
 
 
+def _reload_config_without_dotenv(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
+    def skip_dotenv(*_args: object, **_kwargs: object) -> bool:
+        return False
+
+    monkeypatch.setattr("dotenv.load_dotenv", skip_dotenv)
+    return _reload_config_module()
+
+
 def test_config_runtime_validation_is_explicit() -> None:
     config = Config()
     config.DISCORD_TOKEN = ""
@@ -40,14 +48,36 @@ def test_log_filename_can_be_configured_from_environment(
 def test_log_filename_defaults_when_environment_is_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def skip_dotenv(*_args: object, **_kwargs: object) -> bool:
-        return False
-
     with monkeypatch.context() as isolated_env:
         isolated_env.delenv("LOG_FILENAME", raising=False)
-        isolated_env.setattr("dotenv.load_dotenv", skip_dotenv)
-        reloaded_config_module = _reload_config_module()
+        reloaded_config_module = _reload_config_without_dotenv(isolated_env)
         assert reloaded_config_module.config.LOG_FILENAME == "rhoboto.log"
+
+    _reload_config_module()
+
+
+def test_google_service_account_path_defaults_to_secrets_directory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with monkeypatch.context() as isolated_env:
+        isolated_env.delenv("GOOGLE_SERVICE_ACCOUNT_PATH", raising=False)
+        reloaded_config_module = _reload_config_without_dotenv(isolated_env)
+        assert (
+            reloaded_config_module.config.GOOGLE_SERVICE_ACCOUNT_PATH
+            == "secrets/service_account.json"
+        )
+
+    _reload_config_module()
+
+
+def test_google_service_account_path_can_be_configured_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_path = "custom/service-account.json"
+    with monkeypatch.context() as isolated_env:
+        isolated_env.setenv("GOOGLE_SERVICE_ACCOUNT_PATH", custom_path)
+        reloaded_config_module = _reload_config_without_dotenv(isolated_env)
+        assert custom_path == reloaded_config_module.config.GOOGLE_SERVICE_ACCOUNT_PATH
 
     _reload_config_module()
 
