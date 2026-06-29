@@ -74,6 +74,26 @@ async def test_sqlite_init_generates_schema_and_supports_crud() -> None:
 
 
 @pytest.mark.asyncio
+async def test_init_db_enables_global_fallback_for_cross_task_queries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    init_kwargs: dict[str, object] = {}
+
+    async def fake_init(*_args: object, **kwargs: object) -> None:
+        init_kwargs.update(kwargs)
+
+    async def fake_generate_schemas() -> None:
+        return None
+
+    monkeypatch.setattr(Tortoise, "init", fake_init)
+    monkeypatch.setattr(Tortoise, "generate_schemas", fake_generate_schemas)
+
+    await init_db("postgres://example.invalid/rhoboto")
+
+    assert init_kwargs["_enable_global_fallback"] is True
+
+
+@pytest.mark.asyncio
 async def test_sqlite_init_cancellation_stops_keepalive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

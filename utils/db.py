@@ -79,6 +79,7 @@ async def init_db(db_url: str) -> None:
         await Tortoise.init(
             db_url=db_url,
             modules=get_model_modules(),
+            _enable_global_fallback=True,
         )
         if _is_sqlite_url(db_url):
             await asyncio.wait_for(
