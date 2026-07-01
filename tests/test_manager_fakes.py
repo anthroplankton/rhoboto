@@ -52,6 +52,32 @@ async def test_team_manager_fresh_config_invalidates_cached_google_sheet() -> No
 
 
 @pytest.mark.asyncio
+async def test_shift_manager_fresh_config_invalidates_cached_google_sheet() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    old_config = SimpleNamespace(sheet_url="https://old.sheet.example")
+    new_config = SimpleNamespace(sheet_url="https://new.sheet.example")
+    cached_sheet = SimpleNamespace(sheet_url=old_config.sheet_url)
+
+    class FakeSheetConfig:
+        @classmethod
+        async def get_or_none(cls, *, feature_channel: object) -> SimpleNamespace:
+            assert feature_channel is manager.feature_channel
+            return new_config
+
+    manager.SheetConfigType = FakeSheetConfig
+    manager._sheet_config = old_config  # noqa: SLF001
+    manager._google_sheet = cached_sheet  # noqa: SLF001
+
+    refreshed_config = await manager.get_fresh_sheet_config()
+
+    assert refreshed_config is new_config
+    assert manager._sheet_config is new_config  # noqa: SLF001
+    assert manager._google_sheet is None  # noqa: SLF001
+
+
+@pytest.mark.asyncio
 async def test_team_manager_upserts_and_deletes_user_team_with_fake_worksheet() -> None:
     manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
     worksheet = FakeWorksheet(title="Main Team")

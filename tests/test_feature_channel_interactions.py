@@ -6,6 +6,7 @@ import pytest
 
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.shift_register import ShiftRegister
+from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
 from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
@@ -186,3 +187,37 @@ async def test_shift_info_defers_before_public_followup(
     assert "2日目" in str(message)
     assert "@Rhoboto" in str(message)
     assert "https://sheet.example" in str(message)
+
+
+@pytest.mark.asyncio
+async def test_team_settings_command_defers_and_reuses_setup_after_enable() -> None:
+    called = 0
+
+    async def fake_setup_after_enable(_interaction: object) -> None:
+        nonlocal called
+        called += 1
+
+    subject = SimpleNamespace(setup_after_enable=fake_setup_after_enable)
+    interaction = FakeInteraction()
+
+    await TeamRegister.settings.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    assert called == 1
+
+
+@pytest.mark.asyncio
+async def test_shift_settings_command_defers_and_reuses_setup_after_enable() -> None:
+    called = 0
+
+    async def fake_setup_after_enable(_interaction: object) -> None:
+        nonlocal called
+        called += 1
+
+    subject = SimpleNamespace(setup_after_enable=fake_setup_after_enable)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.settings.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    assert called == 1

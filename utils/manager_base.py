@@ -56,6 +56,12 @@ class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
             raise error
         return self._sheet_config
 
+    async def get_fresh_sheet_config(self) -> TSheetConfig | None:
+        """Return current sheet config without using cached manager state."""
+        self._sheet_config = None
+        self._google_sheet = None
+        return await self.get_sheet_config_or_none()
+
     async def get_google_sheet(self) -> GoogleSheet:
         """
         Get the GoogleSheet instance for the current TeamRegister.

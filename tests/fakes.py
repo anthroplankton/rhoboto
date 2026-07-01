@@ -5,13 +5,15 @@ from types import SimpleNamespace
 
 import pandas as pd
 
+MISSING_CONTENT: object = object()
+
 
 class FakeDiscordResponse:
     def __init__(self) -> None:
         self.deferred: list[bool] = []
         self.messages: list[tuple[str | None, dict[str, object]]] = []
         self.modals: list[object] = []
-        self.edits: list[tuple[str | None, dict[str, object]]] = []
+        self.edits: list[tuple[object, dict[str, object]]] = []
 
     async def defer(self, *, ephemeral: bool = False) -> None:
         self.deferred.append(ephemeral)
@@ -22,7 +24,11 @@ class FakeDiscordResponse:
     async def send_modal(self, modal: object) -> None:
         self.modals.append(modal)
 
-    async def edit_message(self, content: str | None = None, **kwargs: object) -> None:
+    async def edit_message(
+        self,
+        content: object = MISSING_CONTENT,
+        **kwargs: object,
+    ) -> None:
         self.edits.append((content, kwargs))
 
 

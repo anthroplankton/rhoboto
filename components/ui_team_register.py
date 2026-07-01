@@ -11,6 +11,12 @@ from discord.ui import Button, Modal, RoleSelect, TextInput, View
 from bot import config
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
+from components.ui_settings_flow import (
+    SettingsPanel,
+    send_stale_setup_panel_if_configured,
+    settings_description,
+    settings_title,
+)
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
@@ -25,6 +31,17 @@ if TYPE_CHECKING:
 
 
 ENCORE_ROLE_SELECT_MAX_VALUES = 25
+TEAM_REGISTER_DISPLAY_NAME = "Team Register"
+TEAM_REGISTER_CURRENT_CONTROLS = (
+    "Use the buttons below to update sheet settings or Encore roles."
+)
+TEAM_REGISTER_SAVED_CONTROLS = (
+    "Use the buttons below to edit sheet settings or Encore roles."
+)
+TEAM_REGISTER_WORKSHEET_FOOTER = (
+    "To add worksheet titles, edit sheet settings and include all existing titles "
+    "plus any new ones."
+)
 TEAM_REGISTER_SETTINGS_MISSING_MESSAGE = (
     "Team Register settings are no longer configured for this channel."
 )
@@ -89,13 +106,13 @@ def build_encore_role_edit_embed(
     retained_missing_role_ids: Sequence[int],
 ) -> Embed:
     embed = Embed(title="Edit Encore Roles", color=config.DEFAULT_EMBED_COLOR)
-    embed.description = "Choose roles to mark in the Team Register summary."
+    embed.description = "Choose Discord roles to show for matching members."
     if retained_missing_role_ids:
         embed.add_field(
             name="Missing Encore Role IDs",
             value=(
-                f"{format_role_ids(retained_missing_role_ids)}\n\n"
-                "These IDs are retained until removed from the preview draft."
+                f"{format_role_ids(retained_missing_role_ids)}\n"
+                "Retained until removed during Encore role editing."
             ),
             inline=False,
         )
@@ -106,8 +123,13 @@ def build_encore_role_preview_embed(
     selected_roles: Sequence[Role],
     retained_missing_role_ids: Sequence[int],
     guild_id: int | None,
+    removed_missing_role_ids: Sequence[int] = (),
 ) -> Embed:
     embed = Embed(title="Preview Encore Role Changes", color=config.DEFAULT_EMBED_COLOR)
+    embed.description = (
+        "Review the Encore roles before saving. "
+        "Changes are not saved until you confirm."
+    )
     embed.add_field(
         name="Selected Encore Roles",
         value=(
@@ -120,7 +142,19 @@ def build_encore_role_preview_embed(
     if retained_missing_role_ids:
         embed.add_field(
             name="Retained Missing Role IDs",
-            value=format_role_ids(retained_missing_role_ids),
+            value=(
+                f"{format_role_ids(retained_missing_role_ids)}\n"
+                "These IDs will stay saved after you confirm."
+            ),
+            inline=False,
+        )
+    if removed_missing_role_ids:
+        embed.add_field(
+            name="Removed Missing Role IDs",
+            value=(
+                f"{format_role_ids(removed_missing_role_ids)}\n"
+                "These IDs will be removed when you confirm."
+            ),
             inline=False,
         )
     if any(is_everyone_role(role, guild_id) for role in selected_roles):
@@ -160,6 +194,39 @@ async def get_fresh_team_register_config_or_respond(
         await send_settings_missing(interaction)
         return None
     return team_register
+
+
+async def build_team_register_settings_panel(
+    team_register_manager: TeamRegisterManager,
+    interaction: Interaction,
+    team_register: object,
+    *,
+    is_save_action: bool = False,
+    metadata: TeamRegisterGoogleSheetsMetadata | None = None,
+) -> SettingsPanel:
+    active_metadata = (
+        metadata or await team_register_manager.fetch_google_sheets_metadata()
+    )
+    roles = list(interaction.guild.roles) if interaction.guild else []
+    encore_role_ids = list(getattr(team_register, "encore_role_ids", []))
+    embed = build_current_settings_embed(
+        sheet_url=team_register.sheet_url,
+        metadata=active_metadata,
+        encore_role_ids=encore_role_ids,
+        color=config.DEFAULT_EMBED_COLOR,
+        roles=roles,
+        is_save_action=is_save_action,
+    )
+    view = TeamRegisterView(
+        team_register_manager=team_register_manager,
+        has_existing_settings=True,
+        sheet_url=team_register.sheet_url,
+        roles=roles,
+        encore_role_ids=encore_role_ids,
+        metadata=active_metadata,
+        is_save_action=is_save_action,
+    )
+    return SettingsPanel(embed=embed, view=view)
 
 
 class TeamRegisterSheetModal(Modal):
@@ -255,30 +322,19 @@ class TeamRegisterSheetModal(Modal):
             await send_google_sheets_error(interaction, exc)
             return
 
-        roles = list(interaction.guild.roles) if interaction.guild else []
-        encore_role_ids = team_register.encore_role_ids
-
-        embed = build_current_settings_embed(
-            sheet_url=sheet_url,
-            metadata=metadata,
-            color=config.DEFAULT_EMBED_COLOR,
-            encore_role_ids=encore_role_ids,
-            roles=roles,
+        panel = await build_team_register_settings_panel(
+            self.team_register_manager,
+            interaction,
+            team_register,
             is_save_action=True,
-        )
-
-        view = TeamRegisterView(
-            team_register_manager=self.team_register_manager,
-            has_existing_settings=True,
-            sheet_url=sheet_url,
-            team_worksheet_titles=[ws.title for ws in metadata.team_worksheets],
-            summary_worksheet_title=metadata.summary_worksheet.title,
-            roles=roles,
-            encore_role_ids=encore_role_ids,
             metadata=metadata,
         )
 
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        await interaction.followup.send(
+            embed=panel.embed,
+            view=panel.view,
+            ephemeral=True,
+        )
 
 
 class TeamRegisterButton(Button):
@@ -292,9 +348,10 @@ class TeamRegisterButton(Button):
         worksheet_titles: list[str | None] | None = None,
         summary_worksheet_title: str | None = None,
         *,
+        style: ButtonStyle = ButtonStyle.primary,
         requires_existing_settings: bool = False,
     ) -> None:
-        super().__init__(label=label, style=ButtonStyle.primary)
+        super().__init__(label=label, style=style)
         self.team_register_manager = team_register_manager
         self.sheet_url = sheet_url
         self.worksheet_titles = worksheet_titles
@@ -305,7 +362,26 @@ class TeamRegisterButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
+        async def build_current_panel(team_register: object) -> SettingsPanel:
+            return await build_team_register_settings_panel(
+                self.team_register_manager,
+                interaction,
+                team_register,
+            )
+
+        if not self.requires_existing_settings:
+            handled = await send_stale_setup_panel_if_configured(
+                interaction,
+                self.team_register_manager,
+                feature_display_name=TEAM_REGISTER_DISPLAY_NAME,
+                build_current_panel=build_current_panel,
+            )
+            if handled:
+                return
+
         sheet_url = self.sheet_url
+        worksheet_titles = self.worksheet_titles
+        summary_worksheet_title = self.summary_worksheet_title
         if self.requires_existing_settings:
             team_register = await get_fresh_team_register_config_or_respond(
                 self.team_register_manager,
@@ -319,8 +395,8 @@ class TeamRegisterButton(Button):
             TeamRegisterSheetModal(
                 team_register_manager=self.team_register_manager,
                 sheet_url=sheet_url,
-                team_worksheet_titles=self.worksheet_titles,
-                summary_worksheet_title=self.summary_worksheet_title,
+                team_worksheet_titles=worksheet_titles,
+                summary_worksheet_title=summary_worksheet_title,
                 requires_existing_settings=self.requires_existing_settings,
             )
         )
@@ -332,8 +408,9 @@ class EditEncoreRolesButton(Button):
         team_register_manager: TeamRegisterManager,
         *,
         metadata: TeamRegisterGoogleSheetsMetadata,
+        style: ButtonStyle = ButtonStyle.secondary,
     ) -> None:
-        super().__init__(label="Edit Encore Roles", style=ButtonStyle.secondary)
+        super().__init__(label="Edit Encore Roles", style=style)
         self.team_register_manager = team_register_manager
         self.metadata = metadata
 
@@ -352,6 +429,7 @@ class EditEncoreRolesButton(Button):
         resolution = resolve_encore_roles(team_register.encore_role_ids, roles)
         if len(resolution.active_roles) > ENCORE_ROLE_SELECT_MAX_VALUES:
             await interaction.response.edit_message(
+                content=None,
                 embed=build_too_many_encore_roles_embed(len(resolution.active_roles)),
                 view=TeamRegisterView(
                     team_register_manager=self.team_register_manager,
@@ -364,6 +442,7 @@ class EditEncoreRolesButton(Button):
             return
 
         await interaction.response.edit_message(
+            content=None,
             embed=build_encore_role_edit_embed(resolution.missing_role_ids),
             view=EncoreRoleEditView(
                 team_register_manager=self.team_register_manager,
@@ -399,6 +478,7 @@ class BackToTeamSettingsButton(Button):
 
         roles = list(interaction.guild.roles) if interaction.guild else []
         await interaction.response.edit_message(
+            content=None,
             embed=build_current_settings_embed(
                 sheet_url=team_register.sheet_url,
                 metadata=self.metadata,
@@ -456,15 +536,18 @@ class EncoreRoleSelect(RoleSelect):
 
         selected_roles = list(self.values)
         await interaction.response.edit_message(
+            content=None,
             embed=build_encore_role_preview_embed(
                 selected_roles=selected_roles,
                 retained_missing_role_ids=self.retained_missing_role_ids,
                 guild_id=interaction.guild.id if interaction.guild else None,
+                removed_missing_role_ids=(),
             ),
             view=EncoreRolePreviewView(
                 team_register_manager=self.team_register_manager,
                 selected_roles=selected_roles,
                 retained_missing_role_ids=self.retained_missing_role_ids,
+                removed_missing_role_ids=(),
                 metadata=self.metadata,
             ),
         )
@@ -495,7 +578,7 @@ class EncoreRoleEditView(View):
             )
         )
         if self.retained_missing_role_ids:
-            self.add_item(RemoveMissingFromDraftButton())
+            self.add_item(RemoveMissingIdsButton())
         self.add_item(
             BackToTeamSettingsButton(
                 team_register_manager,
@@ -555,9 +638,11 @@ class ConfirmEncoreRolesButton(Button):
             view=TeamRegisterView(
                 team_register_manager=view.team_register_manager,
                 has_existing_settings=True,
+                sheet_url=team_register.sheet_url,
                 roles=roles,
                 encore_role_ids=role_ids,
                 metadata=metadata,
+                is_save_action=True,
             ),
         )
 
@@ -573,26 +658,40 @@ class CancelEncoreRolesButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
-        disable_view_items(view)
-        await interaction.response.edit_message(
-            content="Cancelled. No changes saved.",
-            embed=build_encore_role_preview_embed(
-                selected_roles=view.selected_roles,
-                retained_missing_role_ids=view.retained_missing_role_ids,
-                guild_id=interaction.guild.id if interaction.guild else None,
-            ),
-            view=view,
+        team_register = await get_fresh_team_register_config_or_respond(
+            view.team_register_manager,
+            interaction,
         )
-        view.stop()
+        if team_register is None:
+            return
+
+        roles = list(interaction.guild.roles) if interaction.guild else []
+        await interaction.response.edit_message(
+            content=None,
+            embed=build_current_settings_embed(
+                sheet_url=team_register.sheet_url,
+                metadata=view.metadata,
+                encore_role_ids=team_register.encore_role_ids,
+                color=config.DEFAULT_EMBED_COLOR,
+                roles=roles,
+            ),
+            view=TeamRegisterView(
+                team_register_manager=view.team_register_manager,
+                has_existing_settings=True,
+                roles=roles,
+                encore_role_ids=team_register.encore_role_ids,
+                metadata=view.metadata,
+            ),
+        )
 
 
-class RemoveMissingFromDraftButton(Button):
+class RemoveMissingIdsButton(Button):
     def __init__(self) -> None:
-        super().__init__(label="Remove Missing From Draft", style=ButtonStyle.danger)
+        super().__init__(label="Remove Missing IDs", style=ButtonStyle.danger)
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        if not isinstance(view, (EncoreRoleEditView, EncoreRolePreviewView)):
+        if not isinstance(view, EncoreRoleEditView):
             return
         if not await require_settings_permissions(interaction):
             return
@@ -604,22 +703,19 @@ class RemoveMissingFromDraftButton(Button):
         if team_register is None:
             return
 
-        selected_roles = (
-            view.active_roles
-            if isinstance(view, EncoreRoleEditView)
-            else view.selected_roles
-        )
         updated_view = EncoreRolePreviewView(
             team_register_manager=view.team_register_manager,
-            selected_roles=selected_roles,
+            selected_roles=view.active_roles,
             retained_missing_role_ids=(),
+            removed_missing_role_ids=view.retained_missing_role_ids,
             metadata=view.metadata,
         )
         await interaction.response.edit_message(
             content=None,
             embed=build_encore_role_preview_embed(
-                selected_roles=selected_roles,
+                selected_roles=view.active_roles,
                 retained_missing_role_ids=(),
+                removed_missing_role_ids=view.retained_missing_role_ids,
                 guild_id=interaction.guild.id if interaction.guild else None,
             ),
             view=updated_view,
@@ -633,17 +729,17 @@ class EncoreRolePreviewView(View):
         *,
         selected_roles: Sequence[Role],
         retained_missing_role_ids: Sequence[int],
+        removed_missing_role_ids: Sequence[int] = (),
         metadata: TeamRegisterGoogleSheetsMetadata,
     ) -> None:
         super().__init__(timeout=None)
         self.team_register_manager = team_register_manager
         self.selected_roles = tuple(selected_roles)
         self.retained_missing_role_ids = tuple(retained_missing_role_ids)
+        self.removed_missing_role_ids = tuple(removed_missing_role_ids)
         self.metadata = metadata
         self.add_item(ConfirmEncoreRolesButton())
         self.add_item(CancelEncoreRolesButton())
-        if self.retained_missing_role_ids:
-            self.add_item(RemoveMissingFromDraftButton())
 
 
 class TeamRegisterView(View):
@@ -660,9 +756,9 @@ class TeamRegisterView(View):
         roles: list[Role] | None = None,
         encore_role_ids: list[int] | None = None,
         metadata: TeamRegisterGoogleSheetsMetadata | None = None,
+        is_save_action: bool = False,
     ) -> None:
         super().__init__(timeout=None)
-        del roles, encore_role_ids
         if metadata is not None:
             sheet_url = sheet_url or metadata.sheet_url
             team_worksheet_titles = team_worksheet_titles or [
@@ -682,16 +778,25 @@ class TeamRegisterView(View):
             sheet_url=sheet_url,
             worksheet_titles=team_worksheet_titles,
             summary_worksheet_title=summary_worksheet_title,
+            style=(
+                ButtonStyle.secondary if has_existing_settings else ButtonStyle.primary
+            ),
             requires_existing_settings=has_existing_settings,
         )
         self.add_item(button)
         if not has_existing_settings:
             return
         if metadata is not None:
+            role_resolution = resolve_encore_roles(encore_role_ids or [], roles or [])
             self.add_item(
                 EditEncoreRolesButton(
                     team_register_manager,
                     metadata=metadata,
+                    style=(
+                        ButtonStyle.primary
+                        if is_save_action and not role_resolution.active_roles
+                        else ButtonStyle.secondary
+                    ),
                 )
             )
 
@@ -720,11 +825,22 @@ def build_current_settings_embed(
     Returns:
         Embed: The constructed embed.
     """
-    if is_save_action:
-        title = "✅ Team Register Settings Saved!"
-    else:
-        title = "📃 Team Register Settings"
-    embed = Embed(title=title, color=color)
+    embed = Embed(
+        title=settings_title(
+            TEAM_REGISTER_DISPLAY_NAME,
+            is_save_action=is_save_action,
+        ),
+        color=color,
+    )
+    embed.description = settings_description(
+        TEAM_REGISTER_DISPLAY_NAME,
+        (
+            TEAM_REGISTER_SAVED_CONTROLS
+            if is_save_action
+            else TEAM_REGISTER_CURRENT_CONTROLS
+        ),
+        is_save_action=is_save_action,
+    )
 
     sheet_url_row = f"**Link** -> {sheet_url}"
     embed.add_field(name="Google Sheet", value=sheet_url_row, inline=False)
@@ -753,7 +869,10 @@ def build_current_settings_embed(
     if role_resolution.active_roles:
         encore_roles_value = format_role_mentions(role_resolution.active_roles)
     else:
-        encore_roles_value = "No active encore roles configured."
+        encore_roles_value = (
+            "No encore roles set yet. Use Edit Encore Roles to choose Discord "
+            "roles to show for matching members."
+        )
     embed.add_field(
         name="Encore Roles",
         value=encore_roles_value,
@@ -763,20 +882,13 @@ def build_current_settings_embed(
         embed.add_field(
             name="Missing Encore Role IDs",
             value=(
-                f"{format_role_ids(role_resolution.missing_role_ids)}\n\n"
-                "These IDs are retained until removed in Edit Encore Roles."
+                f"{format_role_ids(role_resolution.missing_role_ids)}\n"
+                "Retained until removed during Encore role editing."
             ),
             inline=False,
         )
 
-    embed.set_footer(
-        text=(
-            "Use Edit Encore Roles to configure encore role markers. "
-            "Use Edit Team Register Settings to edit sheet settings. "
-            "To add more worksheet titles, run this command again and "
-            "enter all previous worksheet titles plus any new ones."
-        )
-    )
+    embed.set_footer(text=TEAM_REGISTER_WORKSHEET_FOOTER)
     return embed
 
 

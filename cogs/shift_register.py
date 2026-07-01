@@ -8,9 +8,10 @@ from discord import app_commands
 from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
 from components.ui_google_sheets_errors import send_google_sheets_error
+from components.ui_settings_flow import send_current_panel_followup
 from components.ui_shift_register import (
     ShiftRegisterView,
-    build_current_settings_embed,
+    build_shift_register_settings_panel,
 )
 from models.feature_channel import FeatureChannel
 from utils.google_sheets_errors import GoogleSheetsError
@@ -63,34 +64,20 @@ class ShiftRegister(
                 "Shift Register is not yet configured for this channel. "
                 "Click below to set up."
             )
-            embed = None
             view = ShiftRegisterView(shift_register_manager=manager)
-        else:
-            try:
-                metadata = await manager.fetch_google_sheets_metadata()
-            except GoogleSheetsError as exc:
-                await send_google_sheets_error(interaction, exc)
-                return
-            embed = build_current_settings_embed(
-                sheet_url=shift_register_config.sheet_url,
-                metadata=metadata,
-                final_schedule_anchor_cell=shift_register_config.final_schedule_anchor_cell,
-                color=config.DEFAULT_EMBED_COLOR,
-            )
-            view = ShiftRegisterView(
-                shift_register_manager=manager,
-                has_existing_settings=True,
-                sheet_url=shift_register_config.sheet_url,
-                entry_worksheet_title=metadata.entry_worksheets.title,
-                draft_worksheet_title=metadata.draft_worksheet.title,
-                final_schedule_worksheet_title=metadata.final_schedule_worksheet.title,
-                final_schedule_anchor_cell=shift_register_config.final_schedule_anchor_cell,
-            )
-
-        if embed is None:
             await interaction.followup.send(content=content, view=view, ephemeral=True)
-        else:
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            return
+
+        try:
+            panel = await build_shift_register_settings_panel(
+                manager,
+                shift_register_config,
+            )
+        except GoogleSheetsError as exc:
+            await send_google_sheets_error(interaction, exc)
+            return
+
+        await send_current_panel_followup(interaction, panel)
 
     @override
     async def process_upsert_from_message(

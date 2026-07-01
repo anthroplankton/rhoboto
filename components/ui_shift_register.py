@@ -8,6 +8,12 @@ from discord.ui import Button, Modal, TextInput, View
 from bot import config
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
+from components.ui_settings_flow import (
+    SettingsPanel,
+    send_stale_setup_panel_if_configured,
+    settings_description,
+    settings_title,
+)
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -18,6 +24,66 @@ from utils.shift_register_structs import (
 
 if TYPE_CHECKING:
     from utils.shift_register_manager import ShiftRegisterManager
+
+
+SHIFT_REGISTER_DISPLAY_NAME = "Shift Register"
+SHIFT_REGISTER_CURRENT_CONTROLS = "Use the button below to update sheet settings."
+SHIFT_REGISTER_SAVED_CONTROLS = "Use the button below to edit sheet settings."
+SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE = (
+    "Shift Register settings are no longer configured for this channel."
+)
+
+
+async def send_shift_settings_missing(interaction: Interaction) -> None:
+    await interaction.response.send_message(
+        SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE,
+        ephemeral=True,
+    )
+
+
+async def get_fresh_shift_register_config_or_respond(
+    shift_register_manager: ShiftRegisterManager,
+    interaction: Interaction,
+) -> object | None:
+    shift_register = await shift_register_manager.get_fresh_sheet_config()
+    if shift_register is None:
+        await send_shift_settings_missing(interaction)
+        return None
+    return shift_register
+
+
+async def build_shift_register_settings_panel(
+    shift_register_manager: ShiftRegisterManager,
+    shift_register: object,
+    *,
+    is_save_action: bool = False,
+    metadata: ShiftRegisterGoogleSheetsMetadata | None = None,
+) -> SettingsPanel:
+    active_metadata = (
+        metadata or await shift_register_manager.fetch_google_sheets_metadata()
+    )
+    final_schedule_anchor_cell = getattr(
+        shift_register,
+        "final_schedule_anchor_cell",
+        "A1",
+    )
+    embed = build_current_settings_embed(
+        sheet_url=shift_register.sheet_url,
+        metadata=active_metadata,
+        final_schedule_anchor_cell=final_schedule_anchor_cell,
+        color=config.DEFAULT_EMBED_COLOR,
+        is_save_action=is_save_action,
+    )
+    view = ShiftRegisterView(
+        shift_register_manager=shift_register_manager,
+        has_existing_settings=True,
+        sheet_url=shift_register.sheet_url,
+        entry_worksheet_title=active_metadata.entry_worksheets.title,
+        draft_worksheet_title=active_metadata.draft_worksheet.title,
+        final_schedule_worksheet_title=active_metadata.final_schedule_worksheet.title,
+        final_schedule_anchor_cell=final_schedule_anchor_cell,
+    )
+    return SettingsPanel(embed=embed, view=view)
 
 
 class ShiftRegisterSheetModal(Modal):
@@ -31,6 +97,8 @@ class ShiftRegisterSheetModal(Modal):
         draft_worksheet_title: str | None = None,
         final_schedule_worksheet_title: str | None = None,
         final_schedule_anchor_cell: str = "A1",
+        *,
+        requires_existing_settings: bool = False,
     ) -> None:
         super().__init__(title="Shift Register Setup")
         entry_worksheet_title = entry_worksheet_title or next(
@@ -86,6 +154,7 @@ class ShiftRegisterSheetModal(Modal):
         self.add_item(self.final_schedule_worksheet_title)
         self.add_item(self.final_schedule_anchor_cell)
         self.shift_register_manager = shift_register_manager
+        self.requires_existing_settings = requires_existing_settings
 
     async def on_submit(self, interaction: Interaction) -> None:
         """
@@ -96,6 +165,14 @@ class ShiftRegisterSheetModal(Modal):
         """
         if not await require_settings_permissions(interaction):
             return
+
+        if self.requires_existing_settings:
+            shift_register = await get_fresh_shift_register_config_or_respond(
+                self.shift_register_manager,
+                interaction,
+            )
+            if shift_register is None:
+                return
 
         await interaction.response.defer(ephemeral=True)
 
@@ -121,25 +198,19 @@ class ShiftRegisterSheetModal(Modal):
             final_schedule_anchor_cell
         )
 
-        embed = build_current_settings_embed(
-            sheet_url=sheet_url,
-            metadata=metadata,
-            final_schedule_anchor_cell=final_schedule_anchor_cell,
-            color=config.DEFAULT_EMBED_COLOR,
+        shift_register = await self.shift_register_manager.get_sheet_config()
+        panel = await build_shift_register_settings_panel(
+            self.shift_register_manager,
+            shift_register,
             is_save_action=True,
+            metadata=metadata,
         )
 
-        view = ShiftRegisterView(
-            shift_register_manager=self.shift_register_manager,
-            has_existing_settings=True,
-            sheet_url=sheet_url,
-            entry_worksheet_title=entry_worksheet_title,
-            draft_worksheet_title=draft_worksheet_title,
-            final_schedule_worksheet_title=final_schedule_worksheet_title,
-            final_schedule_anchor_cell=final_schedule_anchor_cell,
+        await interaction.followup.send(
+            embed=panel.embed,
+            view=panel.view,
+            ephemeral=True,
         )
-
-        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
 class ShiftRegisterButton(Button):
@@ -154,6 +225,8 @@ class ShiftRegisterButton(Button):
         draft_worksheet_title: str | None = None,
         final_schedule_worksheet_title: str | None = None,
         final_schedule_anchor_cell: str = "A1",
+        *,
+        requires_existing_settings: bool = False,
     ) -> None:
         super().__init__(label=label, style=ButtonStyle.primary)
         self.shift_register_manager = shift_register_manager
@@ -162,19 +235,60 @@ class ShiftRegisterButton(Button):
         self.draft_worksheet_title = draft_worksheet_title
         self.final_schedule_worksheet_title = final_schedule_worksheet_title
         self.final_schedule_anchor_cell = final_schedule_anchor_cell
+        self.requires_existing_settings = requires_existing_settings
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
             return
 
+        async def build_current_panel(shift_register: object) -> SettingsPanel:
+            return await build_shift_register_settings_panel(
+                self.shift_register_manager,
+                shift_register,
+            )
+
+        if not self.requires_existing_settings:
+            handled = await send_stale_setup_panel_if_configured(
+                interaction,
+                self.shift_register_manager,
+                feature_display_name=SHIFT_REGISTER_DISPLAY_NAME,
+                build_current_panel=build_current_panel,
+            )
+            if handled:
+                return
+
+        if self.requires_existing_settings:
+            shift_register = await get_fresh_shift_register_config_or_respond(
+                self.shift_register_manager,
+                interaction,
+            )
+            if shift_register is None:
+                return
+            sheet_url = shift_register.sheet_url
+            entry_worksheet_title = self.entry_worksheet_title
+            draft_worksheet_title = self.draft_worksheet_title
+            final_schedule_worksheet_title = self.final_schedule_worksheet_title
+            final_schedule_anchor_cell = getattr(
+                shift_register,
+                "final_schedule_anchor_cell",
+                self.final_schedule_anchor_cell,
+            )
+        else:
+            sheet_url = self.sheet_url
+            entry_worksheet_title = self.entry_worksheet_title
+            draft_worksheet_title = self.draft_worksheet_title
+            final_schedule_worksheet_title = self.final_schedule_worksheet_title
+            final_schedule_anchor_cell = self.final_schedule_anchor_cell
+
         await interaction.response.send_modal(
             ShiftRegisterSheetModal(
                 shift_register_manager=self.shift_register_manager,
-                sheet_url=self.sheet_url,
-                entry_worksheet_title=self.entry_worksheet_title,
-                draft_worksheet_title=self.draft_worksheet_title,
-                final_schedule_worksheet_title=self.final_schedule_worksheet_title,
-                final_schedule_anchor_cell=self.final_schedule_anchor_cell,
+                sheet_url=sheet_url,
+                entry_worksheet_title=entry_worksheet_title,
+                draft_worksheet_title=draft_worksheet_title,
+                final_schedule_worksheet_title=final_schedule_worksheet_title,
+                final_schedule_anchor_cell=final_schedule_anchor_cell,
+                requires_existing_settings=self.requires_existing_settings,
             )
         )
 
@@ -207,6 +321,7 @@ class ShiftRegisterView(View):
             draft_worksheet_title=draft_worksheet_title,
             final_schedule_worksheet_title=final_schedule_worksheet_title,
             final_schedule_anchor_cell=final_schedule_anchor_cell,
+            requires_existing_settings=has_existing_settings,
         )
         self.add_item(button)
 
@@ -235,11 +350,22 @@ def build_current_settings_embed(
     Returns:
         Embed: The constructed embed.
     """
-    if is_save_action:
-        title = "✅ Shift Register Settings Saved!"
-    else:
-        title = "📃 Shift Register Settings"
-    embed = Embed(title=title, color=color)
+    embed = Embed(
+        title=settings_title(
+            SHIFT_REGISTER_DISPLAY_NAME,
+            is_save_action=is_save_action,
+        ),
+        color=color,
+    )
+    embed.description = settings_description(
+        SHIFT_REGISTER_DISPLAY_NAME,
+        (
+            SHIFT_REGISTER_SAVED_CONTROLS
+            if is_save_action
+            else SHIFT_REGISTER_CURRENT_CONTROLS
+        ),
+        is_save_action=is_save_action,
+    )
 
     sheet_url_row = f"**Link** -> {sheet_url}"
     embed.add_field(name="Google Sheet", value=sheet_url_row, inline=False)
@@ -265,5 +391,4 @@ def build_current_settings_embed(
         inline=False,
     )
 
-    embed.set_footer(text="To edit sheet settings, use the settings button.")
     return embed
