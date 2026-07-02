@@ -107,7 +107,14 @@ automatically become Heroku runtime config vars.
   done`. If the bounded repo-wide Black check times out, run at most one
   bounded changed-file fallback and report the repo-wide result as
   environment-inconclusive.
-- `.planning/` is ignored local agent working memory. Records there should
-  capture reusable engineering facts, neutral decisions, and validation
-  evidence, not secrets, raw environment values, private identifiers, or private
-  user/agent conversation context.
+- `.planning/` and `docs/superpowers/` are ignored local agent working memory.
+  Records there should capture reusable engineering facts, neutral decisions,
+  and validation evidence, not secrets, raw environment values, private
+  identifiers, or private user/agent conversation context. Do not commit
+  Superpowers artifacts directly. When a Superpowers spec or plan contains
+  durable decisions, summarize and promote them into the appropriate tracked
+  documentation for their audience and scope: `AGENTS.md` for agent operating
+  rules, `docs/project_setup.md` for setup or harness contracts, relevant
+  feature design docs or implementation plans for feature behavior and rollout
+  decisions, and validation runbooks such as
+  `docs/manual_integration_validation.md` for reusable manual checks.

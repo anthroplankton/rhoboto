@@ -18,7 +18,7 @@ Use `$discord-bot-feature-plan` before adding or changing Discord features, cogs
 
 Use Superpowers brainstorming for unclear or broad design work: new workflows, architecture changes, UX-heavy behavior, rollout-sensitive changes, or requests with multiple viable approaches. Keep designs brief for small changes and get user approval before editing code. Repository rules still apply when using Superpowers: do not commit unless explicitly asked, and do not create new long-lived docs paths unless the user approves the spec location.
 
-Use `$planning-with-files` for multi-step investigations, architecture plans, or work likely to span many tool calls or context resets. Treat `.planning/` as local agent working memory, not project documentation.
+Use `$planning-with-files` for multi-step investigations, architecture plans, or work likely to span many tool calls or context resets. Treat `.planning/` and `docs/superpowers/` as local agent working memory, not project documentation. Do not commit Superpowers artifacts directly. When a Superpowers spec or plan contains durable decisions, summarize and promote them into the appropriate tracked documentation for their audience and scope: `AGENTS.md` for agent operating rules, `docs/project_setup.md` for setup or harness contracts, relevant feature design docs or implementation plans for feature behavior and rollout decisions, and validation runbooks such as `docs/manual_integration_validation.md` for reusable manual checks.
 
 The repo intentionally tracks `.codex/config.toml` for project-local Codex defaults. Keep personal tokens, machine-specific paths, and private context out of that file.
 
