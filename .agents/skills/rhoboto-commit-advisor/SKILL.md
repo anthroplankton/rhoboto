@@ -52,32 +52,28 @@ asks Codex to commit.
      irrelevant, or explicitly skipped; state the reason when skipped.
    - Docs-only changes: usually run `git diff --check`; add Markdown-specific
      checks only when the repo already has them.
-   - In Codex sandbox sessions, use repo-local caches for uv and Black:
-     prefix uv commands with `env UV_CACHE_DIR=.cache/uv`, and prefix Black
-     checks with `env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black`.
-   - Python formatting or lint-sensitive changes: run
-     `env UV_CACHE_DIR=.cache/uv uv run ruff check --no-fix .`,
-     `env UV_CACHE_DIR=.cache/uv uv run ruff format --check .`, and
-     `timeout 30s env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black uv run black --check --workers 1 main.py bot cogs components models utils`
-     when scope and time justify it.
+   - For Codex sandbox sessions, follow the current validation command guidance
+     in `docs/project_setup.md`; do not duplicate or invent Black, Ruff, or
+     pytest command details in this skill when that document is available.
+   - Python formatting or lint-sensitive changes: choose the relevant checks
+     from `docs/project_setup.md` when scope and time justify it.
    - For Black, trust the command exit status over output text: exit 0 means
      clean, exit 1 means files would reformat, exit 123 means internal error,
      and exit 124 from `timeout` is inconclusive even if the output includes
      "All done".
-   - Do not start overlapping or repeated Black processes. If the bounded
-     repo-wide Black check times out, run at most one bounded fallback on the
-     changed Python files, then report Black as environment-inconclusive.
-   - Do not use unscoped `black .`; use the repo's explicit source paths above
-     or an explicit changed-file list.
+   - Do not start overlapping or repeated Black processes. If sandbox Black
+     validation times out, follow `docs/project_setup.md` and report the result
+     as environment-inconclusive rather than inventing a fallback.
+   - Do not use unscoped `black .`; use the current command documented in
+     `docs/project_setup.md` or an explicit changed-file list.
    - Do not replace the canonical Black check with `.venv/bin/black`; direct
      `.venv` commands are diagnostic fallbacks only when `uv run` has an
      environment/cache failure.
-   - Behavior changes: prefer focused
-     `env UV_CACHE_DIR=.cache/uv uv run pytest tests/path_or_file.py` first,
-     then recommend the full CI-style pytest command when shared paths are
-     affected.
-   - Dependency or lockfile changes: include
-     `env UV_CACHE_DIR=.cache/uv uv lock --check`.
+   - Behavior changes: prefer focused tests for the affected path first, then
+     recommend the current full test command from `docs/project_setup.md` when
+     shared paths are affected.
+   - Dependency or lockfile changes: include the current lockfile check from
+     `docs/project_setup.md`.
    - If a command fails because of the sandbox or cache permissions, report
      that separately from project failures and suggest the closest useful next
      command.

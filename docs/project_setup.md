@@ -96,7 +96,19 @@ automatically become Heroku runtime config vars.
   ```shell
   env UV_CACHE_DIR=.cache/uv uv run ruff check --no-fix .
   env UV_CACHE_DIR=.cache/uv uv run ruff format --check .
-  timeout 30s env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black uv run black --check --workers 1 main.py bot cogs components models utils
+  timeout 60s env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black uv run bash -lc '
+  files=$(rg --files main.py bot cogs components models utils -g "*.py") || exit $?
+  if [ -z "$files" ]; then
+    printf "black check failed: no Python files matched\n" >&2
+    exit 1
+  fi
+  count=0
+  while IFS= read -r f; do
+    black --check --quiet --workers 1 "$f" || exit $?
+    count=$((count + 1))
+  done <<< "$files"
+  printf "checked %s files\n" "$count"
+  '
   env UV_CACHE_DIR=.cache/uv uv run pytest --cov=bot --cov=cogs --cov=components --cov=models --cov=utils --cov-report=term-missing --cov-fail-under=35
   env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q main.py bot cogs components models utils
   ```
@@ -104,9 +116,10 @@ automatically become Heroku runtime config vars.
   For Black, use the process exit code rather than the last output line: exit
   `0` is clean, `1` means files would reformat, `123` is an internal error,
   and timeout exit `124` is inconclusive even if the output includes `All
-  done`. If the bounded repo-wide Black check times out, run at most one
-  bounded changed-file fallback and report the repo-wide result as
-  environment-inconclusive.
+  done`. In this sandbox, Black 25.1.0 can print a clean multi-file summary and
+  then fail to terminate before the timeout. The sandbox command therefore runs
+  Black one file at a time inside a single `uv run` shell, which preserves the
+  project environment while avoiding the multi-file timeout path.
 - `.planning/` and `docs/superpowers/` are ignored local agent working memory.
   Records there should capture reusable engineering facts, neutral decisions,
   and validation evidence, not secrets, raw environment values, private
