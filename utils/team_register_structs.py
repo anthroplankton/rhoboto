@@ -191,10 +191,21 @@ class TeamParser:
     """
 
     PATTERN = re.compile(
-        r"(?P<leader_skill>[0-9]+)\s*/\s*"
-        r"(?P<total_skill>[0-9]+)\s*/\s*"
+        r"(?P<leader_skill>[0-9]+)\s*[/\uff0f]\s*"
+        r"(?P<total_skill>[0-9]+)\s*[/\uff0f]\s*"
         r"(?P<team_power>([0-9]+(\.[0-9]*)?|\.[0-9]+))"
     )
+    NUMBER_TOKEN_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+")
+    MIN_INVALID_ATTEMPT_NUMBER_TOKENS: ClassVar[int] = 3
+
+    @classmethod
+    def looks_like_invalid_attempt(cls, lines: list[str]) -> bool:
+        return any(
+            not cls.PATTERN.search(line)
+            and len(cls.NUMBER_TOKEN_PATTERN.findall(line))
+            >= cls.MIN_INVALID_ATTEMPT_NUMBER_TOKENS
+            for line in lines
+        )
 
     @classmethod
     def parse_line(cls, user_info: UserInfo, line: str) -> Team:

@@ -203,4 +203,4 @@ async def test_mark_google_sheets_message_failure_cleans_processing_reaction() -
     await mark_google_sheets_message_failure(message, user, error, NullLogger())
 
     assert message.removed_reactions == [("<:haruka_math:1402204882492063825>", user)]
-    assert message.added_reactions == [GOOGLE_SHEETS_FAILURE_REACTION]
+    assert message.added_reactions == [GOOGLE_SHEETS_FAILURE_REACTION, "🛠️"]

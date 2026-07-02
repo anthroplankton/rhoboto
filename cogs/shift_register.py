@@ -17,10 +17,9 @@ from models.feature_channel import FeatureChannel
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.message_templates import render_message_template
-from utils.reactions import remove_reaction_if_present
+from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import Period, Shift, ShiftParser
-from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
     from discord import Interaction, Message
@@ -87,30 +86,21 @@ class ShiftRegister(
         Listen for messages to provide a button for shift register setup/edit.
         This is used in channels where the feature is enabled.
         """
-        if (
-            message.author.bot
-            or not message.guild
-            or not message.channel
-            or not await self.is_enabled(message.guild.id, message.channel.id)
-        ):
+        if not await self._should_process_message(message):
             return None
 
-        self.logger.debug(
-            "Received message in Guild: `%s` Channel: `%s` (Feature: `%s`): %r",
-            message.guild.id,
-            message.channel.id,
-            self.feature_name,
-            message.content,
-        )
+        self._log_received_message(message)
 
-        user_info = UserInfo(
-            username=message.author.name,
-            display_name=message.author.display_name,
-        )
-        shift, periods = ShiftParser.parse_lines(
-            user_info, message.content.splitlines()
-        )
+        user_info = self._message_user_info(message)
+        lines = message.content.splitlines()
+        shift, periods = ShiftParser.parse_lines(user_info, lines)
         if not periods:
+            if ShiftParser.looks_like_invalid_attempt(lines):
+                await add_reaction_if_possible(
+                    message,
+                    config.CONFUSED_EMOJI,
+                    log=self.logger,
+                )
             return None
 
         self.logger.info(
@@ -123,7 +113,11 @@ class ShiftRegister(
         )
 
         if not shift:
-            await message.add_reaction(config.CONFUSED_EMOJI)
+            await add_reaction_if_possible(
+                message,
+                config.CONFUSED_EMOJI,
+                log=self.logger,
+            )
             return periods
 
         feature_channel = await FeatureChannel.get_or_none(
@@ -143,7 +137,11 @@ class ShiftRegister(
             return None
 
         if self.bot.user is not None:
-            await message.add_reaction(config.PROCESSING_EMOJI)
+            await add_reaction_if_possible(
+                message,
+                config.PROCESSING_EMOJI,
+                log=self.logger,
+            )
 
         async with self.lock(message.channel.id):
             metadata = await manager.fetch_google_sheets_metadata()
@@ -162,7 +160,7 @@ class ShiftRegister(
                 self.bot.user,
                 log=self.logger,
             )
-            await message.add_reaction("✅")
+            await add_reaction_if_possible(message, "✅", log=self.logger)
 
         return shift
 

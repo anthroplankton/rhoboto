@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from utils.shift_register_structs import Period, Shift, ShiftParser
 from utils.structs_base import UserInfo
 
@@ -45,6 +47,37 @@ def test_shift_parser_returns_empty_shift_without_ranges() -> None:
     assert periods == []
     assert not shift
     assert list(shift) == []
+
+
+@pytest.mark.parametrize("line", ["18:00-20:00", "18時-20時"])
+def test_shift_parser_does_not_parse_time_notation_as_valid(line: str) -> None:
+    shift, periods = ShiftParser.parse_lines(make_user(), [line])
+
+    assert periods == []
+    assert not shift
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "18:00-20:00",
+        "18點到20點",
+        "18點到",
+        "到20點",
+        "18時-20時",
+        "18-",
+        "-20",
+    ],
+)
+def test_shift_parser_detects_invalid_attempts(line: str) -> None:
+    assert ShiftParser.looks_like_invalid_attempt([line])
+
+
+@pytest.mark.parametrize("line", ["20:00", "20點前", "公告"])
+def test_shift_parser_does_not_flag_general_text_as_invalid_attempt(
+    line: str,
+) -> None:
+    assert not ShiftParser.looks_like_invalid_attempt([line])
 
 
 def test_shift_google_sheet_compatible_attributes_and_items() -> None:

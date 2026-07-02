@@ -3,10 +3,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from discord import HTTPException
-
 from bot import config
-from utils.reactions import remove_reaction_if_present
+from utils.reactions import add_reactions_if_possible, remove_reaction_if_present
 
 if TYPE_CHECKING:
     from discord import Interaction, Message
@@ -16,6 +14,11 @@ if TYPE_CHECKING:
 
 
 GOOGLE_SHEETS_FAILURE_REACTION = "⚠️"
+GOOGLE_SHEETS_REPAIR_REACTION = "🛠️"
+GOOGLE_SHEETS_FAILURE_REACTIONS = (
+    GOOGLE_SHEETS_FAILURE_REACTION,
+    GOOGLE_SHEETS_REPAIR_REACTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +59,11 @@ async def mark_google_sheets_message_failure(
             bot_user,
             log=active_logger,
         )
-    try:
-        await message.add_reaction(GOOGLE_SHEETS_FAILURE_REACTION)
-    except HTTPException as exc:
-        active_logger.debug(
-            "Skipped adding Google Sheets failure reaction to message %s: %s",
-            getattr(message, "id", "<unknown>"),
-            exc,
-        )
+    await add_reactions_if_possible(
+        message,
+        GOOGLE_SHEETS_FAILURE_REACTIONS,
+        log=active_logger,
+    )
 
 
 def _interaction_response_done(interaction: Interaction) -> bool:

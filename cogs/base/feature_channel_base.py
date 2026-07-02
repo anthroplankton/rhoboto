@@ -122,6 +122,31 @@ class FeatureChannelBase(
         msg = "Subclasses must implement this method."
         raise NotImplementedError(msg)
 
+    async def _should_process_message(self, message: Message) -> bool:
+        return not (
+            message.author.bot
+            or not message.guild
+            or not message.channel
+            or not await self.is_enabled(message.guild.id, message.channel.id)
+        )
+
+    def _message_user_info(self, message: Message) -> UserInfo:
+        return UserInfo(
+            username=message.author.name,
+            display_name=message.author.display_name,
+        )
+
+    def _log_received_message(self, message: Message) -> None:
+        if message.guild is None or message.channel is None:
+            return
+        self.logger.debug(
+            "Received message in Guild: `%s` Channel: `%s` (Feature: `%s`): %r",
+            message.guild.id,
+            message.channel.id,
+            self.feature_name,
+            message.content,
+        )
+
     @app_commands.default_permissions(administrator=True, manage_channels=True)
     async def upsert_from_content_menu(
         self, interaction: Interaction, message: Message

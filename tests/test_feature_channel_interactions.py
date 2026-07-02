@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
@@ -36,8 +37,24 @@ class FakeMessage:
         self.removed_reactions.append((emoji, user))
 
 
+class FakeRegisterMessage(FakeMessage):
+    def __init__(self, *, content: str = "hello", author_bot: bool = False) -> None:
+        super().__init__()
+        self.content = content
+        self.author = SimpleNamespace(
+            bot=author_bot,
+            name="alice",
+            display_name="Alice",
+        )
+        self.guild = SimpleNamespace(id=111)
+        self.channel = SimpleNamespace(id=222)
+
+
 class NullLogger:
     def warning(self, *_: object, **__: object) -> None:
+        pass
+
+    def debug(self, *_: object, **__: object) -> None:
         pass
 
 
@@ -60,6 +77,49 @@ async def test_user_help_defers_before_followup(
     assert kwargs["ephemeral"] is True
     assert "@Rhoboto" in str(message)
     assert "https://sheet.example" in str(message)
+
+
+@pytest.mark.asyncio
+async def test_message_processing_helpers_build_context_and_user_info() -> None:
+    async def is_enabled(
+        guild_id: int,
+        channel_id: int,
+        feature_name: str | None = None,
+    ) -> bool:
+        return (guild_id, channel_id, feature_name) == (111, 222, None)
+
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        logger=NullLogger(),
+        is_enabled=is_enabled,
+    )
+    message = FakeRegisterMessage(content="150/740/33")
+    should_process_message = FeatureChannelBase._should_process_message  # noqa: SLF001
+    message_user_info = FeatureChannelBase._message_user_info  # noqa: SLF001
+    log_received_message = FeatureChannelBase._log_received_message  # noqa: SLF001
+
+    assert await should_process_message(subject, message)
+    user_info = message_user_info(subject, message)
+    log_received_message(subject, message)
+
+    assert user_info.username == "alice"
+    assert user_info.display_name == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_message_processing_helper_ignores_bot_messages() -> None:
+    async def fail_if_called(*_: object, **__: object) -> bool:
+        raise AssertionError
+
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        logger=NullLogger(),
+        is_enabled=fail_if_called,
+    )
+    message = FakeRegisterMessage(author_bot=True)
+    should_process_message = FeatureChannelBase._should_process_message  # noqa: SLF001
+
+    assert not await should_process_message(subject, message)
 
 
 @pytest.mark.asyncio
@@ -102,6 +162,53 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     assert message.added_reactions == [
         "<:haruka_math:1402204882492063825>",
         "⚠️",
+        "🛠️",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
+    message = FakeMessage()
+
+    async def process_invalid_attempt(message: FakeMessage) -> None:
+        await message.add_reaction(config.CONFUSED_EMOJI)
+
+    interaction = FakeInteraction()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        process_upsert_from_message=process_invalid_attempt,
+        bot=SimpleNamespace(user=object()),
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+
+    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert interaction.followup.messages == [
+        ("Failed to upsert for `team_register`.", {"ephemeral": False})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> None:
+    message = FakeMessage()
+
+    async def process_ordinary_text(_message: FakeMessage) -> None:
+        return None
+
+    interaction = FakeInteraction()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        process_upsert_from_message=process_ordinary_text,
+        bot=SimpleNamespace(user=object()),
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+
+    assert message.added_reactions == []
+    assert interaction.followup.messages == [
+        ("Failed to upsert for `team_register`.", {"ephemeral": False})
     ]
 
 
@@ -131,6 +238,7 @@ async def test_message_listener_marks_google_sheets_error() -> None:
     assert message.added_reactions == [
         "<:haruka_math:1402204882492063825>",
         "⚠️",
+        "🛠️",
     ]
 
 

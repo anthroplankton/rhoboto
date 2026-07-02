@@ -142,7 +142,22 @@ class ShiftParser:
     HOUR_SLOTS: ClassVar[list[int]] = list(range(SPLIT_HOUR, SPLIT_HOUR + 24))
     HOUR_LABELS: ClassVar[list[str]] = [f"{h}-{h + 1}" for h in HOUR_SLOTS]
 
-    PATTERN = re.compile(r"(?P<start>\d+)\s*[-－~～]\s*(?P<end>\d+)")  # noqa: RUF001
+    PATTERN = re.compile(
+        r"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
+        r"(?P<start>\d{1,2})\s*[-\uff0d~\uff5e]\s*"
+        r"(?P<end>\d{1,2})"
+        r"(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
+    )
+    TIME_VALUE_PATTERN: ClassVar[str] = (
+        r"\d{1,2}(?:\s*[:\uff1a]\s*\d{2}|\s*[點点時时])?"
+    )
+    INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        rf"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e])(?:"
+        rf"{TIME_VALUE_PATTERN}\s*(?:[-\uff0d~\uff5e]|到)\s*"
+        rf"(?:{TIME_VALUE_PATTERN})?"
+        rf"|(?:[-\uff0d~\uff5e]|到)\s*{TIME_VALUE_PATTERN}"
+        rf")(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e])"
+    )
 
     @classmethod
     def standardize(cls, hour: int) -> int:
@@ -160,6 +175,10 @@ class ShiftParser:
         if hour < cls.SPLIT_HOUR + 24:
             return hour
         return hour - 24
+
+    @classmethod
+    def looks_like_invalid_attempt(cls, lines: list[str]) -> bool:
+        return any(cls.INVALID_ATTEMPT_PATTERN.search(line) for line in lines)
 
     @classmethod
     def parse_lines(

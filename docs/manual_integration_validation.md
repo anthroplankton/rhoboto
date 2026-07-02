@@ -65,7 +65,7 @@ sheet links or service account details into notes.
 | Invalid Sheet link | Submit Team or Shift settings with a malformed or inaccessible Sheet URL. | The bot returns a safe ephemeral Google Sheets error and does not show a success settings embed. |  |  |
 | Missing sharing permission | Submit settings for a disposable spreadsheet that is not shared with the service account. | The bot asks to check sharing or service account access and does not expose credential paths, service account JSON, raw traceback, or private Sheet details. |  |  |
 | Missing worksheet | Configure settings, delete or rename one configured worksheet in the disposable spreadsheet, then run the feature settings or summary/delete command. | The bot reports a safe Google Sheets error or shows the worksheet as not found without exposing raw Google API details. |  |  |
-| Message write failure | With an invalid or inaccessible configured sheet, send a Team or Shift registration message. | The processing reaction is removed when present, a failure reaction appears, and no raw Google error is posted to the channel. |  |  |
+| Message write failure | With an invalid or inaccessible configured sheet, send a Team or Shift registration message. | The processing reaction is removed when present, both `⚠️` and `🛠️` appear, and no raw Google error is posted to the channel. |  |  |
 
 ## Team Register
 
@@ -80,6 +80,10 @@ Use the team test channel.
 | Encore role callback guard | As the non-admin user, use an existing encore role select menu. | The bot returns an ephemeral permission error and does not update encore roles. |  |  |
 | Help text | Run `/team help` and `/team_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Team submission | Send lines such as `150/740/33.4 main`, `140/680/35.3 backup`, and `150/700/39 encore`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
+| Full-width Team submission | Send `150／740／33.4 main`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
+| Invalid Team attempt | Send `160//600/33`, `160,600,33`, or `160 600 33`. | No worksheet write occurs and the confused reaction appears. |  |  |
+| Team ordinary text | Send ordinary announcement text with no team-like numbers. | No worksheet write occurs and no reaction appears. |  |  |
+| Team context menu invalid attempt | Use the `team_register upsert` context menu on `160//600/33`. | Confused reaction appears on the selected message and the context menu returns the existing failed-upsert follow-up. |  |  |
 | Summary refresh | Run `/team_register summary`. | Summary worksheet and summary embed match the submitted teams and encore roles. |  |  |
 | Delete own data | Run `/team delete`. | The current user's team rows and summary row are removed or blanked as expected. |  |  |
 
@@ -96,7 +100,10 @@ Use the shift test channel.
 | Info message | Run `/shift_register info` with a future event date and deadlines. | Public info message is posted and includes bot mention and Sheet link. |  |  |
 | Help text | Run `/shift help` and `/shift_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Shift submission | Send `15-18 18-20 consecutive not allowed`. | Processing reaction is removed, check reaction is added, and entry worksheet updates. |  |  |
-| Invalid shift | Send a message with no valid shift range. | No worksheet write occurs; confused reaction appears only for parsed but empty shift ranges. |  |  |
+| Invalid shift | Send a message with no valid shift range. | No worksheet write occurs; confused reaction appears for parsed empty ranges and invalid time-range attempts. |  |  |
+| Invalid Shift time attempt | Send `18:00-20:00`, `18點到20點`, `18點到`, or `到20點`. | No worksheet write occurs and the confused reaction appears. |  |  |
+| Shift ordinary text | Send `20:00` or `20點前`. | No worksheet write occurs and no reaction appears. |  |  |
+| Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | Confused reaction appears on the selected message and the context menu returns the existing failed-upsert follow-up. |  |  |
 | Delete own data | Run `/shift delete`. | The current user's entry row is removed or blanked as expected. |  |  |
 
 ## Feature Lifecycle

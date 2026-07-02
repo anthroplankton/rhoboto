@@ -17,8 +17,7 @@ from components.ui_team_register import (
 from models.feature_channel import FeatureChannel
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
-from utils.reactions import remove_reaction_if_present
-from utils.structs_base import UserInfo
+from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import ClassifiedTeams, TeamParser
 
@@ -80,28 +79,21 @@ class TeamRegister(
     async def process_upsert_from_message(
         self, message: Message
     ) -> ClassifiedTeams | None:
-        if (
-            message.author.bot
-            or not message.guild
-            or not message.channel
-            or not await self.is_enabled(message.guild.id, message.channel.id)
-        ):
+        if not await self._should_process_message(message):
             return None
 
-        self.logger.debug(
-            "Received message in Guild: `%s` Channel: `%s` (Feature: `%s`): %r",
-            message.guild.id,
-            message.channel.id,
-            self.feature_name,
-            message.content,
-        )
+        self._log_received_message(message)
 
-        user_info = UserInfo(
-            username=message.author.name,
-            display_name=message.author.display_name,
-        )
-        teams = TeamParser.parse_lines(user_info, lines=message.content.splitlines())
+        user_info = self._message_user_info(message)
+        lines = message.content.splitlines()
+        teams = TeamParser.parse_lines(user_info, lines=lines)
         if not teams:
+            if TeamParser.looks_like_invalid_attempt(lines):
+                await add_reaction_if_possible(
+                    message,
+                    config.CONFUSED_EMOJI,
+                    log=self.logger,
+                )
             return None
 
         self.logger.info(
@@ -133,7 +125,11 @@ class TeamRegister(
             return None
 
         if self.bot.user is not None:
-            await message.add_reaction(config.PROCESSING_EMOJI)
+            await add_reaction_if_possible(
+                message,
+                config.PROCESSING_EMOJI,
+                log=self.logger,
+            )
 
         classified_teams = TeamParser.classify_teams(teams)
         team_tuple = classified_teams.as_tuple()
@@ -163,7 +159,7 @@ class TeamRegister(
                 self.bot.user,
                 log=self.logger,
             )
-            await message.add_reaction("✅")
+            await add_reaction_if_possible(message, "✅", log=self.logger)
 
         return classified_teams
 

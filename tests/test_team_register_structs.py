@@ -44,6 +44,25 @@ def test_team_parser_ignores_invalid_lines_and_raises_for_single_invalid() -> No
         TeamParser.parse_line(make_user(), "missing separators")
 
 
+def test_team_parser_accepts_full_width_slashes() -> None:
+    team = TeamParser.parse_line(make_user(), "main: 150\uff0f740\uff0f33.4 note")
+
+    assert team.leader_skill_value == 150
+    assert team.internal_skill_value == 740
+    assert team.team_power == 33.4
+
+
+def test_team_parser_detects_invalid_attempt_by_numeric_tokens() -> None:
+    assert TeamParser.looks_like_invalid_attempt(["160//600/33"])
+    assert TeamParser.looks_like_invalid_attempt(["160,600,33"])
+    assert TeamParser.looks_like_invalid_attempt(["160 600 33"])
+
+
+def test_team_parser_does_not_flag_general_text_as_invalid_attempt() -> None:
+    assert not TeamParser.looks_like_invalid_attempt(["公告"])
+    assert not TeamParser.looks_like_invalid_attempt(["160/600"])
+
+
 def test_team_classification_uses_effective_value_and_power_rules() -> None:
     teams = TeamParser.parse_lines(
         make_user(),
