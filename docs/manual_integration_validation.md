@@ -79,7 +79,8 @@ Use the team test channel.
 | Settings callback guard | Remove permissions from the admin test user after opening the Team Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
 | Encore role callback guard | As the non-admin user, use an existing encore role select menu. | The bot returns an ephemeral permission error and does not update encore roles. |  |  |
 | Help text | Run `/team help` and `/team_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
-| Team submission | Send lines such as `150/740/33.4 main`, `140/680/35.3 backup`, and `150/700/39 encore`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
+| Team submission | Send lines in order: `150/740/33.4 main`, `150/700/39 encore`, and `140/680/35.3 backup`. | Processing reaction is removed, check reaction is added, and Main, Encore, and Backup worksheets update in message order. |  |  |
+| Team overwrite update | After registering three teams, send only `150/740/33.4 updated main` as a new message. | The Main worksheet updates and the user's old Encore and Backup rows are cleared. |  |  |
 | Full-width Team submission | Send `150／740／33.4 main`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
 | Invalid Team attempt | Send `160//600/33`, `160,600,33`, or `160 600 33`. | No worksheet write occurs and the confused reaction appears. |  |  |
 | Team ordinary text | Send ordinary announcement text with no team-like numbers. | No worksheet write occurs and no reaction appears. |  |  |

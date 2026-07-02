@@ -254,19 +254,13 @@ class TeamParser:
 
     @classmethod
     def classify_teams(cls, teams: list[Team]) -> ClassifiedTeams:
-        backup_teams = teams.copy()
+        if not teams:
+            msg = "Cannot classify an empty team list."
+            raise ValueError(msg)
 
-        main_team = max(teams)
-        backup_teams.remove(main_team)
-
-        encore_team = None
-        if backup_teams:
-            encore_team = max(backup_teams, key=lambda t: t.team_power)
-            # Ensure encore_team is not weaker than main_team
-            if encore_team.team_power < main_team.team_power:
-                encore_team = None
-            else:
-                backup_teams.remove(encore_team)
+        main_team = teams[0]
+        encore_team = teams[1] if len(teams) > 1 else None
+        backup_teams = teams[2:]
 
         return ClassifiedTeams(main_team, encore_team, backup_teams)
 

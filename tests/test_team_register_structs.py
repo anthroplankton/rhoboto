@@ -63,23 +63,27 @@ def test_team_parser_does_not_flag_general_text_as_invalid_attempt() -> None:
     assert not TeamParser.looks_like_invalid_attempt(["160/600"])
 
 
-def test_team_classification_uses_effective_value_and_power_rules() -> None:
+def test_team_classification_uses_valid_submission_order() -> None:
     teams = TeamParser.parse_lines(
         make_user(),
         [
-            "150/740/33.4 main by effective value",
-            "140/680/35.3 encore by highest power",
-            "130/650/34.0 backup",
+            "announcement text",
+            "100/100/20.0 first valid line becomes main",
+            "not a team",
+            "150/700/39.0 second valid line becomes encore",
+            "140/680/35.3 third valid line becomes backup",
         ],
     )
 
     classified = TeamParser.classify_teams(teams)
 
-    assert classified.main.original_message.endswith("main by effective value")
+    assert classified.main.original_message.endswith("first valid line becomes main")
     assert classified.encore is not None
-    assert classified.encore.original_message.endswith("encore by highest power")
+    assert classified.encore.original_message.endswith(
+        "second valid line becomes encore"
+    )
     assert [team.original_message for team in classified.backup] == [
-        "130/650/34.0 backup"
+        "140/680/35.3 third valid line becomes backup"
     ]
     assert classified.as_tuple() == (
         classified.main,
@@ -88,23 +92,35 @@ def test_team_classification_uses_effective_value_and_power_rules() -> None:
     )
 
 
-def test_team_classification_keeps_weaker_power_candidate_as_backup() -> None:
+def test_team_classification_handles_one_team_as_main_only() -> None:
+    teams = TeamParser.parse_lines(make_user(), ["100/100/20.0 only team"])
+
+    classified = TeamParser.classify_teams(teams)
+
+    assert classified.main.original_message == "100/100/20.0 only team"
+    assert classified.encore is None
+    assert classified.backup == []
+    assert classified.as_tuple() == (classified.main, None)
+
+
+def test_team_classification_handles_two_teams_without_backup() -> None:
     teams = TeamParser.parse_lines(
         make_user(),
         [
-            "150/740/40.0 main",
-            "140/680/35.3 backup one",
-            "130/650/34.0 backup two",
+            "100/100/20.0 first valid line becomes main",
+            "150/700/39.0 second valid line becomes encore",
         ],
     )
 
     classified = TeamParser.classify_teams(teams)
 
-    assert classified.encore is None
-    assert [team.original_message for team in classified.backup] == [
-        "140/680/35.3 backup one",
-        "130/650/34.0 backup two",
-    ]
+    assert classified.main.original_message.endswith("first valid line becomes main")
+    assert classified.encore is not None
+    assert classified.encore.original_message.endswith(
+        "second valid line becomes encore"
+    )
+    assert classified.backup == []
+    assert classified.as_tuple() == (classified.main, classified.encore)
 
 
 def test_summary_generates_dynamic_team_columns_from_team_dataframes() -> None:
