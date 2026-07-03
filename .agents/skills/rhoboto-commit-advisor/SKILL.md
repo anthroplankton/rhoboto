@@ -1,6 +1,6 @@
 ---
 name: rhoboto-commit-advisor
-description: Use when the user asks for Rhoboto commit advice, commit grouping, Conventional Commit-style messages, staging commands, pre-commit validation choices, or explicit commit execution in /home/dongj/projects/rhoboto.
+description: Use when the user asks for Rhoboto commit advice, commit grouping, Conventional Commit-style messages, staging commands, pre-commit validation choices, or explicit commit execution in the Rhoboto repository.
 ---
 
 # Rhoboto Commit Advisor
@@ -21,8 +21,9 @@ asks Codex to commit.
    - If execution mode is unclear, stay in advice mode.
 
 2. Re-establish Rhoboto context before advising.
-   - Work in `/home/dongj/projects/rhoboto`. If the current directory differs
-     and the user did not clearly mean Rhoboto, ask a concise clarification.
+   - Work from the Rhoboto repository root. If the current directory is not a
+     Rhoboto checkout and the user did not clearly mean Rhoboto, ask a concise
+     clarification.
    - Read `AGENTS.md` and `docs/project_setup.md` when present.
    - Inspect current state with `git status --short --branch`.
    - Inspect unstaged, staged, and untracked changes with focused `git diff`,
