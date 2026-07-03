@@ -6,13 +6,17 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 from discord import ButtonStyle, Embed, Interaction, Object, Role, TextStyle
-from discord.ui import Button, Modal, RoleSelect, TextInput, View
+from discord.ui import Button, Modal, RoleSelect, TextInput
 
 from bot import config
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
     SettingsPanel,
+    SettingsTimeoutView,
+    disable_view_items,
+    prepare_replacement_settings_view,
+    send_current_panel_followup,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
@@ -44,6 +48,11 @@ TEAM_REGISTER_WORKSHEET_FOOTER = (
 )
 TEAM_REGISTER_SETTINGS_MISSING_MESSAGE = (
     "Team Register settings are no longer configured for this channel."
+)
+ENCORE_ROLE_TIMEOUT_MESSAGE = (
+    "This Encore role settings panel expired. "
+    "Unsaved Encore role changes were not saved. "
+    "Run the settings command again to continue."
 )
 
 
@@ -95,11 +104,6 @@ def is_everyone_role(role: Role, guild_id: int | None) -> bool:
         return True
     is_default = getattr(role, "is_default", None)
     return bool(is_default and is_default())
-
-
-def disable_view_items(view: View) -> None:
-    for item in view.children:
-        item.disabled = True
 
 
 def build_encore_role_edit_embed(
@@ -330,11 +334,7 @@ class TeamRegisterSheetModal(Modal):
             metadata=metadata,
         )
 
-        await interaction.followup.send(
-            embed=panel.embed,
-            view=panel.view,
-            ephemeral=True,
-        )
+        await send_current_panel_followup(interaction, panel)
 
 
 class TeamRegisterButton(Button):
@@ -418,6 +418,8 @@ class EditEncoreRolesButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
+        current_view = self.view
+
         team_register = await get_fresh_team_register_config_or_respond(
             self.team_register_manager,
             interaction,
@@ -428,29 +430,41 @@ class EditEncoreRolesButton(Button):
         roles = list(interaction.guild.roles) if interaction.guild else []
         resolution = resolve_encore_roles(team_register.encore_role_ids, roles)
         if len(resolution.active_roles) > ENCORE_ROLE_SELECT_MAX_VALUES:
+            replacement_view = TeamRegisterView(
+                team_register_manager=self.team_register_manager,
+                has_existing_settings=True,
+                roles=roles,
+                encore_role_ids=team_register.encore_role_ids,
+                metadata=self.metadata,
+            )
+            if current_view is not None:
+                replacement_view = prepare_replacement_settings_view(
+                    current_view,
+                    replacement_view,
+                )
             await interaction.response.edit_message(
                 content=None,
                 embed=build_too_many_encore_roles_embed(len(resolution.active_roles)),
-                view=TeamRegisterView(
-                    team_register_manager=self.team_register_manager,
-                    has_existing_settings=True,
-                    roles=roles,
-                    encore_role_ids=team_register.encore_role_ids,
-                    metadata=self.metadata,
-                ),
+                view=replacement_view,
             )
             return
 
+        replacement_view = EncoreRoleEditView(
+            team_register_manager=self.team_register_manager,
+            metadata=self.metadata,
+            roles=roles,
+            encore_role_ids=team_register.encore_role_ids,
+            retained_missing_role_ids=resolution.missing_role_ids,
+        )
+        if current_view is not None:
+            replacement_view = prepare_replacement_settings_view(
+                current_view,
+                replacement_view,
+            )
         await interaction.response.edit_message(
             content=None,
             embed=build_encore_role_edit_embed(resolution.missing_role_ids),
-            view=EncoreRoleEditView(
-                team_register_manager=self.team_register_manager,
-                metadata=self.metadata,
-                roles=roles,
-                encore_role_ids=team_register.encore_role_ids,
-                retained_missing_role_ids=resolution.missing_role_ids,
-            ),
+            view=replacement_view,
         )
 
 
@@ -469,6 +483,8 @@ class BackToTeamSettingsButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
+        current_view = self.view
+
         team_register = await get_fresh_team_register_config_or_respond(
             self.team_register_manager,
             interaction,
@@ -477,6 +493,18 @@ class BackToTeamSettingsButton(Button):
             return
 
         roles = list(interaction.guild.roles) if interaction.guild else []
+        replacement_view = TeamRegisterView(
+            team_register_manager=self.team_register_manager,
+            has_existing_settings=True,
+            roles=roles,
+            encore_role_ids=team_register.encore_role_ids,
+            metadata=self.metadata,
+        )
+        if current_view is not None:
+            replacement_view = prepare_replacement_settings_view(
+                current_view,
+                replacement_view,
+            )
         await interaction.response.edit_message(
             content=None,
             embed=build_current_settings_embed(
@@ -486,13 +514,7 @@ class BackToTeamSettingsButton(Button):
                 color=config.DEFAULT_EMBED_COLOR,
                 roles=roles,
             ),
-            view=TeamRegisterView(
-                team_register_manager=self.team_register_manager,
-                has_existing_settings=True,
-                roles=roles,
-                encore_role_ids=team_register.encore_role_ids,
-                metadata=self.metadata,
-            ),
+            view=replacement_view,
         )
 
 
@@ -527,6 +549,10 @@ class EncoreRoleSelect(RoleSelect):
         if not await require_settings_permissions(interaction):
             return
 
+        view = self.view
+        if view is None:
+            return
+
         team_register = await get_fresh_team_register_config_or_respond(
             self.team_register_manager,
             interaction,
@@ -543,17 +569,20 @@ class EncoreRoleSelect(RoleSelect):
                 guild_id=interaction.guild.id if interaction.guild else None,
                 removed_missing_role_ids=(),
             ),
-            view=EncoreRolePreviewView(
-                team_register_manager=self.team_register_manager,
-                selected_roles=selected_roles,
-                retained_missing_role_ids=self.retained_missing_role_ids,
-                removed_missing_role_ids=(),
-                metadata=self.metadata,
+            view=prepare_replacement_settings_view(
+                view,
+                EncoreRolePreviewView(
+                    team_register_manager=self.team_register_manager,
+                    selected_roles=selected_roles,
+                    retained_missing_role_ids=self.retained_missing_role_ids,
+                    removed_missing_role_ids=(),
+                    metadata=self.metadata,
+                ),
             ),
         )
 
 
-class EncoreRoleEditView(View):
+class EncoreRoleEditView(SettingsTimeoutView):
     def __init__(
         self,
         team_register_manager: TeamRegisterManager,
@@ -563,7 +592,7 @@ class EncoreRoleEditView(View):
         encore_role_ids: Sequence[int],
         retained_missing_role_ids: Sequence[int],
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__()
         self.team_register_manager = team_register_manager
         self.metadata = metadata
         self.active_roles = resolve_encore_roles(encore_role_ids, roles).active_roles
@@ -585,6 +614,10 @@ class EncoreRoleEditView(View):
                 metadata=metadata,
             )
         )
+
+    def build_timeout_edit_kwargs(self) -> dict[str, object]:
+        disable_view_items(self)
+        return {"content": ENCORE_ROLE_TIMEOUT_MESSAGE, "view": self}
 
 
 class ConfirmEncoreRolesButton(Button):
@@ -614,6 +647,7 @@ class ConfirmEncoreRolesButton(Button):
         try:
             metadata = await view.team_register_manager.fetch_google_sheets_metadata()
         except GoogleSheetsError as exc:
+            view.stop()
             await interaction.response.edit_message(
                 content=(
                     "Encore roles saved, but the settings view could not be "
@@ -635,14 +669,17 @@ class ConfirmEncoreRolesButton(Button):
                 roles=roles,
                 is_save_action=True,
             ),
-            view=TeamRegisterView(
-                team_register_manager=view.team_register_manager,
-                has_existing_settings=True,
-                sheet_url=team_register.sheet_url,
-                roles=roles,
-                encore_role_ids=role_ids,
-                metadata=metadata,
-                is_save_action=True,
+            view=prepare_replacement_settings_view(
+                view,
+                TeamRegisterView(
+                    team_register_manager=view.team_register_manager,
+                    has_existing_settings=True,
+                    sheet_url=team_register.sheet_url,
+                    roles=roles,
+                    encore_role_ids=role_ids,
+                    metadata=metadata,
+                    is_save_action=True,
+                ),
             ),
         )
 
@@ -675,12 +712,15 @@ class CancelEncoreRolesButton(Button):
                 color=config.DEFAULT_EMBED_COLOR,
                 roles=roles,
             ),
-            view=TeamRegisterView(
-                team_register_manager=view.team_register_manager,
-                has_existing_settings=True,
-                roles=roles,
-                encore_role_ids=team_register.encore_role_ids,
-                metadata=view.metadata,
+            view=prepare_replacement_settings_view(
+                view,
+                TeamRegisterView(
+                    team_register_manager=view.team_register_manager,
+                    has_existing_settings=True,
+                    roles=roles,
+                    encore_role_ids=team_register.encore_role_ids,
+                    metadata=view.metadata,
+                ),
             ),
         )
 
@@ -703,12 +743,15 @@ class RemoveMissingIdsButton(Button):
         if team_register is None:
             return
 
-        updated_view = EncoreRolePreviewView(
-            team_register_manager=view.team_register_manager,
-            selected_roles=view.active_roles,
-            retained_missing_role_ids=(),
-            removed_missing_role_ids=view.retained_missing_role_ids,
-            metadata=view.metadata,
+        updated_view = prepare_replacement_settings_view(
+            view,
+            EncoreRolePreviewView(
+                team_register_manager=view.team_register_manager,
+                selected_roles=view.active_roles,
+                retained_missing_role_ids=(),
+                removed_missing_role_ids=view.retained_missing_role_ids,
+                metadata=view.metadata,
+            ),
         )
         await interaction.response.edit_message(
             content=None,
@@ -722,7 +765,7 @@ class RemoveMissingIdsButton(Button):
         )
 
 
-class EncoreRolePreviewView(View):
+class EncoreRolePreviewView(SettingsTimeoutView):
     def __init__(
         self,
         team_register_manager: TeamRegisterManager,
@@ -732,7 +775,7 @@ class EncoreRolePreviewView(View):
         removed_missing_role_ids: Sequence[int] = (),
         metadata: TeamRegisterGoogleSheetsMetadata,
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__()
         self.team_register_manager = team_register_manager
         self.selected_roles = tuple(selected_roles)
         self.retained_missing_role_ids = tuple(retained_missing_role_ids)
@@ -741,8 +784,12 @@ class EncoreRolePreviewView(View):
         self.add_item(ConfirmEncoreRolesButton())
         self.add_item(CancelEncoreRolesButton())
 
+    def build_timeout_edit_kwargs(self) -> dict[str, object]:
+        disable_view_items(self)
+        return {"content": ENCORE_ROLE_TIMEOUT_MESSAGE, "view": self}
 
-class TeamRegisterView(View):
+
+class TeamRegisterView(SettingsTimeoutView):
     """View for team register setup/edit button."""
 
     def __init__(
@@ -758,7 +805,7 @@ class TeamRegisterView(View):
         metadata: TeamRegisterGoogleSheetsMetadata | None = None,
         is_save_action: bool = False,
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__()
         if metadata is not None:
             sheet_url = sheet_url or metadata.sheet_url
             team_worksheet_titles = team_worksheet_titles or [

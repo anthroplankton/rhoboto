@@ -59,6 +59,13 @@ class NullLogger:
         pass
 
 
+def fake_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        tree=SimpleNamespace(add_command=lambda _command: None),
+        user=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_user_help_defers_before_followup(
     monkeypatch: pytest.MonkeyPatch,
@@ -434,3 +441,44 @@ async def test_shift_settings_command_defers_and_reuses_setup_after_enable() -> 
 
     assert interaction.response.deferred == [True]
     assert called == 1
+
+
+@pytest.mark.asyncio
+async def test_team_setup_after_enable_attaches_initial_setup_view_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr("cogs.team_register.TeamRegisterManager", MissingConfigManager)
+    interaction = FakeInteraction()
+    subject = TeamRegister(fake_bot())
+
+    await subject.setup_after_enable(interaction)
+
+    content, kwargs = interaction.followup.messages[0]
+    assert content == (
+        "Team Register is not yet configured for this channel. Click below to set up."
+    )
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
+
+
+@pytest.mark.asyncio
+async def test_shift_setup_after_enable_attaches_initial_setup_view_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.shift_register.ShiftRegisterManager",
+        MissingConfigManager,
+    )
+    interaction = FakeInteraction()
+    subject = ShiftRegister(fake_bot())
+
+    await subject.setup_after_enable(interaction)
+
+    content, kwargs = interaction.followup.messages[0]
+    assert content == (
+        "Shift Register is not yet configured for this channel. Click below to set up."
+    )
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]

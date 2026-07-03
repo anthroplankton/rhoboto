@@ -9,6 +9,10 @@ from components.ui_language_settings import (
     AnnouncementLanguageSettingsView,
     build_announcement_languages_embed,
 )
+from components.ui_settings_flow import (
+    SETTINGS_VIEW_TIMEOUT_SECONDS,
+    SettingsTimeoutView,
+)
 from tests.fakes import FakeInteraction
 
 
@@ -41,6 +45,13 @@ def test_language_embed_shows_order_and_message_count_warning() -> None:
     assert "Each selected language sends one public announcement message" in str(
         embed.description
     )
+
+
+def test_announcement_language_view_uses_shared_settings_timeout() -> None:
+    view = AnnouncementLanguageSettingsView(guild_id=111, language_codes=["ja"])
+
+    assert isinstance(view, SettingsTimeoutView)
+    assert view.timeout == SETTINGS_VIEW_TIMEOUT_SECONDS
 
 
 def child_with_type(view: object, child_type: type[object]) -> object:

@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from discord import ButtonStyle, Embed, Interaction, TextStyle
-from discord.ui import Button, Modal, TextInput, View
+from discord.ui import Button, Modal, TextInput
 
 from bot import config
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
     SettingsPanel,
+    SettingsTimeoutView,
+    send_current_panel_followup,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
@@ -206,11 +208,7 @@ class ShiftRegisterSheetModal(Modal):
             metadata=metadata,
         )
 
-        await interaction.followup.send(
-            embed=panel.embed,
-            view=panel.view,
-            ephemeral=True,
-        )
+        await send_current_panel_followup(interaction, panel)
 
 
 class ShiftRegisterButton(Button):
@@ -293,7 +291,7 @@ class ShiftRegisterButton(Button):
         )
 
 
-class ShiftRegisterView(View):
+class ShiftRegisterView(SettingsTimeoutView):
     """View for shift register setup/edit button."""
 
     def __init__(
@@ -307,7 +305,7 @@ class ShiftRegisterView(View):
         final_schedule_worksheet_title: str | None = None,
         final_schedule_anchor_cell: str = "A1",
     ) -> None:
-        super().__init__(timeout=None)
+        super().__init__()
         label = (
             "Edit Shift Register Settings"
             if has_existing_settings

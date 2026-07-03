@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
+
+from discord.ui import View
 
 from components.ui_google_sheets_errors import send_google_sheets_error
 from utils.google_sheets_errors import GoogleSheetsError
@@ -9,10 +11,35 @@ from utils.google_sheets_errors import GoogleSheetsError
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from discord import Embed, Interaction
-    from discord.ui import View
+    from discord import Embed, Interaction, Message
 
     from utils.manager_base import ManagerBase
+
+
+SETTINGS_VIEW_TIMEOUT_SECONDS: Final[float] = 180.0
+
+
+def disable_view_items(view: View) -> None:
+    for item in view.children:
+        item.disabled = True
+
+
+class SettingsTimeoutView(View):
+    """Base view for ephemeral settings panels that disable on timeout."""
+
+    def __init__(self, *, timeout: float = SETTINGS_VIEW_TIMEOUT_SECONDS) -> None:
+        super().__init__(timeout=timeout)
+        self.message: Message | None = None
+
+    def build_timeout_edit_kwargs(self) -> dict[str, object]:
+        disable_view_items(self)
+        return {"view": self}
+
+    async def on_timeout(self) -> None:
+        edit_kwargs = self.build_timeout_edit_kwargs()
+        self.stop()
+        if self.message is not None:
+            await self.message.edit(**edit_kwargs)
 
 
 @dataclass(frozen=True)
@@ -53,12 +80,30 @@ async def send_current_panel_followup(
     *,
     content: str | None = None,
 ) -> None:
-    await interaction.followup.send(
+    message = await interaction.followup.send(
         content=content,
         embed=panel.embed,
         view=panel.view,
         ephemeral=True,
+        wait=True,
     )
+    attach_settings_view_message(panel.view, message)
+
+
+def attach_settings_view_message(view: View, message: Message) -> None:
+    if isinstance(view, SettingsTimeoutView):
+        view.message = message
+
+
+def prepare_replacement_settings_view(
+    current_view: View,
+    replacement_view: View,
+) -> View:
+    if isinstance(current_view, SettingsTimeoutView):
+        if current_view.message is not None:
+            attach_settings_view_message(replacement_view, current_view.message)
+        current_view.stop()
+    return replacement_view
 
 
 async def send_stale_setup_panel_if_configured(

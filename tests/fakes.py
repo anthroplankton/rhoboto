@@ -35,6 +35,7 @@ class FakeDiscordResponse:
 class FakeDiscordFollowup:
     def __init__(self) -> None:
         self.messages: list[tuple[str | None, dict[str, object]]] = []
+        self.sent_message_objects: list[SimpleNamespace] = []
 
     async def send(
         self,
@@ -42,7 +43,9 @@ class FakeDiscordFollowup:
         **kwargs: object,
     ) -> SimpleNamespace:
         self.messages.append((content, kwargs))
-        return SimpleNamespace()
+        message = SimpleNamespace()
+        self.sent_message_objects.append(message)
+        return message
 
 
 @dataclass(frozen=True)

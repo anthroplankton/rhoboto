@@ -48,6 +48,8 @@ async def test_language_settings_announcement_sends_ephemeral_panel(
     content, kwargs = interaction.followup.messages[0]
     assert content is None
     assert kwargs["ephemeral"] is True
+    assert kwargs["wait"] is True
     assert "Japanese" in str(kwargs["embed"].description)
     assert "Traditional Chinese" in str(kwargs["embed"].description)
     assert isinstance(kwargs["view"], AnnouncementLanguageSettingsView)
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]

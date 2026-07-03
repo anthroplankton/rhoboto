@@ -7,6 +7,10 @@ from discord import ButtonStyle
 
 from components.ui_feature_channel import DisableAndClearConfirmView
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
+from components.ui_settings_flow import (
+    SETTINGS_VIEW_TIMEOUT_SECONDS,
+    attach_settings_view_message,
+)
 from components.ui_shift_register import (
     ShiftRegisterButton,
     ShiftRegisterSheetModal,
@@ -180,6 +184,14 @@ def assert_permission_denied(interaction: FakeInteraction) -> None:
     ]
 
 
+class FakeMessage:
+    def __init__(self) -> None:
+        self.edits: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    async def edit(self, *args: object, **kwargs: object) -> None:
+        self.edits.append((args, kwargs))
+
+
 def team_register_metadata() -> SimpleNamespace:
     return SimpleNamespace(
         sheet_url="https://sheet.example",
@@ -242,6 +254,8 @@ async def test_team_setup_button_with_existing_config_sends_current_panel() -> N
         "Team Register is configured for this channel. "
         "Use the buttons below to update sheet settings or Encore roles."
     )
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
 
 
 @pytest.mark.asyncio
@@ -281,6 +295,26 @@ def test_team_existing_settings_view_buttons_use_secondary_style() -> None:
 
     assert edit_settings.style is ButtonStyle.secondary
     assert edit_encore_roles.style is ButtonStyle.secondary
+
+
+@pytest.mark.asyncio
+async def test_team_settings_view_disables_controls_on_timeout() -> None:
+    manager = RecordingTeamRegisterManager()
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        encore_role_ids=[],
+        roles=[],
+    )
+    message = FakeMessage()
+    attach_settings_view_message(view, message)
+
+    await view.on_timeout()
+
+    assert view.timeout == SETTINGS_VIEW_TIMEOUT_SECONDS
+    assert all(child.disabled for child in view.children)
+    assert message.edits == [((), {"view": view})]
 
 
 def test_team_saved_view_without_active_encore_roles_highlights_encore_button() -> None:
@@ -366,6 +400,8 @@ async def test_team_modal_submit_allows_authorized_user() -> None:
         "Your Team Register settings were saved. "
         "Use the buttons below to edit sheet settings or Encore roles."
     )
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
 
 
 @pytest.mark.asyncio
@@ -465,6 +501,29 @@ async def test_edit_encore_roles_button_shows_role_edit_view() -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_encore_roles_transfers_message_to_role_edit_view() -> None:
+    manager = RecordingTeamRegisterManager()
+    manager.encore_role_ids = [1]
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        roles=[role],
+        encore_role_ids=[1],
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Edit Encore Roles").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
+
+
+@pytest.mark.asyncio
 async def test_edit_encore_roles_button_rejects_more_than_25_active_roles() -> None:
     manager = RecordingTeamRegisterManager()
     roles = [FakeRole(id=i, name=f"Role {i}", position=i) for i in range(1, 27)]
@@ -478,6 +537,29 @@ async def test_edit_encore_roles_button_rejects_more_than_25_active_roles() -> N
     assert content is None
     assert edit_kwargs["embed"].title == "Cannot Edit Encore Roles"
     assert isinstance(edit_kwargs["view"], TeamRegisterView)
+
+
+@pytest.mark.asyncio
+async def test_edit_encore_roles_too_many_transfers_message_to_settings() -> None:
+    manager = RecordingTeamRegisterManager()
+    roles = [FakeRole(id=i, name=f"Role {i}", position=i) for i in range(1, 27)]
+    manager.encore_role_ids = [role.id for role in roles]
+    interaction = FakeInteraction(roles=roles)
+    message = FakeMessage()
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        roles=roles,
+        encore_role_ids=manager.encore_role_ids,
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Edit Encore Roles").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
 
 
 @pytest.mark.asyncio
@@ -503,12 +585,15 @@ async def test_encore_role_select_creates_preview_without_saving() -> None:
     manager = RecordingTeamRegisterManager()
     role = FakeRole(id=1, name="Encore", position=10)
     interaction = FakeInteraction(roles=[role])
-    select = EncoreRoleSelect(
+    view = EncoreRoleEditView(
         manager,
+        metadata=team_register_metadata(),
         roles=[role],
         encore_role_ids=[],
         retained_missing_role_ids=[99],
-        metadata=team_register_metadata(),
+    )
+    select = next(
+        child for child in view.children if isinstance(child, EncoreRoleSelect)
     )
     select._values = [role]  # noqa: SLF001
 
@@ -523,17 +608,46 @@ async def test_encore_role_select_creates_preview_without_saving() -> None:
 
 
 @pytest.mark.asyncio
+async def test_encore_role_select_transfers_message_to_preview() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = EncoreRoleEditView(
+        manager,
+        metadata=team_register_metadata(),
+        roles=[role],
+        encore_role_ids=[],
+        retained_missing_role_ids=[99],
+    )
+    attach_settings_view_message(view, message)
+    select = next(
+        child for child in view.children if isinstance(child, EncoreRoleSelect)
+    )
+    select._values = [role]  # noqa: SLF001
+
+    await select.callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
+
+
+@pytest.mark.asyncio
 async def test_encore_role_select_uses_fresh_missing_settings_guard() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
     role = FakeRole(id=1, name="Encore", position=10)
     interaction = FakeInteraction(roles=[role])
-    select = EncoreRoleSelect(
+    view = EncoreRoleEditView(
         manager,
+        metadata=team_register_metadata(),
         roles=[role],
         encore_role_ids=[],
         retained_missing_role_ids=[99],
-        metadata=team_register_metadata(),
+    )
+    select = next(
+        child for child in view.children if isinstance(child, EncoreRoleSelect)
     )
     select._values = [role]  # noqa: SLF001
 
@@ -589,6 +703,74 @@ async def test_encore_role_confirm_saves_selected_and_retained_missing_ids() -> 
 
 
 @pytest.mark.asyncio
+async def test_encore_role_edit_timeout_disables_controls_without_saving() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    view = EncoreRoleEditView(
+        manager,
+        metadata=team_register_metadata(),
+        roles=[role],
+        encore_role_ids=[1, 99],
+        retained_missing_role_ids=[99],
+    )
+    message = FakeMessage()
+    attach_settings_view_message(view, message)
+
+    await view.on_timeout()
+
+    assert manager.encore_role_id_updates == []
+    assert all(child.disabled for child in view.children)
+    assert (
+        "Unsaved Encore role changes were not saved." in message.edits[0][1]["content"]
+    )
+    assert message.edits[0][1]["view"] is view
+
+
+@pytest.mark.asyncio
+async def test_encore_role_preview_timeout_disables_controls_without_saving() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[99],
+        metadata=team_register_metadata(),
+    )
+    message = FakeMessage()
+    attach_settings_view_message(view, message)
+
+    await view.on_timeout()
+
+    assert manager.encore_role_id_updates == []
+    assert all(child.disabled for child in view.children)
+    assert (
+        "Unsaved Encore role changes were not saved." in message.edits[0][1]["content"]
+    )
+    assert message.edits[0][1]["view"] is view
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_transfers_message_to_settings() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
+
+
+@pytest.mark.asyncio
 async def test_encore_role_confirm_refreshes_metadata_after_save() -> None:
     manager = RecordingTeamRegisterManager()
     role = FakeRole(id=1, name="Encore", position=10)
@@ -633,6 +815,7 @@ async def test_encore_role_confirm_reports_saved_when_metadata_refresh_fails() -
     await child_with_label(view, "Confirm Save").callback(interaction)
 
     assert manager.encore_role_id_updates == [[1]]
+    assert view.is_finished()
     assert interaction.response.edits == [
         (
             "Encore roles saved, but the settings view could not be refreshed. "
@@ -707,6 +890,27 @@ async def test_encore_role_cancel_returns_to_settings_without_saving() -> None:
 
 
 @pytest.mark.asyncio
+async def test_encore_role_cancel_transfers_message_to_settings() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[99],
+        metadata=team_register_metadata(),
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Cancel").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
+
+
+@pytest.mark.asyncio
 async def test_encore_role_cancel_denies_unauthorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     role = FakeRole(id=1, name="Encore", position=10)
@@ -756,6 +960,28 @@ async def test_remove_missing_ids_from_edit_view_previews_removal_without_saving
         getattr(child, "label", None) != "Remove Missing IDs"
         for child in updated_view.children
     )
+
+
+@pytest.mark.asyncio
+async def test_remove_missing_stops_old_view_and_transfers_message_to_preview() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = EncoreRoleEditView(
+        manager,
+        metadata=team_register_metadata(),
+        roles=[role],
+        encore_role_ids=[1, 99],
+        retained_missing_role_ids=[99],
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Remove Missing IDs").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
 
 
 @pytest.mark.asyncio
@@ -865,6 +1091,31 @@ async def test_back_to_settings_returns_to_clean_settings_panel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_back_to_settings_stops_old_view_and_transfers_message_to_settings() -> (
+    None
+):
+    manager = RecordingTeamRegisterManager()
+    manager.encore_role_ids = [1]
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    message = FakeMessage()
+    view = EncoreRoleEditView(
+        manager,
+        metadata=team_register_metadata(),
+        roles=[role],
+        encore_role_ids=[1],
+        retained_missing_role_ids=[],
+    )
+    attach_settings_view_message(view, message)
+
+    await child_with_label(view, "Back to Settings").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert view.is_finished()
+    assert updated_view.message is message
+
+
+@pytest.mark.asyncio
 async def test_back_to_settings_denies_unauthorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = unauthorized_interaction()
@@ -943,6 +1194,8 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
         "Use the button below to update sheet settings."
     )
     assert kwargs["embed"].footer.text is None
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
 
 
 @pytest.mark.asyncio
@@ -969,6 +1222,28 @@ async def test_shift_edit_settings_button_uses_fresh_missing_settings_guard() ->
         )
     ]
     assert interaction.response.modals == []
+
+
+@pytest.mark.asyncio
+async def test_shift_settings_view_disables_controls_on_timeout() -> None:
+    manager = RecordingShiftRegisterManager()
+    view = ShiftRegisterView(
+        manager,
+        has_existing_settings=True,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+    message = FakeMessage()
+    attach_settings_view_message(view, message)
+
+    await view.on_timeout()
+
+    assert view.timeout == SETTINGS_VIEW_TIMEOUT_SECONDS
+    assert all(child.disabled for child in view.children)
+    assert message.edits == [((), {"view": view})]
 
 
 @pytest.mark.asyncio
@@ -1045,6 +1320,8 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
         "Use the button below to edit sheet settings."
     )
     assert embed.footer.text is None
+    assert kwargs["wait"] is True
+    assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
 
 
 @pytest.mark.asyncio

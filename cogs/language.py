@@ -10,6 +10,7 @@ from components.ui_language_settings import (
     build_announcement_language_settings_panel,
 )
 from components.ui_permissions import require_settings_permissions
+from components.ui_settings_flow import send_current_panel_followup
 from utils.announcement_languages import get_announcement_languages
 
 if TYPE_CHECKING:
@@ -57,13 +58,7 @@ class Language(commands.Cog):
             interaction.guild.id,
             language_codes,
         )
-        message = await interaction.followup.send(
-            embed=panel.embed,
-            view=panel.view,
-            ephemeral=True,
-            wait=True,
-        )
-        panel.view.message = message
+        await send_current_panel_followup(interaction, panel)
 
 
 async def setup(bot: Rhoboto) -> None:

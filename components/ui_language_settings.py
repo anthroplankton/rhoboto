@@ -5,12 +5,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from discord import ButtonStyle, Embed, SelectOption
-from discord.ui import Button, Select, View
+from discord.ui import Button, Select
 from tortoise.exceptions import DBConnectionError, IntegrityError, OperationalError
 
 from bot import config
 from components.ui_permissions import require_settings_permissions
-from components.ui_settings_flow import SettingsPanel
+from components.ui_settings_flow import (
+    SettingsPanel,
+    SettingsTimeoutView,
+    disable_view_items,
+    prepare_replacement_settings_view,
+)
 from utils.announcement_languages import (
     DEFAULT_ANNOUNCEMENT_LANGUAGES,
     SUPPORTED_ANNOUNCEMENT_LANGUAGE_LABELS,
@@ -21,7 +26,7 @@ from utils.announcement_languages import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from discord import Interaction, Message
+    from discord import Interaction
 
 
 LANGUAGE_REQUIRED_MESSAGE = "At least one announcement language is required."
@@ -99,12 +104,7 @@ def build_announcement_languages_embed(
     return embed
 
 
-def disable_view_items(view: View) -> None:
-    for item in view.children:
-        item.disabled = True
-
-
-class AnnouncementLanguageSettingsView(View):
+class AnnouncementLanguageSettingsView(SettingsTimeoutView):
     def __init__(
         self,
         guild_id: int,
@@ -112,13 +112,12 @@ class AnnouncementLanguageSettingsView(View):
         *,
         saved_language_codes: Sequence[str] | None = None,
     ) -> None:
-        super().__init__(timeout=180)
+        super().__init__()
         self.guild_id = guild_id
         self.saved_language_codes = normalize_announcement_languages(
             language_codes if saved_language_codes is None else saved_language_codes
         )
         self.draft = AnnouncementLanguageDraft.from_saved(language_codes)
-        self.message: Message | None = None
 
         if self.draft.remaining_language_codes:
             self.add_item(AddAnnouncementLanguageSelect(self))
@@ -142,8 +141,7 @@ class AnnouncementLanguageSettingsView(View):
             is_save_action=is_save_action,
             saved_language_codes=saved_language_codes,
         )
-        panel.view.message = self.message
-        self.stop()
+        prepare_replacement_settings_view(self, panel.view)
         await interaction.response.edit_message(embed=panel.embed, view=panel.view)
 
     def build_disabled_saved_panel(self) -> SettingsPanel:
@@ -157,11 +155,9 @@ class AnnouncementLanguageSettingsView(View):
         panel.view.stop()
         return panel
 
-    async def on_timeout(self) -> None:
+    def build_timeout_edit_kwargs(self) -> dict[str, object]:
         panel = self.build_disabled_saved_panel()
-        self.stop()
-        if self.message is not None:
-            await self.message.edit(embed=panel.embed, view=panel.view)
+        return {"embed": panel.embed, "view": panel.view}
 
 
 class AddAnnouncementLanguageSelect(Select):
@@ -265,7 +261,7 @@ class CancelAnnouncementLanguagesButton(Button):
         if not await require_settings_permissions(interaction):
             return
         panel = self.parent_view.build_disabled_saved_panel()
-        self.parent_view.stop()
+        prepare_replacement_settings_view(self.parent_view, panel.view)
         await interaction.response.edit_message(embed=panel.embed, view=panel.view)
 
 
