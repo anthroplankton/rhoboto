@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import calendar
 from typing import TYPE_CHECKING, override
 
 from discord import app_commands
@@ -19,22 +18,23 @@ from components.ui_shift_register import (
 from models.feature_channel import FeatureChannel
 from utils.announcement_languages import (
     ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
-    render_announcement_messages,
 )
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
-from utils.shift_register_structs import Period, Shift, ShiftParser
+from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
+from utils.shift_register_timeline import render_shift_info_announcement_messages
 
 if TYPE_CHECKING:
     from discord import Interaction, Message
 
     from bot import Rhoboto
+    from utils.structs_base import UserInfo
 
 
 class ShiftRegister(
-    FeatureChannelBase[ShiftRegisterManager, Shift | list[Period]],
+    FeatureChannelBase[ShiftRegisterManager, Shift],
     group_name="shift_register",
 ):
     feature_name = "shift_register"
@@ -89,9 +89,7 @@ class ShiftRegister(
         await send_current_panel_followup(interaction, panel)
 
     @override
-    async def process_upsert_from_message(
-        self, message: Message
-    ) -> Shift | list[Period] | None:
+    async def process_upsert_from_message(self, message: Message) -> Shift | None:
         """
         Listen for messages to provide a button for shift register setup/edit.
         This is used in channels where the feature is enabled.
@@ -103,16 +101,59 @@ class ShiftRegister(
 
         user_info = self._message_user_info(message)
         lines = message.content.splitlines()
-        shift, periods = ShiftParser.parse_lines(user_info, lines)
-        if not periods:
-            if ShiftParser.looks_like_invalid_attempt(lines):
-                await add_reaction_if_possible(
-                    message,
-                    config.CONFUSED_EMOJI,
-                    log=self.logger,
-                )
+        parse_result = ShiftParser.parse_lines(user_info, lines)
+        if parse_result.invalid_attempts:
+            await add_reaction_if_possible(
+                message,
+                config.CONFUSED_EMOJI,
+                log=self.logger,
+            )
             return None
 
+        shift = parse_result.shift
+        if shift is None:
+            return None
+
+        feature_channel = await FeatureChannel.get_or_none(
+            guild_id=message.guild.id,
+            channel_id=message.channel.id,
+            feature_name=self.feature_name,
+        )
+        manager = None
+        shift_register_config = None
+        if feature_channel:
+            manager = ShiftRegisterManager(
+                feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
+            )
+            shift_register_config = await manager.get_sheet_config_or_none()
+        if manager is None or shift_register_config is None:
+            return None
+
+        recruitment_ranges = RecruitmentTimeRanges.from_json(
+            getattr(shift_register_config, "recruitment_time_ranges", None)
+        )
+        if not recruitment_ranges.contains_slots(set(shift)):
+            await add_reaction_if_possible(
+                message,
+                config.CONFUSED_EMOJI,
+                log=self.logger,
+            )
+            return None
+
+        return await self._write_shift_registration(
+            message,
+            user_info,
+            shift,
+            manager,
+        )
+
+    async def _write_shift_registration(
+        self,
+        message: Message,
+        user_info: UserInfo,
+        shift: Shift,
+        manager: ShiftRegisterManager,
+    ) -> Shift:
         self.logger.info(
             "Parsed shift in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%r)",
             message.guild.id,
@@ -121,30 +162,6 @@ class ShiftRegister(
             message.author.display_name,
             shift,
         )
-
-        if not shift:
-            await add_reaction_if_possible(
-                message,
-                config.CONFUSED_EMOJI,
-                log=self.logger,
-            )
-            return periods
-
-        feature_channel = await FeatureChannel.get_or_none(
-            guild_id=message.guild.id,
-            channel_id=message.channel.id,
-            feature_name=self.feature_name,
-        )
-        if not feature_channel:
-            return None
-
-        manager = ShiftRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        shift_register_config = await manager.get_sheet_config_or_none()
-        if shift_register_config is None:
-            return None
 
         if self.bot.user is not None:
             await add_reaction_if_possible(
@@ -192,19 +209,7 @@ class ShiftRegister(
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
     )
-    async def info(
-        self,
-        interaction: Interaction,
-        day_number: int,
-        month: int,
-        day: int,
-        deadline_day: int,
-        deadline_hour: int,
-        draft_day: int,
-        draft_hour: int,
-        final_day: int,
-        final_hour: int,
-    ) -> None:
+    async def info(self, interaction: Interaction) -> None:
         if interaction.channel is None or interaction.guild is None:
             msg = (
                 "Interaction channel or guild is None. "
@@ -230,23 +235,32 @@ class ShiftRegister(
             )
             return
 
-        month_name = calendar.month_name[month]
-        announcements = await render_announcement_messages(
+        recruitment_ranges = RecruitmentTimeRanges.from_json(
+            getattr(sheet_config, "recruitment_time_ranges", None)
+        )
+        announcements = await render_shift_info_announcement_messages(
             self.info_template_key,
             interaction.guild.id,
             self.logger,
             bot=self.bot.user.mention if self.bot.user is not None else "@bot",
-            day_number=day_number,
-            month_name=month_name,
-            month=month,
-            day=day,
-            deadline_day=deadline_day,
-            deadline_hour=deadline_hour,
-            draft_day=draft_day,
-            draft_hour=draft_hour,
-            final_day=final_day,
-            final_hour=final_hour,
-            sheet_url=sheet_config.sheet_url,
+            day_number=getattr(sheet_config, "day_number", None),
+            event_date=getattr(sheet_config, "event_date", None),
+            recruitment_time_range=recruitment_ranges.display(),
+            submission_deadline_at=getattr(
+                sheet_config,
+                "submission_deadline_at",
+                None,
+            ),
+            draft_shift_proposal_at=getattr(
+                sheet_config,
+                "draft_shift_proposal_at",
+                None,
+            ),
+            final_shift_notice_at=getattr(
+                sheet_config,
+                "final_shift_notice_at",
+                None,
+            ),
         )
         if not announcements:
             await interaction.followup.send(

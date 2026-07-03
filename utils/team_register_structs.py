@@ -182,6 +182,12 @@ class TeamFormatError(Exception):
         super().__init__(msg)
 
 
+@dataclass(frozen=True)
+class TeamParseResult:
+    teams: list[Team]
+    invalid_attempts: list[str]
+
+
 class TeamParser:
     """
     Parser for team info lines.
@@ -238,6 +244,32 @@ class TeamParser:
         )
 
     @classmethod
+    def parse_submission(
+        cls,
+        user_info: UserInfo,
+        lines: list[str],
+    ) -> TeamParseResult:
+        """
+        Parse a full message submission into teams and invalid attempts.
+
+        Args:
+            user_info (UserInfo): The user information.
+            lines (list[str]): List of team info strings.
+
+        Returns:
+            TeamParseResult: Parsed teams and invalid team-like lines.
+        """
+        teams: list[Team] = []
+        invalid_attempts: list[str] = []
+        for line in lines:
+            if cls.PATTERN.search(line):
+                teams.append(cls.parse_line(user_info, line))
+                continue
+            if cls.looks_like_invalid_attempt([line]):
+                invalid_attempts.append(line)
+        return TeamParseResult(teams=teams, invalid_attempts=invalid_attempts)
+
+    @classmethod
     def parse_lines(cls, user_info: UserInfo, lines: list[str]) -> list[Team]:
         """
         Parse multiple lines into Team objects.
@@ -249,8 +281,7 @@ class TeamParser:
         Returns:
             list[Team]: List of successfully parsed Team objects.
         """
-        valid_lines = [line for line in lines if cls.PATTERN.search(line)]
-        return [cls.parse_line(user_info, line) for line in valid_lines]
+        return cls.parse_submission(user_info, lines).teams
 
     @classmethod
     def classify_teams(cls, teams: list[Team]) -> ClassifiedTeams:

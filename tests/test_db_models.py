@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 
 import pytest
 from tortoise import Tortoise
@@ -10,6 +11,8 @@ from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
 from utils.db import close_db, get_model_modules, init_db
+from utils.shift_register_manager import ShiftRegisterManager
+from utils.shift_register_structs import RecruitmentTimeRanges
 
 
 @pytest.mark.asyncio
@@ -55,8 +58,166 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert language_settings.announcement_languages == ["ja"]
         assert team_config.get_worksheet_ids() == [101, 102, 199]
         assert shift_config.get_worksheet_ids() == [201, 202, 203]
+        assert shift_config.day_number is None
+        assert shift_config.event_date is None
+        assert shift_config.submission_deadline_at is None
+        assert shift_config.draft_shift_proposal_at is None
+        assert shift_config.final_shift_notice_at is None
+        assert shift_config.recruitment_time_ranges == [{"start": 4, "end": 28}]
+        assert shift_config.deadline_automation_enabled is False
     finally:
         await Tortoise.close_connections()
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_updates_timeline_fields() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="shift_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(feature_channel, "service.json")
+        deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+        draft = dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC)
+        final = dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC)
+
+        await manager.update_timeline(
+            day_number=2,
+            event_date=dt.date(2026, 8, 12),
+            submission_deadline_at=deadline,
+            draft_shift_proposal_at=draft,
+            final_shift_notice_at=final,
+        )
+
+        await config.refresh_from_db()
+        assert config.day_number == 2
+        assert config.event_date == dt.date(2026, 8, 12)
+        assert config.submission_deadline_at == deadline
+        assert config.draft_shift_proposal_at == draft
+        assert config.final_shift_notice_at == final
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_timeline_preserves_fresh_ranges() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1003,
+            channel_id=2004,
+            feature_name="shift_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(feature_channel, "service.json")
+        await manager.get_sheet_config()
+        fresh_config = await ShiftRegisterConfig.get(id=config.id)
+        fresh_config.recruitment_time_ranges = [{"start": 0, "end": 30}]
+        await fresh_config.save()
+        deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+        draft = dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC)
+        final = dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC)
+
+        await manager.update_timeline(
+            day_number=2,
+            event_date=dt.date(2026, 8, 12),
+            submission_deadline_at=deadline,
+            draft_shift_proposal_at=draft,
+            final_shift_notice_at=final,
+        )
+
+        fetched = await ShiftRegisterConfig.get(id=config.id)
+        assert fetched.recruitment_time_ranges == [{"start": 0, "end": 30}]
+        assert fetched.day_number == 2
+        assert fetched.event_date == dt.date(2026, 8, 12)
+        assert fetched.submission_deadline_at == deadline
+        assert fetched.draft_shift_proposal_at == draft
+        assert fetched.final_shift_notice_at == final
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_updates_recruitment_time_ranges() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1002,
+            channel_id=2003,
+            feature_name="shift_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(feature_channel, "service.json")
+        ranges = RecruitmentTimeRanges.from_modal_input("4-8, 8-12")
+
+        await manager.update_recruitment_time_ranges(ranges)
+
+        await config.refresh_from_db()
+        assert config.recruitment_time_ranges == [{"start": 4, "end": 12}]
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_update_ranges_preserves_fresh_timeline_fields() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1004,
+            channel_id=2005,
+            feature_name="shift_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(feature_channel, "service.json")
+        await manager.get_sheet_config()
+        deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+        fresh_config = await ShiftRegisterConfig.get(id=config.id)
+        fresh_config.day_number = 2
+        fresh_config.event_date = dt.date(2026, 8, 12)
+        fresh_config.submission_deadline_at = deadline
+        await fresh_config.save()
+        ranges = RecruitmentTimeRanges.from_modal_input("4-8, 8-12")
+
+        await manager.update_recruitment_time_ranges(ranges)
+
+        fetched = await ShiftRegisterConfig.get(id=config.id)
+        assert fetched.recruitment_time_ranges == [{"start": 4, "end": 12}]
+        assert fetched.day_number == 2
+        assert fetched.event_date == dt.date(2026, 8, 12)
+        assert fetched.submission_deadline_at == deadline
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio

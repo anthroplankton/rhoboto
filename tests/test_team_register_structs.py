@@ -63,6 +63,26 @@ def test_team_parser_does_not_flag_general_text_as_invalid_attempt() -> None:
     assert not TeamParser.looks_like_invalid_attempt(["160/600"])
 
 
+def test_team_parser_parse_submission_accepts_valid_with_ordinary_text() -> None:
+    result = TeamParser.parse_submission(
+        make_user(),
+        ["main team", "150/740/33.4", "よろしく"],
+    )
+
+    assert [team.team_power for team in result.teams] == [33.4]
+    assert result.invalid_attempts == []
+
+
+def test_team_parser_parse_submission_reports_strict_mixed_invalid_attempts() -> None:
+    result = TeamParser.parse_submission(
+        make_user(),
+        ["150/740/33.4", "160//600/33"],
+    )
+
+    assert [team.team_power for team in result.teams] == [33.4]
+    assert result.invalid_attempts == ["160//600/33"]
+
+
 def test_team_classification_uses_valid_submission_order() -> None:
     teams = TeamParser.parse_lines(
         make_user(),

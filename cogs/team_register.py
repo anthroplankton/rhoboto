@@ -93,14 +93,17 @@ class TeamRegister(
 
         user_info = self._message_user_info(message)
         lines = message.content.splitlines()
-        teams = TeamParser.parse_lines(user_info, lines=lines)
+        parse_result = TeamParser.parse_submission(user_info, lines=lines)
+        if parse_result.invalid_attempts:
+            await add_reaction_if_possible(
+                message,
+                config.CONFUSED_EMOJI,
+                log=self.logger,
+            )
+            return None
+
+        teams = parse_result.teams
         if not teams:
-            if TeamParser.looks_like_invalid_attempt(lines):
-                await add_reaction_if_possible(
-                    message,
-                    config.CONFUSED_EMOJI,
-                    log=self.logger,
-                )
             return None
 
         self.logger.info(

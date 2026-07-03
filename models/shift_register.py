@@ -1,3 +1,5 @@
+import datetime as dt
+
 from tortoise import fields
 from tortoise.fields.relational import ForeignKeyRelation
 
@@ -24,6 +26,34 @@ class ShiftRegisterConfig(SheetConfigBase):
         default="A1",
         max_length=8,
         description="Anchor cell for the final schedule worksheet",
+    )
+    day_number: int | None = fields.IntField(
+        null=True,
+        description="Shift event day number",
+    )
+    event_date: dt.date | None = fields.DateField(
+        null=True,
+        description="Shift event date",
+    )
+    submission_deadline_at: dt.datetime | None = fields.DatetimeField(
+        null=True,
+        description="Submission deadline timestamp",
+    )
+    draft_shift_proposal_at: dt.datetime | None = fields.DatetimeField(
+        null=True,
+        description="Draft shift proposal timestamp",
+    )
+    final_shift_notice_at: dt.datetime | None = fields.DatetimeField(
+        null=True,
+        description="Final shift notice timestamp",
+    )
+    recruitment_time_ranges: list[dict[str, int]] = fields.JSONField(
+        default=lambda: [{"start": 4, "end": 28}],
+        description="Normalized recruitment time ranges",
+    )
+    deadline_automation_enabled: bool = fields.BooleanField(
+        default=False,
+        description="Reserved flag for future submission deadline automation",
     )
 
     class Meta:

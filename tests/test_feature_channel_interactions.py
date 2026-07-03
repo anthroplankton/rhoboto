@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from types import SimpleNamespace
 
 import pytest
@@ -57,6 +58,19 @@ class NullLogger:
 
     def debug(self, *_: object, **__: object) -> None:
         pass
+
+
+class ConfiguredShiftInfoManager(ConfiguredManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            sheet_url="https://sheet.example",
+            day_number=2,
+            event_date=dt.date(2026, 8, 12),
+            submission_deadline_at=dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
+            draft_shift_proposal_at=dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC),
+            final_shift_notice_at=dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC),
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        )
 
 
 def fake_bot() -> SimpleNamespace:
@@ -358,7 +372,7 @@ async def test_shift_info_defers_before_public_followup(
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
 
-    async def fake_render_announcement_messages(
+    async def fake_render_shift_info_announcement_messages(
         template_key: str,
         guild_id: int,
         _logger: object = None,
@@ -367,22 +381,29 @@ async def test_shift_info_defers_before_public_followup(
         assert template_key == "shift.info"
         assert guild_id == 111
         assert values["day_number"] == 2
-        assert values["month"] == 8
-        assert values["day"] == 15
+        assert values["event_date"] == dt.date(2026, 8, 12)
+        assert values["recruitment_time_range"] == "4-28"
+        assert values["submission_deadline_at"] == dt.datetime(
+            2026,
+            8,
+            12,
+            12,
+            tzinfo=dt.UTC,
+        )
         return [
             RenderedAnnouncement(language="ja", content="ja info"),
             RenderedAnnouncement(language="en", content="en info"),
         ]
 
     monkeypatch.setattr(
-        "cogs.shift_register.render_announcement_messages",
-        fake_render_announcement_messages,
+        "cogs.shift_register.render_shift_info_announcement_messages",
+        fake_render_shift_info_announcement_messages,
     )
 
     interaction = FakeInteraction(locale="ja")
     subject = SimpleNamespace(
         feature_name="shift_register",
-        ManagerType=ConfiguredManager,
+        ManagerType=ConfiguredShiftInfoManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
         info_template_key="shift.info",
         logger=NullLogger(),
@@ -391,15 +412,6 @@ async def test_shift_info_defers_before_public_followup(
     await ShiftRegister.info.callback(
         subject,
         interaction,
-        2,
-        8,
-        15,
-        12,
-        21,
-        13,
-        20,
-        14,
-        18,
     )
 
     assert interaction.response.deferred == [False]

@@ -6,9 +6,11 @@ import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
+    EntryWorksheetContent,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
     ShiftParser,
@@ -101,6 +103,43 @@ async def test_shift_manager_upserts_deletes_user_shift_with_fake_worksheet() ->
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    worksheet = FakeWorksheet(
+        title="Shift Entry",
+        frame=pd.DataFrame(columns=EntryWorksheetContent.COLUMNS),
+    )
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://sheet.example",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", None),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    user = make_user()
+    result = ShiftParser.parse_lines(user, ["15-17"])
+    shift = result.shift
+    assert shift is not None
+
+    await manager.upsert_or_delete_user_shift(user, shift, metadata)
+
+    inserted = worksheet.updated_frames[-1]
+    assert inserted.loc[0, "username"] == "alice"
+    assert inserted.loc[0, "15-16"] == 1
+    assert inserted.loc[0, "17-18"] == 0
+    assert "0-1" in inserted.columns
+    assert "29-30" in inserted.columns
+
+    await manager.upsert_or_delete_user_shift(user, None, metadata)
+
+    deleted = worksheet.updated_frames[-1]
+    assert "alice" not in set(deleted["username"].astype(str))
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
     worksheet = FakeWorksheet(title="Shift Entry")
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
@@ -111,19 +150,52 @@ async def test_shift_manager_upserts_deletes_user_shift_with_fake_worksheet() ->
         ],
     )
     user = make_user()
-    shift, _ = ShiftParser.parse_lines(user, ["15-17"])
+    shift = ShiftParser.parse_lines(user, ["4-8"]).shift
+    assert shift is not None
 
     await manager.upsert_or_delete_user_shift(user, shift, metadata)
 
     inserted = worksheet.updated_frames[-1]
+    assert list(inserted.columns) == EntryWorksheetContent.COLUMNS
     assert inserted.loc[0, "username"] == "alice"
-    assert inserted.loc[0, "15-16"] == 1
-    assert inserted.loc[0, "17-18"] == 0
+    assert inserted.loc[0, "4-5"] == 1
+    assert inserted.loc[0, "8-9"] == 0
 
-    await manager.upsert_or_delete_user_shift(user, None, metadata)
 
-    deleted = worksheet.updated_frames[-1]
-    assert "alice" not in set(deleted["username"].astype(str))
+@pytest.mark.asyncio
+async def test_shift_manager_rejects_old_entry_header_before_update() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    old_frame = pd.DataFrame(
+        columns=[
+            "username",
+            "display_name",
+            *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
+            "original_message",
+        ],
+    )
+    worksheet = FakeWorksheet(title="Shift Entry", frame=old_frame)
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://sheet.example",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", None),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    user = make_user()
+    shift = ShiftParser.parse_lines(user, ["4-8"]).shift
+    assert shift is not None
+
+    with pytest.raises(GoogleSheetsError) as exc_info:
+        await manager.upsert_or_delete_user_shift(user, shift, metadata)
+
+    assert exc_info.value.kind is GoogleSheetsErrorKind.UNKNOWN
+    assert exc_info.value.operation == "validate_shift_entry_header"
+    assert isinstance(exc_info.value.__cause__, ValueError)
+    assert "Shift Entry worksheet header" in str(exc_info.value.__cause__)
+    assert worksheet.updated_frames == []
 
 
 @pytest.mark.asyncio

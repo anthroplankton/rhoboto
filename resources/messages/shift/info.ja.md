@@ -1,11 +1,8 @@
-🐧 **{day_number}日目（{month}月{day}日）シフト登録のお知らせ** 🐧
+{title}
 
-募集時間帯【4-28 (JST)】
-- 待機枠は設けません。
-- 連続、飛び、アンコ不可などの要望がありましたら併せてご記入ください（「連続〇時間まで」の記載がない場合、提出していただいた時間全てを採用させていただく場合がございます。ご注意ください。）
-- 募集締切後は自動処理を停止しますが、当日のシフト開始前までは修正や追加提出も受け付けております。ご希望の方は、チャンネルで私にメンションしてお知らせください。
-募集〆 ⇒ {deadline_day}日{deadline_hour}時 (JST)
-仮シフト ⇒ {draft_day}日{draft_hour}時 (JST)
-確定シフト ⇒ {final_day}日{final_hour}時 (JST)
-
-登録後、{bot}が自動で処理し、結果を [Google Sheets]({sheet_url}) に記録しますので、確認・閲覧できます。
+表示時刻はすべて JST です。
+募集時間帯【{recruitment_time_range}】
+{submission_deadline_line}
+{draft_shift_proposal_line}
+{final_shift_notice_line}
+{deadline_processing_note}

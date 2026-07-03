@@ -21,16 +21,31 @@ from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
+    HourRangeFormatError,
+    RecruitmentTimeRanges,
     ShiftRegisterGoogleSheetsMetadata,
+)
+from utils.shift_register_timeline import (
+    ShiftTimelineInput,
+    ShiftTimelineParseError,
+    as_jst,
+    format_iso_hour,
+    parse_shift_timeline_input,
 )
 
 if TYPE_CHECKING:
+    from datetime import date, datetime
+
     from utils.shift_register_manager import ShiftRegisterManager
 
 
 SHIFT_REGISTER_DISPLAY_NAME = "Shift Register"
-SHIFT_REGISTER_CURRENT_CONTROLS = "Use the button below to update sheet settings."
-SHIFT_REGISTER_SAVED_CONTROLS = "Use the button below to edit sheet settings."
+SHIFT_REGISTER_CONTROLS = (
+    "Use the buttons below to update sheet settings, shift timeline, "
+    "or recruitment time range."
+)
+SHIFT_REGISTER_CURRENT_CONTROLS = SHIFT_REGISTER_CONTROLS
+SHIFT_REGISTER_SAVED_CONTROLS = SHIFT_REGISTER_CONTROLS
 SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE = (
     "Shift Register settings are no longer configured for this channel."
 )
@@ -73,6 +88,7 @@ async def build_shift_register_settings_panel(
         sheet_url=shift_register.sheet_url,
         metadata=active_metadata,
         final_schedule_anchor_cell=final_schedule_anchor_cell,
+        shift_register=shift_register,
         color=config.DEFAULT_EMBED_COLOR,
         is_save_action=is_save_action,
     )
@@ -86,6 +102,105 @@ async def build_shift_register_settings_panel(
         final_schedule_anchor_cell=final_schedule_anchor_cell,
     )
     return SettingsPanel(embed=embed, view=view)
+
+
+def _format_optional_value(value: object | None) -> str:
+    if value is None:
+        return "Not set"
+    return str(value)
+
+
+def _format_modal_date(value: date | None) -> str:
+    if value is None:
+        return ""
+    return value.isoformat()
+
+
+def _format_modal_datetime(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return as_jst(value).strftime("%Y-%m-%d %H")
+
+
+def _format_settings_date(value: date | None) -> str:
+    if value is None:
+        return "Not set"
+    return value.isoformat()
+
+
+def _format_settings_datetime(value: datetime | None) -> str:
+    if value is None:
+        return "Not set"
+    return format_iso_hour(value)
+
+
+def _timeline_defaults_from_config(shift_register: object) -> dict[str, str]:
+    day_number = getattr(shift_register, "day_number", None)
+    return {
+        "day_number": "" if day_number is None else str(day_number),
+        "event_date": _format_modal_date(getattr(shift_register, "event_date", None)),
+        "submission_deadline_at": _format_modal_datetime(
+            getattr(shift_register, "submission_deadline_at", None)
+        ),
+        "draft_shift_proposal_at": _format_modal_datetime(
+            getattr(shift_register, "draft_shift_proposal_at", None)
+        ),
+        "final_shift_notice_at": _format_modal_datetime(
+            getattr(shift_register, "final_shift_notice_at", None)
+        ),
+    }
+
+
+def _timeline_values_from_modal(modal: ShiftTimelineModal) -> ShiftTimelineInput:
+    return ShiftTimelineInput(
+        day_number=modal.day_number.value,
+        event_date=modal.event_date.value,
+        submission_deadline_at=modal.submission_deadline_at.value,
+        draft_shift_proposal_at=modal.draft_shift_proposal_at.value,
+        final_shift_notice_at=modal.final_shift_notice_at.value,
+    )
+
+
+def _timeline_defaults_from_modal(modal: ShiftTimelineModal) -> dict[str, str]:
+    return {
+        "day_number": modal.day_number.value,
+        "event_date": modal.event_date.value,
+        "submission_deadline_at": modal.submission_deadline_at.value,
+        "draft_shift_proposal_at": modal.draft_shift_proposal_at.value,
+        "final_shift_notice_at": modal.final_shift_notice_at.value,
+    }
+
+
+async def _send_modal_validation_error(
+    interaction: Interaction,
+    *,
+    title: str,
+    errors: list[str],
+    view: SettingsTimeoutView,
+) -> None:
+    error_lines = "\n".join(f"- {error}" for error in errors)
+    await interaction.response.send_message(
+        f"{title} could not be saved:\n{error_lines}",
+        view=view,
+        ephemeral=True,
+    )
+
+
+async def _send_saved_shift_register_panel(
+    interaction: Interaction,
+    shift_register_manager: ShiftRegisterManager,
+) -> None:
+    shift_register = await shift_register_manager.get_sheet_config()
+    try:
+        panel = await build_shift_register_settings_panel(
+            shift_register_manager,
+            shift_register,
+            is_save_action=True,
+        )
+    except GoogleSheetsError as exc:
+        await send_google_sheets_error(interaction, exc)
+        return
+    await send_current_panel_followup(interaction, panel)
 
 
 class ShiftRegisterSheetModal(Modal):
@@ -211,6 +326,162 @@ class ShiftRegisterSheetModal(Modal):
         await send_current_panel_followup(interaction, panel)
 
 
+class ShiftTimelineModal(Modal):
+    """Modal for Shift Register timeline settings."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        day_number: str = "",
+        event_date: str = "",
+        submission_deadline_at: str = "",
+        draft_shift_proposal_at: str = "",
+        final_shift_notice_at: str = "",
+        requires_existing_settings: bool = True,
+    ) -> None:
+        super().__init__(title="Shift Timeline")
+        self.day_number: TextInput = TextInput(
+            label="Day Number",
+            placeholder="e.g. 2. Leave blank to clear.",
+            default=day_number,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.event_date: TextInput = TextInput(
+            label="Event Date",
+            placeholder="YYYY-MM-DD or YYYY/MM/DD. Leave blank to clear.",
+            default=event_date,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.submission_deadline_at: TextInput = TextInput(
+            label="Submission Deadline (JST)",
+            placeholder="e.g. 2026-08-12 21 or 8/12 21. Leave blank to clear.",
+            default=submission_deadline_at,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.draft_shift_proposal_at: TextInput = TextInput(
+            label="Draft Shift Proposal (JST)",
+            placeholder="e.g. 2026-08-13 20 or 8/13 20. Leave blank to clear.",
+            default=draft_shift_proposal_at,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.final_shift_notice_at: TextInput = TextInput(
+            label="Final Shift Notice (JST)",
+            placeholder="e.g. 2026-08-14 18 or 8/14 18. Leave blank to clear.",
+            default=final_shift_notice_at,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.add_item(self.day_number)
+        self.add_item(self.event_date)
+        self.add_item(self.submission_deadline_at)
+        self.add_item(self.draft_shift_proposal_at)
+        self.add_item(self.final_shift_notice_at)
+        self.shift_register_manager = shift_register_manager
+        self.requires_existing_settings = requires_existing_settings
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        shift_register = None
+        if self.requires_existing_settings:
+            shift_register = await get_fresh_shift_register_config_or_respond(
+                self.shift_register_manager,
+                interaction,
+            )
+            if shift_register is None:
+                return
+
+        try:
+            values = parse_shift_timeline_input(
+                _timeline_values_from_modal(self),
+                existing_event_date=getattr(shift_register, "event_date", None),
+            )
+        except ShiftTimelineParseError as exc:
+            await _send_modal_validation_error(
+                interaction,
+                title="Shift timeline",
+                errors=exc.errors,
+                view=ShiftTimelineEditAgainView(
+                    self.shift_register_manager,
+                    **_timeline_defaults_from_modal(self),
+                ),
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self.shift_register_manager.update_timeline(
+            day_number=values.day_number,
+            event_date=values.event_date,
+            submission_deadline_at=values.submission_deadline_at,
+            draft_shift_proposal_at=values.draft_shift_proposal_at,
+            final_shift_notice_at=values.final_shift_notice_at,
+        )
+        await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
+
+
+class ShiftRecruitmentRangeModal(Modal):
+    """Modal for Shift Register recruitment time range settings."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        recruitment_time_range: str = "",
+        requires_existing_settings: bool = True,
+    ) -> None:
+        super().__init__(title="Recruitment Time Range")
+        self.recruitment_time_range: TextInput = TextInput(
+            label="Recruitment Time Range",
+            placeholder="e.g. 4-28 or 4-12, 20-28. Leave blank to reset to 4-28.",
+            default=recruitment_time_range,
+            required=False,
+            style=TextStyle.short,
+        )
+        self.add_item(self.recruitment_time_range)
+        self.shift_register_manager = shift_register_manager
+        self.requires_existing_settings = requires_existing_settings
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        if self.requires_existing_settings:
+            shift_register = await get_fresh_shift_register_config_or_respond(
+                self.shift_register_manager,
+                interaction,
+            )
+            if shift_register is None:
+                return
+
+        try:
+            ranges = RecruitmentTimeRanges.from_modal_input(
+                self.recruitment_time_range.value
+            )
+        except HourRangeFormatError:
+            await _send_modal_validation_error(
+                interaction,
+                title="Recruitment time range",
+                errors=[
+                    "Use ranges like 4-28 or 4-12, 20-28 within 0-30.",
+                ],
+                view=ShiftRecruitmentRangeEditAgainView(
+                    self.shift_register_manager,
+                    recruitment_time_range=self.recruitment_time_range.value,
+                ),
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+        await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
+
+
 class ShiftRegisterButton(Button):
     """Dynamic button for shift register setup/edit."""
 
@@ -291,6 +562,182 @@ class ShiftRegisterButton(Button):
         )
 
 
+class ShiftTimelineButton(Button):
+    """Button that opens the Shift Timeline modal with fresh saved values."""
+
+    def __init__(self, shift_register_manager: ShiftRegisterManager) -> None:
+        super().__init__(label="Edit Shift Timeline", style=ButtonStyle.secondary)
+        self.shift_register_manager = shift_register_manager
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        shift_register = await get_fresh_shift_register_config_or_respond(
+            self.shift_register_manager,
+            interaction,
+        )
+        if shift_register is None:
+            return
+
+        await interaction.response.send_modal(
+            ShiftTimelineModal(
+                self.shift_register_manager,
+                **_timeline_defaults_from_config(shift_register),
+            )
+        )
+
+
+class ShiftRecruitmentRangeButton(Button):
+    """Button that opens the recruitment time range modal with fresh values."""
+
+    def __init__(self, shift_register_manager: ShiftRegisterManager) -> None:
+        super().__init__(
+            label="Edit Recruitment Time Range",
+            style=ButtonStyle.secondary,
+        )
+        self.shift_register_manager = shift_register_manager
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        shift_register = await get_fresh_shift_register_config_or_respond(
+            self.shift_register_manager,
+            interaction,
+        )
+        if shift_register is None:
+            return
+
+        ranges = RecruitmentTimeRanges.from_json(
+            getattr(shift_register, "recruitment_time_ranges", None)
+        )
+        await interaction.response.send_modal(
+            ShiftRecruitmentRangeModal(
+                self.shift_register_manager,
+                recruitment_time_range=ranges.display(),
+            )
+        )
+
+
+class ShiftTimelineEditAgainButton(Button):
+    """Button that reopens an invalid Shift Timeline modal submission."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        day_number: str,
+        event_date: str,
+        submission_deadline_at: str,
+        draft_shift_proposal_at: str,
+        final_shift_notice_at: str,
+    ) -> None:
+        super().__init__(label="Edit Again", style=ButtonStyle.primary)
+        self.shift_register_manager = shift_register_manager
+        self.values = {
+            "day_number": day_number,
+            "event_date": event_date,
+            "submission_deadline_at": submission_deadline_at,
+            "draft_shift_proposal_at": draft_shift_proposal_at,
+            "final_shift_notice_at": final_shift_notice_at,
+        }
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        shift_register = await get_fresh_shift_register_config_or_respond(
+            self.shift_register_manager,
+            interaction,
+        )
+        if shift_register is None:
+            return
+
+        await interaction.response.send_modal(
+            ShiftTimelineModal(
+                self.shift_register_manager,
+                **self.values,
+            )
+        )
+
+
+class ShiftTimelineEditAgainView(SettingsTimeoutView):
+    """Retry view for invalid Shift Timeline modal submissions."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        day_number: str,
+        event_date: str,
+        submission_deadline_at: str,
+        draft_shift_proposal_at: str,
+        final_shift_notice_at: str,
+    ) -> None:
+        super().__init__()
+        self.add_item(
+            ShiftTimelineEditAgainButton(
+                shift_register_manager,
+                day_number=day_number,
+                event_date=event_date,
+                submission_deadline_at=submission_deadline_at,
+                draft_shift_proposal_at=draft_shift_proposal_at,
+                final_shift_notice_at=final_shift_notice_at,
+            )
+        )
+
+
+class ShiftRecruitmentRangeEditAgainButton(Button):
+    """Button that reopens an invalid recruitment range submission."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        recruitment_time_range: str,
+    ) -> None:
+        super().__init__(label="Edit Again", style=ButtonStyle.primary)
+        self.shift_register_manager = shift_register_manager
+        self.recruitment_time_range = recruitment_time_range
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+
+        shift_register = await get_fresh_shift_register_config_or_respond(
+            self.shift_register_manager,
+            interaction,
+        )
+        if shift_register is None:
+            return
+
+        await interaction.response.send_modal(
+            ShiftRecruitmentRangeModal(
+                self.shift_register_manager,
+                recruitment_time_range=self.recruitment_time_range,
+            )
+        )
+
+
+class ShiftRecruitmentRangeEditAgainView(SettingsTimeoutView):
+    """Retry view for invalid recruitment time range modal submissions."""
+
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        recruitment_time_range: str,
+    ) -> None:
+        super().__init__()
+        self.add_item(
+            ShiftRecruitmentRangeEditAgainButton(
+                shift_register_manager,
+                recruitment_time_range=recruitment_time_range,
+            )
+        )
+
+
 class ShiftRegisterView(SettingsTimeoutView):
     """View for shift register setup/edit button."""
 
@@ -307,9 +754,7 @@ class ShiftRegisterView(SettingsTimeoutView):
     ) -> None:
         super().__init__()
         label = (
-            "Edit Shift Register Settings"
-            if has_existing_settings
-            else "Setup Shift Register"
+            "Edit Sheet Settings" if has_existing_settings else "Setup Shift Register"
         )
         button = ShiftRegisterButton(
             label=label,
@@ -322,12 +767,16 @@ class ShiftRegisterView(SettingsTimeoutView):
             requires_existing_settings=has_existing_settings,
         )
         self.add_item(button)
+        if has_existing_settings:
+            self.add_item(ShiftTimelineButton(shift_register_manager))
+            self.add_item(ShiftRecruitmentRangeButton(shift_register_manager))
 
 
 def build_current_settings_embed(
     sheet_url: str,
     metadata: ShiftRegisterGoogleSheetsMetadata,
     final_schedule_anchor_cell: str,
+    shift_register: object,
     color: int,
     *,
     is_save_action: bool = False,
@@ -341,6 +790,8 @@ def build_current_settings_embed(
             The shift register metadata object.
         final_schedule_anchor_cell (str):
             The anchor cell for the final schedule worksheet.
+        shift_register (object):
+            The saved Shift Register configuration.
         color (int): Embed color.
         is_save_action (bool):
             If True, this is a settings save, otherwise a settings query (view).
@@ -386,6 +837,48 @@ def build_current_settings_embed(
     embed.add_field(
         name="Final Schedule Anchor Cell",
         value=f"`{final_schedule_anchor_cell}`",
+        inline=False,
+    )
+
+    submission_deadline_at = getattr(
+        shift_register,
+        "submission_deadline_at",
+        None,
+    )
+    draft_shift_proposal_at = getattr(
+        shift_register,
+        "draft_shift_proposal_at",
+        None,
+    )
+    final_shift_notice_at = getattr(
+        shift_register,
+        "final_shift_notice_at",
+        None,
+    )
+    timeline_rows = [
+        f"- **Day Number** -> "
+        f"`{_format_optional_value(getattr(shift_register, 'day_number', None))}`",
+        f"- **Event Date** -> "
+        f"`{_format_settings_date(getattr(shift_register, 'event_date', None))}`",
+        f"- **Submission Deadline** -> "
+        f"`{_format_settings_datetime(submission_deadline_at)}`",
+        f"- **Draft Shift Proposal** -> "
+        f"`{_format_settings_datetime(draft_shift_proposal_at)}`",
+        f"- **Final Shift Notice** -> "
+        f"`{_format_settings_datetime(final_shift_notice_at)}`",
+    ]
+    embed.add_field(
+        name="Shift Timeline",
+        value="\n".join(timeline_rows),
+        inline=False,
+    )
+
+    recruitment_ranges = RecruitmentTimeRanges.from_json(
+        getattr(shift_register, "recruitment_time_ranges", None)
+    )
+    embed.add_field(
+        name="Recruitment Time Range",
+        value=f"`{recruitment_ranges.display()}`",
         inline=False,
     )
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from types import SimpleNamespace
 
 import pytest
@@ -12,9 +13,11 @@ from components.ui_settings_flow import (
     attach_settings_view_message,
 )
 from components.ui_shift_register import (
+    ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
     ShiftRegisterSheetModal,
     ShiftRegisterView,
+    ShiftTimelineModal,
 )
 from components.ui_team_register import (
     BackToTeamSettingsButton,
@@ -92,9 +95,17 @@ class RecordingShiftRegisterManager:
     def __init__(self) -> None:
         self.upsert_calls: list[dict[str, object]] = []
         self.anchor_updates: list[str] = []
+        self.timeline_updates: list[dict[str, object]] = []
+        self.recruitment_range_updates: list[object] = []
         self.config_exists = True
         self.sheet_url = "https://sheet.example"
         self.final_schedule_anchor_cell = "B2"
+        self.day_number = 2
+        self.event_date = dt.date(2026, 8, 12)
+        self.submission_deadline_at = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+        self.draft_shift_proposal_at = dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC)
+        self.final_shift_notice_at = dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC)
+        self.recruitment_time_ranges = [{"start": 4, "end": 28}]
         self.metadata = SimpleNamespace(
             sheet_url="https://sheet.example",
             entry_worksheets=SimpleNamespace(title="Entry", id=101),
@@ -128,6 +139,34 @@ class RecordingShiftRegisterManager:
     async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
         self.anchor_updates.append(anchor_cell)
 
+    async def update_timeline(
+        self,
+        *,
+        day_number: int | None,
+        event_date: dt.date | None,
+        submission_deadline_at: dt.datetime | None,
+        draft_shift_proposal_at: dt.datetime | None,
+        final_shift_notice_at: dt.datetime | None,
+    ) -> None:
+        self.timeline_updates.append(
+            {
+                "day_number": day_number,
+                "event_date": event_date,
+                "submission_deadline_at": submission_deadline_at,
+                "draft_shift_proposal_at": draft_shift_proposal_at,
+                "final_shift_notice_at": final_shift_notice_at,
+            }
+        )
+        self.day_number = day_number
+        self.event_date = event_date
+        self.submission_deadline_at = submission_deadline_at
+        self.draft_shift_proposal_at = draft_shift_proposal_at
+        self.final_shift_notice_at = final_shift_notice_at
+
+    async def update_recruitment_time_ranges(self, ranges: object) -> None:
+        self.recruitment_range_updates.append(ranges)
+        self.recruitment_time_ranges = ranges.to_json()
+
     async def get_sheet_config(self) -> SimpleNamespace:
         if not self.config_exists:
             msg = "Sheet configuration not found."
@@ -139,6 +178,12 @@ class RecordingShiftRegisterManager:
                 if self.anchor_updates
                 else self.final_schedule_anchor_cell
             ),
+            day_number=self.day_number,
+            event_date=self.event_date,
+            submission_deadline_at=self.submission_deadline_at,
+            draft_shift_proposal_at=self.draft_shift_proposal_at,
+            final_shift_notice_at=self.final_shift_notice_at,
+            recruitment_time_ranges=self.recruitment_time_ranges,
         )
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace | None:
@@ -1191,8 +1236,23 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
     assert kwargs["embed"].title == "Shift Register Settings"
     assert kwargs["embed"].description == (
         "Shift Register is configured for this channel. "
-        "Use the button below to update sheet settings."
+        "Use the buttons below to update sheet settings, shift timeline, "
+        "or recruitment time range."
     )
+    field_map = {field.name: field.value for field in kwargs["embed"].fields}
+    assert field_map["Shift Timeline"] == (
+        "- **Day Number** -> `2`\n"
+        "- **Event Date** -> `2026-08-12`\n"
+        "- **Submission Deadline** -> `2026-08-12 21:00 JST`\n"
+        "- **Draft Shift Proposal** -> `2026-08-13 20:00 JST`\n"
+        "- **Final Shift Notice** -> `2026-08-14 18:00 JST`"
+    )
+    assert field_map["Recruitment Time Range"] == "`4-28`"
+    assert [child.label for child in kwargs["view"].children] == [
+        "Edit Sheet Settings",
+        "Edit Shift Timeline",
+        "Edit Recruitment Time Range",
+    ]
     assert kwargs["embed"].footer.text is None
     assert kwargs["wait"] is True
     assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
@@ -1213,7 +1273,7 @@ async def test_shift_edit_settings_button_uses_fresh_missing_settings_guard() ->
         final_schedule_anchor_cell="B2",
     )
 
-    await child_with_label(view, "Edit Shift Register Settings").callback(interaction)
+    await child_with_label(view, "Edit Sheet Settings").callback(interaction)
 
     assert interaction.response.messages == [
         (
@@ -1266,7 +1326,7 @@ async def test_shift_existing_edit_button_uses_local_modal_defaults() -> None:
         final_schedule_anchor_cell="B2",
     )
 
-    await child_with_label(view, "Edit Shift Register Settings").callback(interaction)
+    await child_with_label(view, "Edit Sheet Settings").callback(interaction)
 
     assert interaction.response.messages == []
     assert len(interaction.response.modals) == 1
@@ -1277,6 +1337,43 @@ async def test_shift_existing_edit_button_uses_local_modal_defaults() -> None:
     assert modal.draft_worksheet_title.default == "Stale Draft"
     assert modal.final_schedule_worksheet_title.default == "Stale Final"
     assert modal.final_schedule_anchor_cell.default == "D8"
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_button_prefills_modal_from_fresh_config() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    view = ShiftRegisterView(manager, has_existing_settings=True)
+
+    await child_with_label(view, "Edit Shift Timeline").callback(interaction)
+
+    assert interaction.response.messages == []
+    assert len(interaction.response.modals) == 1
+    modal = interaction.response.modals[0]
+    assert isinstance(modal, ShiftTimelineModal)
+    assert modal.day_number.default == "2"
+    assert modal.event_date.default == "2026-08-12"
+    assert modal.submission_deadline_at.default == "2026-08-12 21"
+    assert modal.draft_shift_proposal_at.default == "2026-08-13 20"
+    assert modal.final_shift_notice_at.default == "2026-08-14 18"
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_button_prefills_modal_from_fresh_config() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    manager.recruitment_time_ranges = [{"start": 4, "end": 12}]
+    interaction = FakeInteraction()
+    view = ShiftRegisterView(manager, has_existing_settings=True)
+
+    await child_with_label(view, "Edit Recruitment Time Range").callback(interaction)
+
+    assert interaction.response.messages == []
+    assert len(interaction.response.modals) == 1
+    modal = interaction.response.modals[0]
+    assert isinstance(modal, ShiftRecruitmentRangeModal)
+    assert modal.recruitment_time_range.default == "4-12"
 
 
 @pytest.mark.asyncio
@@ -1317,7 +1414,8 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
     assert embed.title == "Shift Register Settings Saved"
     assert embed.description == (
         "Your Shift Register settings were saved. "
-        "Use the button below to edit sheet settings."
+        "Use the buttons below to update sheet settings, shift timeline, "
+        "or recruitment time range."
     )
     assert embed.footer.text is None
     assert kwargs["wait"] is True
@@ -1377,6 +1475,153 @@ async def test_shift_modal_submit_reports_google_sheets_error_safely() -> None:
         )
     ]
     assert "private.sheet.example" not in str(interaction.followup.messages)
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_modal_submit_updates_timeline() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="2026/08/13 20",
+        final_shift_notice_at="2026-08-14 18",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.timeline_updates == [
+        {
+            "day_number": 3,
+            "event_date": dt.date(2026, 8, 12),
+            "submission_deadline_at": dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
+            "draft_shift_proposal_at": dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC),
+            "final_shift_notice_at": dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC),
+        }
+    ]
+    assert len(interaction.followup.messages) == 1
+    _, kwargs = interaction.followup.messages[0]
+    assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_modal_submit_reports_google_sheets_error_safely() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.metadata_error = GoogleSheetsError(
+        GoogleSheetsErrorKind.PERMISSION,
+        "Check the sheet sharing settings and service account access.",
+    )
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(manager.timeline_updates) == 1
+    assert interaction.followup.messages == [
+        (
+            "Google Sheets could not complete this action. "
+            "Check the sheet sharing settings and service account access.",
+            {"ephemeral": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_modal_invalid_submit_sends_edit_again_view() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="0",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 24",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert manager.timeline_updates == []
+    assert interaction.response.deferred == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content == (
+        "Shift timeline could not be saved:\n"
+        "- Day Number must be a positive integer.\n"
+        "- Submission Deadline hour must be 0-23."
+    )
+    edit_again_view = kwargs["view"]
+    retry_interaction = FakeInteraction()
+    await child_with_label(edit_again_view, "Edit Again").callback(retry_interaction)
+    assert isinstance(retry_interaction.response.modals[0], ShiftTimelineModal)
+    assert retry_interaction.response.modals[0].day_number.default == "0"
+    assert (
+        retry_interaction.response.modals[0].submission_deadline_at.default == "8/12 24"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_modal_submit_updates_range() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-8, 8-12")
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
+        [{"start": 4, "end": 12}]
+    ]
+    assert len(interaction.followup.messages) == 1
+    _, kwargs = interaction.followup.messages[0]
+    assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_modal_blank_resets_to_default() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="")
+
+    await modal.on_submit(interaction)
+
+    assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
+        [{"start": 4, "end": 28}]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_modal_invalid_sends_edit_again_view() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="28-4")
+
+    await modal.on_submit(interaction)
+
+    assert manager.recruitment_range_updates == []
+    assert interaction.response.deferred == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content == (
+        "Recruitment time range could not be saved:\n"
+        "- Use ranges like 4-28 or 4-12, 20-28 within 0-30."
+    )
+    edit_again_view = kwargs["view"]
+    retry_interaction = FakeInteraction()
+    await child_with_label(edit_again_view, "Edit Again").callback(retry_interaction)
+    assert isinstance(retry_interaction.response.modals[0], ShiftRecruitmentRangeModal)
+    assert retry_interaction.response.modals[0].recruitment_time_range.default == "28-4"
 
 
 @pytest.mark.asyncio

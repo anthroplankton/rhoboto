@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from tests.fakes import FakeWorksheet
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
+    EntryWorksheetContent,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
     ShiftRegisterGoogleSheetsMetadata,
@@ -130,3 +132,73 @@ def test_team_worksheet_content_upsert_delete_and_padding() -> None:
     deleted = content.to_frame()
 
     assert deleted.empty
+
+
+def test_shift_entry_columns_use_0_30_hour_axis() -> None:
+    expected_columns = [
+        "username",
+        "display_name",
+        *[f"{hour}-{hour + 1}" for hour in range(30)],
+        "original_message",
+    ]
+
+    assert expected_columns == EntryWorksheetContent.COLUMNS
+
+
+def test_shift_entry_dtypes_use_0_30_hour_axis() -> None:
+    expected_hour_columns = [f"{hour}-{hour + 1}" for hour in range(30)]
+
+    assert {
+        column: EntryWorksheetContent.DTYPES[column] for column in expected_hour_columns
+    } == dict.fromkeys(expected_hour_columns, "int")
+
+
+def test_shift_entry_header_guard_accepts_new_core_header_with_trailing_extra() -> None:
+    columns = [*EntryWorksheetContent.COLUMNS, "manager_note"]
+    dataframe = pd.DataFrame(columns=columns)
+
+    EntryWorksheetContent.validate_core_header(dataframe)
+
+
+def test_shift_entry_header_guard_accepts_empty_fresh_worksheet() -> None:
+    EntryWorksheetContent.validate_core_header(pd.DataFrame())
+
+
+def test_shift_entry_header_guard_rejects_old_4_28_header() -> None:
+    old_columns = [
+        "username",
+        "display_name",
+        *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
+        "original_message",
+    ]
+    dataframe = pd.DataFrame(columns=old_columns)
+
+    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
+        EntryWorksheetContent.validate_core_header(dataframe)
+
+
+def test_shift_entry_header_guard_rejects_missing_core_column() -> None:
+    columns = EntryWorksheetContent.COLUMNS.copy()
+    columns.remove("10-11")
+    dataframe = pd.DataFrame(columns=columns)
+
+    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
+        EntryWorksheetContent.validate_core_header(dataframe)
+
+
+def test_shift_entry_header_guard_rejects_shuffled_core_column() -> None:
+    columns = EntryWorksheetContent.COLUMNS.copy()
+    columns[2], columns[3] = columns[3], columns[2]
+    dataframe = pd.DataFrame(columns=columns)
+
+    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
+        EntryWorksheetContent.validate_core_header(dataframe)
+
+
+def test_shift_entry_header_guard_rejects_inserted_core_column() -> None:
+    columns = EntryWorksheetContent.COLUMNS.copy()
+    columns.insert(3, "manager_note")
+    dataframe = pd.DataFrame(columns=columns)
+
+    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
+        EntryWorksheetContent.validate_core_header(dataframe)
