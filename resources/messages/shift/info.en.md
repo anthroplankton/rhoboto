@@ -1,12 +1,12 @@
-🐧 **Day {day_number} ({month_name} {day}) Shift Registration Info** 🐧
+🐧 **Day {day_number} ({month_name} {day}) Shift Registration Announcement** 🐧
 
-Shift Entry Time Slot: 【4-28 (JST)】
-- We don't have standby slots.
-- If you have requests such as "no consecutive shifts," "no skipping," or "no encore," please include them together. (If you do not specify "up to X consecutive hours," all submitted time slots may be adopted. Please be aware.)
-- After the entry deadline, automatic processing will stop. If you wish to make changes, or if you haven’t submitted your shift yet, please feel free to mention me in the channel before the shift for the day starts. Additional submissions are always welcome.
+Recruitment time slot: 【4-28 (JST)】
+- There are no standby slots.
+- If you have requests such as no consecutive shifts, no gaps, or no encore, include them in your message. If you do not specify a maximum consecutive duration, all submitted time slots may be used.
+- Automatic processing stops after the submission deadline. If you need to revise your shift or submit after the deadline, mention me in this channel before the shift day starts. Additional submissions are welcome until then.
 
-Entry Deadline ⇒ {deadline_day}th, {deadline_hour}:00 (JST)
-Draft Shift ⇒ {draft_day}th, {draft_hour}:00 (JST)
-Final Shift ⇒ {final_day}th, {final_hour}:00 (JST)
+Submission deadline ⇒ {deadline_day}, {deadline_hour}:00 (JST)
+Draft shift ⇒ {draft_day}, {draft_hour}:00 (JST)
+Final shift ⇒ {final_day}, {final_hour}:00 (JST)
 
-After registration, {bot} will automatically process your shifts and record the results in [Google Sheets]({sheet_url}) for you to view and confirm.
+After registration, {bot} will automatically process your shifts and record the results in [Google Sheets]({sheet_url}) for review.

@@ -10,6 +10,7 @@ from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
 from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
+from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 
 
@@ -263,16 +264,121 @@ async def test_user_help_uses_followup_for_missing_config(
 
 
 @pytest.mark.asyncio
+async def test_public_register_help_sends_announcement_languages_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+
+    async def fake_render_announcement_messages(
+        template_key: str,
+        guild_id: int,
+        _logger: object = None,
+        **values: object,
+    ) -> list[RenderedAnnouncement]:
+        assert template_key == "team.help"
+        assert guild_id == 111
+        assert values["bot"] == "@Rhoboto"
+        assert values["sheet_url"] == "https://sheet.example"
+        return [
+            RenderedAnnouncement(language="ja", content="ja help"),
+            RenderedAnnouncement(language="zh_tw", content="zh help"),
+            RenderedAnnouncement(language="en", content="en help"),
+        ]
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_announcement_messages",
+        fake_render_announcement_messages,
+    )
+
+    interaction = FakeInteraction(locale="en-US")
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=ConfiguredManager,
+        bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
+        help_template_key="team.help",
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+
+    assert interaction.response.deferred == [False]
+    assert interaction.followup.messages == [
+        ("ja help", {"ephemeral": False}),
+        ("zh help", {"ephemeral": False}),
+        ("en help", {"ephemeral": False}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_public_register_help_reports_render_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+
+    async def fake_render_announcement_messages(
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[RenderedAnnouncement]:
+        return []
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_announcement_messages",
+        fake_render_announcement_messages,
+    )
+
+    interaction = FakeInteraction()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=ConfiguredManager,
+        bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
+        help_template_key="team.help",
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+
+    assert interaction.followup.messages == [
+        (
+            "No announcement templates could be rendered for this server.",
+            {"ephemeral": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_shift_info_defers_before_public_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+
+    async def fake_render_announcement_messages(
+        template_key: str,
+        guild_id: int,
+        _logger: object = None,
+        **values: object,
+    ) -> list[RenderedAnnouncement]:
+        assert template_key == "shift.info"
+        assert guild_id == 111
+        assert values["day_number"] == 2
+        assert values["month"] == 8
+        assert values["day"] == 15
+        return [
+            RenderedAnnouncement(language="ja", content="ja info"),
+            RenderedAnnouncement(language="en", content="en info"),
+        ]
+
+    monkeypatch.setattr(
+        "cogs.shift_register.render_announcement_messages",
+        fake_render_announcement_messages,
+    )
+
     interaction = FakeInteraction(locale="ja")
     subject = SimpleNamespace(
         feature_name="shift_register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
         info_template_key="shift.info",
+        logger=NullLogger(),
     )
 
     await ShiftRegister.info.callback(
@@ -290,11 +396,10 @@ async def test_shift_info_defers_before_public_followup(
     )
 
     assert interaction.response.deferred == [False]
-    message, kwargs = interaction.followup.messages[0]
-    assert kwargs["ephemeral"] is False
-    assert "2日目" in str(message)
-    assert "@Rhoboto" in str(message)
-    assert "https://sheet.example" in str(message)
+    assert interaction.followup.messages == [
+        ("ja info", {"ephemeral": False}),
+        ("en info", {"ephemeral": False}),
+    ]
 
 
 @pytest.mark.asyncio

@@ -36,8 +36,13 @@ class FakeDiscordFollowup:
     def __init__(self) -> None:
         self.messages: list[tuple[str | None, dict[str, object]]] = []
 
-    async def send(self, content: str | None = None, **kwargs: object) -> None:
+    async def send(
+        self,
+        content: str | None = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
         self.messages.append((content, kwargs))
+        return SimpleNamespace()
 
 
 @dataclass(frozen=True)

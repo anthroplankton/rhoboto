@@ -6,6 +6,7 @@ import pytest
 from tortoise import Tortoise
 
 from models.feature_channel import FeatureChannel
+from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
 from utils.db import close_db, get_model_modules, init_db
@@ -19,20 +20,26 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert apps is not None
         assert sorted(apps["models"]) == [
             "FeatureChannel",
+            "GuildLanguageSettings",
             "ShiftRegisterConfig",
             "TeamRegisterConfig",
         ]
 
         feature_description = FeatureChannel.describe(serializable=True)
+        language_description = GuildLanguageSettings.describe(serializable=True)
         team_description = TeamRegisterConfig.describe(serializable=True)
         shift_description = ShiftRegisterConfig.describe(serializable=True)
 
         assert feature_description["table"] == "feature_channel"
         assert feature_description["pk_field"]["name"] == "id"
         assert feature_description["pk_field"]["generated"] is True
+        assert language_description["table"] == "guild_language_settings"
+        assert language_description["pk_field"]["name"] == "id"
+        assert language_description["pk_field"]["generated"] is True
         assert team_description["table"] == "team_register"
         assert shift_description["table"] == "shift_register"
 
+        language_settings = GuildLanguageSettings(guild_id=1001)
         team_config = TeamRegisterConfig(
             sheet_url="https://sheet.example",
             team_worksheet_ids=[101, 102],
@@ -45,6 +52,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
             final_schedule_worksheet_id=203,
         )
 
+        assert language_settings.announcement_languages == ["ja"]
         assert team_config.get_worksheet_ids() == [101, 102, 199]
         assert shift_config.get_worksheet_ids() == [201, 202, 203]
     finally:

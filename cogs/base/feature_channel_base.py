@@ -14,6 +14,10 @@ from components.ui_google_sheets_errors import (
     send_google_sheets_error,
 )
 from models.feature_channel import FeatureChannel
+from utils.announcement_languages import (
+    ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+    render_announcement_messages,
+)
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
@@ -326,15 +330,24 @@ class FeatureChannelBase(
             return
 
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
-        await interaction.followup.send(
-            render_message_template(
-                self.help_template_key,
-                "ja",
-                bot=bot_mention,
-                sheet_url=sheet_config.sheet_url,
-            ),
-            ephemeral=False,
+        announcements = await render_announcement_messages(
+            self.help_template_key,
+            interaction.guild.id,
+            self.logger,
+            bot=bot_mention,
+            sheet_url=sheet_config.sheet_url,
         )
+        if not announcements:
+            await interaction.followup.send(
+                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        for announcement in announcements:
+            await interaction.followup.send(
+                announcement.content,
+                ephemeral=False,
+            )
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
         """

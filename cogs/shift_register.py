@@ -14,9 +14,12 @@ from components.ui_shift_register import (
     build_shift_register_settings_panel,
 )
 from models.feature_channel import FeatureChannel
+from utils.announcement_languages import (
+    ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+    render_announcement_messages,
+)
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
-from utils.message_templates import render_message_template
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import Period, Shift, ShiftParser
@@ -221,25 +224,34 @@ class ShiftRegister(
             return
 
         month_name = calendar.month_name[month]
-        await interaction.followup.send(
-            render_message_template(
-                self.info_template_key,
-                "ja",
-                bot=self.bot.user.mention if self.bot.user is not None else "@bot",
-                day_number=day_number,
-                month_name=month_name,
-                month=month,
-                day=day,
-                deadline_day=deadline_day,
-                deadline_hour=deadline_hour,
-                draft_day=draft_day,
-                draft_hour=draft_hour,
-                final_day=final_day,
-                final_hour=final_hour,
-                sheet_url=sheet_config.sheet_url,
-            ),
-            ephemeral=False,
+        announcements = await render_announcement_messages(
+            self.info_template_key,
+            interaction.guild.id,
+            self.logger,
+            bot=self.bot.user.mention if self.bot.user is not None else "@bot",
+            day_number=day_number,
+            month_name=month_name,
+            month=month,
+            day=day,
+            deadline_day=deadline_day,
+            deadline_hour=deadline_hour,
+            draft_day=draft_day,
+            draft_hour=draft_hour,
+            final_day=final_day,
+            final_hour=final_hour,
+            sheet_url=sheet_config.sheet_url,
         )
+        if not announcements:
+            await interaction.followup.send(
+                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        for announcement in announcements:
+            await interaction.followup.send(
+                announcement.content,
+                ephemeral=False,
+            )
 
     @app_commands.command(
         name="help",

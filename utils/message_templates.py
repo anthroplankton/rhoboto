@@ -6,6 +6,15 @@ from pathlib import Path
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "resources" / "messages"
 
 
+class MessageTemplateNotFoundError(FileNotFoundError):
+    def __init__(self, key: str, locale: str, path: Path | None) -> None:
+        self.key = key
+        self.locale = locale
+        self.path = path
+        msg = f"Message template `{key}` for locale `{locale}` was not found."
+        super().__init__(msg)
+
+
 def locale_to_template_code(locale: str) -> str:
     """Map a Discord locale value to a message template locale code."""
     if locale.startswith("zh"):
@@ -15,10 +24,17 @@ def locale_to_template_code(locale: str) -> str:
     return "en"
 
 
+def get_message_template_path(key: str, locale: str) -> Path:
+    """Return the Markdown template path for a key and locale code."""
+    return TEMPLATE_ROOT.joinpath(*key.split(".")).with_suffix(f".{locale}.md")
+
+
 @lru_cache
 def load_message_template(key: str, locale: str) -> str:
     """Load a message template from resources/messages."""
-    path = TEMPLATE_ROOT.joinpath(*key.split(".")).with_suffix(f".{locale}.md")
+    path = get_message_template_path(key, locale)
+    if not path.exists():
+        raise MessageTemplateNotFoundError(key, locale, path)
     return path.read_text(encoding="utf-8")
 
 
