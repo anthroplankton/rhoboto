@@ -52,9 +52,11 @@ Use `$safe-discord-refactor` for behavior-preserving refactors of cogs, managers
 
 Use Superpowers brainstorming for unclear or broad design work: new workflows, architecture changes, UX-heavy behavior, rollout-sensitive changes, or requests with multiple viable approaches. Repository rules still apply when using Superpowers: do not commit unless explicitly asked, and do not create new long-lived docs paths unless the user approves the spec location.
 
+Use `$grill-me` to stress-test an existing proposal, plan, or design after the main direction is clear. It is a review aid, not a replacement for Superpowers brainstorming, feature planning, or refactor planning.
+
 Use `$planning-with-files` for multi-step investigations, architecture plans, or work likely to span many tool calls or context resets. It is persistent working memory, not a replacement for Superpowers design or implementation workflows.
 
-Subagent-Driven Development is an optional execution strategy, not a default requirement for every plan. Use it only when the user, an approved plan, or the task shape calls for independent task-level agent work. Repository rules override subagent workflow defaults: subagents must not stage, commit, or push unless the user explicitly asks. Treat the current repository checkout as the canonical checkout by default. If a temporary worktree is used for isolation, sync completed changes back to the canonical checkout at each task checkpoint and verify the canonical `git status --short`.
+Subagent-Driven Development is an optional execution strategy, not a default requirement for every plan. Use it only when the user, an approved plan, or the task shape calls for independent task-level agent work. In this repository, SDD is report/diff-based rather than commit-based: implementer subagents edit only assigned files in the canonical checkout or provide patches, and reviewers work from task briefs, implementation reports, and scoped git diffs. Repository rules override generic SDD prompts: subagents must not stage, commit, or push unless the user explicitly asks for that exact git operation. Treat the current repository checkout as canonical by default. Temporary worktrees are optional isolation tools, not the default SDD mode; use one only with explicit user approval or an approved plan, then sync completed changes back to the canonical checkout at each checkpoint and verify the canonical `git status --short`.
 
 ## Project Conventions
 

@@ -134,6 +134,8 @@ automatically become Heroku runtime config vars.
   and temporary plans are local agent working memory rather than project
   documentation. Do not stage or commit them directly. Verify ignore and staging
   status before handoff, especially when introducing a new local-memory path.
+  Subagent task status belongs in ignored local ledgers and reports, not
+  per-task commits.
 - Agent memory should capture reusable engineering facts, neutral decisions,
   and validation evidence, not secrets, raw environment values, private
   identifiers, local absolute paths, usernames, or private user/agent
