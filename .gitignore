@@ -172,4 +172,5 @@ data/
 
 # Agent working memory
 /.planning/
+/.superpowers/
 /docs/superpowers/
