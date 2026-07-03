@@ -74,20 +74,35 @@ def stale_setup_content(feature_display_name: str) -> str:
     )
 
 
+async def send_settings_view_followup(
+    interaction: Interaction,
+    *,
+    view: View,
+    content: str | None = None,
+    embed: Embed | None = None,
+) -> None:
+    message = await interaction.followup.send(
+        content=content,
+        embed=embed,
+        view=view,
+        ephemeral=True,
+        wait=True,
+    )
+    attach_settings_view_message(view, message)
+
+
 async def send_current_panel_followup(
     interaction: Interaction,
     panel: SettingsPanel,
     *,
     content: str | None = None,
 ) -> None:
-    message = await interaction.followup.send(
+    await send_settings_view_followup(
+        interaction,
         content=content,
         embed=panel.embed,
         view=panel.view,
-        ephemeral=True,
-        wait=True,
     )
-    attach_settings_view_message(panel.view, message)
 
 
 def attach_settings_view_message(view: View, message: Message) -> None:

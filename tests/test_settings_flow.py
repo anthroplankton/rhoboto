@@ -11,6 +11,7 @@ from components.ui_settings_flow import (
     attach_settings_view_message,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_view_followup,
     settings_description,
     settings_title,
     stale_setup_content,
@@ -108,6 +109,26 @@ async def test_prepare_replacement_view_stops_old_and_transfers_message() -> Non
     assert prepared is replacement_view
     assert current_view.is_finished()
     assert replacement_view.message is message
+
+
+@pytest.mark.asyncio
+async def test_send_settings_view_followup_attaches_message_to_timeout_view() -> None:
+    interaction = FakeInteraction()
+    view = SettingsTimeoutView()
+
+    await send_settings_view_followup(
+        interaction,
+        content="Setup Team Register",
+        view=view,
+    )
+
+    content, kwargs = interaction.followup.messages[0]
+    assert content == "Setup Team Register"
+    assert kwargs["embed"] is None
+    assert kwargs["ephemeral"] is True
+    assert kwargs["wait"] is True
+    assert kwargs["view"] is view
+    assert view.message is interaction.followup.sent_message_objects[0]
 
 
 @pytest.mark.asyncio

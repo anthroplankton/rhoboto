@@ -9,8 +9,8 @@ from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_settings_flow import (
-    attach_settings_view_message,
     send_current_panel_followup,
+    send_settings_view_followup,
 )
 from components.ui_shift_register import (
     ShiftRegisterView,
@@ -70,13 +70,11 @@ class ShiftRegister(
                 "Click below to set up."
             )
             view = ShiftRegisterView(shift_register_manager=manager)
-            message = await interaction.followup.send(
+            await send_settings_view_followup(
+                interaction,
                 content=content,
                 view=view,
-                ephemeral=True,
-                wait=True,
             )
-            attach_settings_view_message(view, message)
             return
 
         try:
