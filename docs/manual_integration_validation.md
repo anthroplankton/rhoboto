@@ -107,6 +107,24 @@ Use the shift test channel.
 | Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | Confused reaction appears on the selected message and the context menu returns the existing failed-upsert follow-up. |  |  |
 | Delete own data | Run `/shift delete`. | The current user's entry row is removed or blanked as expected. |  |  |
 
+## Announcement Languages
+
+Run these checks after Team Register and Shift Register settings exist in the
+development guild.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Open settings | As the administrator user, run `/language settings announcement`. | An ephemeral language settings panel appears and shows the saved language order. |  |  |
+| Command guard | As the non-admin user, run `/language settings announcement`. | Discord denies access or the bot returns the permission error. |  |  |
+| Callback guard | As the administrator user, open the language settings panel, then remove `administrator` or `manage_channels` before pressing Save. | The bot returns an ephemeral permission error and does not save changes. |  |  |
+| Save ordered languages | Add languages so the draft order is Japanese, Traditional Chinese, then English, and press Save. | The saved panel shows Japanese, Traditional Chinese, then English in that order. |  |  |
+| Reopen saved order | Run `/language settings announcement` again. | The panel shows the same saved language order. |  |  |
+| Cancel discards draft | Add or remove a language, then press Cancel without saving. Reopen the panel. | The saved language order is unchanged. |  |  |
+| Timeout discards draft | Add or remove a language, wait for the panel to time out, then reopen the panel. | The saved language order is unchanged and the timed-out panel is disabled. |  |  |
+| Team help announcements | Run `/team_register help`. | The channel receives one public help message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
+| Shift help announcements | Run `/shift_register help`. | The channel receives one public help message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
+| Shift info announcements | Run `/shift_register info` with a future event date and deadlines. | The channel receives one public info message per saved language, in saved order. The Traditional Chinese and English messages include the day/date, deadlines, bot mention, and Sheet link. |  |  |
+
 ## Feature Lifecycle
 
 Run these checks for both feature channels.
