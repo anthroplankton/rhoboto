@@ -208,10 +208,9 @@ class RecruitmentTimeRanges:
 
     @classmethod
     def from_modal_input(cls, value: str) -> Self:
-        normalized = unicodedata.normalize("NFKC", value).strip()
-        if not normalized:
+        if not value.strip():
             return cls.default()
-        return cls(HourRanges.parse_strict(normalized))
+        return cls(HourRanges.parse_strict(value))
 
     def to_json(self) -> list[dict[str, int]]:
         return [{"start": item.start, "end": item.end} for item in self.ranges.ranges]
