@@ -167,8 +167,8 @@ class HourRanges:
             slots.update(hour_range.slots)
         return slots
 
-    def display(self) -> str:
-        return ", ".join(hour_range.display() for hour_range in self.ranges)
+    def display(self, separator: str = ", ") -> str:
+        return separator.join(hour_range.display() for hour_range in self.ranges)
 
     def contains_all(self, slots: set[int]) -> bool:
         if any(slot.__class__ is not int for slot in slots):
@@ -220,6 +220,9 @@ class RecruitmentTimeRanges:
 
     def display(self) -> str:
         return self.ranges.display()
+
+    def announcement_display(self) -> str:
+        return self.ranges.display(separator="・")
 
     def contains_slots(self, slots: set[int]) -> bool:
         return self.ranges.contains_all(slots)

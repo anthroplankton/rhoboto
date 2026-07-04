@@ -18,7 +18,7 @@ Example:
 - To delete your team registration, use the slash command `/team delete`.
 ### ⚠️ Updating Your Teams
 > -# To update, send a new message with **all of your latest teams**. Include every team you want to keep.
-> -# {bot} treats that message as the latest data and **overwrites all previous team registrations**. Teams not included in the new message will be cleared.
+> -# {{ bot }} treats that message as the latest data and **overwrites all previous team registrations**. Teams not included in the new message will be cleared.
 > -# Editing an old message does not update your registration.
 
-After registration, {bot} will automatically process your teams and record the results in [Google Sheets]({sheet_url}) for you to view and confirm.
+After registration, {{ bot }} will automatically process your teams and record the results in [Google Sheets]({{ sheet_url }}) for you to view and confirm.

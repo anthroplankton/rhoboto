@@ -3,6 +3,14 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
+from jinja2 import (
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    TemplateNotFound,
+    select_autoescape,
+)
+
 TEMPLATE_ROOT = Path(__file__).resolve().parents[1] / "resources" / "messages"
 
 
@@ -24,9 +32,30 @@ def locale_to_template_code(locale: str) -> str:
     return "en"
 
 
+def get_message_template_name(key: str, locale: str) -> str:
+    """Return the loader-relative template name for a key and locale code."""
+    return Path(*key.split(".")).with_suffix(f".{locale}.md").as_posix()
+
+
 def get_message_template_path(key: str, locale: str) -> Path:
     """Return the Markdown template path for a key and locale code."""
-    return TEMPLATE_ROOT.joinpath(*key.split(".")).with_suffix(f".{locale}.md")
+    return TEMPLATE_ROOT / get_message_template_name(key, locale)
+
+
+@lru_cache
+def get_template_environment() -> Environment:
+    """Return the Jinja environment for Discord message templates."""
+    return Environment(
+        loader=FileSystemLoader(TEMPLATE_ROOT),
+        undefined=StrictUndefined,
+        autoescape=select_autoescape(
+            enabled_extensions=("html", "htm", "xml"),
+            disabled_extensions=("md",),
+            default_for_string=False,
+            default=False,
+        ),
+        keep_trailing_newline=True,
+    )
 
 
 @lru_cache
@@ -39,5 +68,15 @@ def load_message_template(key: str, locale: str) -> str:
 
 
 def render_message_template(key: str, locale: str, **values: object) -> str:
-    """Render a message template with Python format placeholders."""
-    return load_message_template(key, locale).format(**values)
+    """Render a message template with Jinja placeholders."""
+    try:
+        template = get_template_environment().get_template(
+            get_message_template_name(key, locale)
+        )
+    except TemplateNotFound as exc:
+        raise MessageTemplateNotFoundError(
+            key,
+            locale,
+            get_message_template_path(key, locale),
+        ) from exc
+    return template.render(**values)

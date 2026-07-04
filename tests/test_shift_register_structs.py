@@ -104,6 +104,19 @@ def test_recruitment_time_ranges_default_and_json_round_trip() -> None:
     assert RecruitmentTimeRanges.from_json(default_ranges.to_json()).display() == "4-28"
 
 
+def test_recruitment_time_ranges_announcement_display_uses_middle_dot() -> None:
+    ranges = RecruitmentTimeRanges.from_json(
+        [
+            {"start": 4, "end": 10},
+            {"start": 14, "end": 20},
+            {"start": 24, "end": 28},
+        ]
+    )
+
+    assert ranges.display() == "4-10, 14-20, 24-28"
+    assert ranges.announcement_display() == "4-10・14-20・24-28"
+
+
 @pytest.mark.parametrize(
     "value",
     [

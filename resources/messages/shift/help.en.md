@@ -17,7 +17,7 @@ This example registers `15-20`, `20-22`, and `16-17`.
 - To delete your shift registration, use the slash command `/shift delete`.
 ### ⚠️ Updating Your Shifts
 > -# To update, send a new message with **all of your latest shift times**. Include every time range you want to keep.
-> -# {bot} treats that message as the latest data and **overwrites all previous shift registrations**. Time ranges not included in the new message will be cleared.
+> -# {{ bot }} treats that message as the latest data and **overwrites all previous shift registrations**. Time ranges not included in the new message will be cleared.
 > -# Editing an old message does not update your registration.
 
-After registration, {bot} will automatically process your shifts and record the results in [Google Sheets]({sheet_url}) for you to view and confirm.
+After registration, {{ bot }} will automatically process your shifts and record the results in [Google Sheets]({{ sheet_url }}) for you to view and confirm.

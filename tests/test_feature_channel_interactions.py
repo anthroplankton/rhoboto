@@ -73,6 +73,16 @@ class ConfiguredShiftInfoManager(ConfiguredManager):
         )
 
 
+class ConfiguredMultiRangeShiftInfoManager(ConfiguredShiftInfoManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        config = await super().get_sheet_config_or_none()
+        config.recruitment_time_ranges = [
+            {"start": 4, "end": 20},
+            {"start": 24, "end": 28},
+        ]
+        return config
+
+
 def fake_bot() -> SimpleNamespace:
     return SimpleNamespace(
         tree=SimpleNamespace(add_command=lambda _command: None),
@@ -380,9 +390,10 @@ async def test_shift_info_defers_before_public_followup(
     ) -> list[RenderedAnnouncement]:
         assert template_key == "shift.info"
         assert guild_id == 111
+        assert "bot" not in values
         assert values["day_number"] == 2
         assert values["event_date"] == dt.date(2026, 8, 12)
-        assert values["recruitment_time_range"] == "4-28"
+        assert values["recruitment_time_range"] == "4-20・24-28"
         assert values["submission_deadline_at"] == dt.datetime(
             2026,
             8,
@@ -403,7 +414,7 @@ async def test_shift_info_defers_before_public_followup(
     interaction = FakeInteraction(locale="ja")
     subject = SimpleNamespace(
         feature_name="shift_register",
-        ManagerType=ConfiguredShiftInfoManager,
+        ManagerType=ConfiguredMultiRangeShiftInfoManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
         info_template_key="shift.info",
         logger=NullLogger(),

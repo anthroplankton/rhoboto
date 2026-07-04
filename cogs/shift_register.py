@@ -242,10 +242,9 @@ class ShiftRegister(
             self.info_template_key,
             interaction.guild.id,
             self.logger,
-            bot=self.bot.user.mention if self.bot.user is not None else "@bot",
             day_number=getattr(sheet_config, "day_number", None),
             event_date=getattr(sheet_config, "event_date", None),
-            recruitment_time_range=recruitment_ranges.display(),
+            recruitment_time_range=recruitment_ranges.announcement_display(),
             submission_deadline_at=getattr(
                 sheet_config,
                 "submission_deadline_at",

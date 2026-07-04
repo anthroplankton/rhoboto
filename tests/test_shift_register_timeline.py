@@ -8,7 +8,6 @@ from utils.shift_register_timeline import (
     ShiftTimelineInput,
     ShiftTimelineParseError,
     build_shift_info_template_values,
-    format_cjk_datetime,
     format_iso_hour,
     parse_shift_timeline_input,
     render_shift_info_announcement_messages,
@@ -192,14 +191,13 @@ def test_parse_shift_timeline_normalizes_full_width_digits_and_separators() -> N
     assert result.submission_deadline_at == datetime(2026, 8, 12, 12, tzinfo=UTC)
 
 
-def test_timeline_datetime_formatters_render_jst() -> None:
+def test_timeline_iso_formatter_renders_jst_for_settings_ui() -> None:
     value = datetime(2026, 8, 12, 12, tzinfo=UTC)
 
-    assert format_cjk_datetime(value) == "08月12日 21時"
     assert format_iso_hour(value) == "2026-08-12 21:00 JST"
 
 
-def test_build_shift_info_template_values_formats_ja_announcement() -> None:
+def test_build_shift_info_template_values_formats_ja_structured_values() -> None:
     values = build_shift_info_template_values(
         "ja",
         day_number=2,
@@ -208,21 +206,48 @@ def test_build_shift_info_template_values_formats_ja_announcement() -> None:
         submission_deadline_at=datetime(2026, 8, 12, 12, tzinfo=UTC),
         draft_shift_proposal_at=datetime(2026, 8, 13, 11, tzinfo=UTC),
         final_shift_notice_at=datetime(2026, 8, 14, 9, tzinfo=UTC),
-        bot="@Rhoboto",
     )
 
-    assert (
-        values["title"] == "\U0001f427 **2\u65e5\u76ee\uff088\u670812\u65e5\uff09"
-        "\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b** "
-        "\U0001f427"
+    assert values["day_number"] == 2
+    assert values["recruitment_time_range"] == "4-28"
+    assert values["event_date"].month == 8
+    assert values["event_date"].day == 12
+    assert values["event_date"].weekday == "水"
+    assert values["submission_deadline"].day == 12
+    assert values["submission_deadline"].weekday == "水"
+    assert values["submission_deadline"].hour == 21
+    assert values["draft_shift_proposal"].day == 13
+    assert values["draft_shift_proposal"].weekday == "木"
+    assert values["draft_shift_proposal"].hour == 20
+    assert values["final_shift_notice"].day == 14
+    assert values["final_shift_notice"].weekday == "金"
+    assert values["final_shift_notice"].hour == 18
+    assert "title" not in values
+    assert "deadline_processing_note" not in values
+
+
+def test_build_shift_info_template_values_formats_zh_tw_structured_values() -> None:
+    values = build_shift_info_template_values(
+        "zh_tw",
+        day_number=1,
+        event_date=date(2026, 7, 4),
+        recruitment_time_range="4-10・14-20・24-28",
+        submission_deadline_at=datetime(2026, 7, 20, 12, tzinfo=UTC),
+        draft_shift_proposal_at=None,
+        final_shift_notice_at=None,
     )
-    assert values["submission_deadline_line"] == "募集締切　　　 ⇒ 08月12日 21時"
-    assert values["draft_shift_proposal_line"] == "仮シフト提示　 ⇒ 08月13日 20時"
-    assert values["final_shift_notice_line"] == "確定シフト提示 ⇒ 08月14日 18時"
-    assert "@Rhoboto" in values["deadline_processing_note"]
+
+    assert values["event_date"].month == 7
+    assert values["event_date"].day == 4
+    assert values["event_date"].weekday == "六"
+    assert values["submission_deadline"].day == 20
+    assert values["submission_deadline"].weekday == "一"
+    assert values["submission_deadline"].hour == 21
+    assert values["draft_shift_proposal"] is None
+    assert values["final_shift_notice"] is None
 
 
-def test_build_shift_info_template_values_formats_en_fallbacks() -> None:
+def test_build_shift_info_template_values_formats_en_structured_values() -> None:
     values = build_shift_info_template_values(
         "en",
         day_number=None,
@@ -231,29 +256,64 @@ def test_build_shift_info_template_values_formats_en_fallbacks() -> None:
         submission_deadline_at=None,
         draft_shift_proposal_at=None,
         final_shift_notice_at=datetime(2026, 8, 14, 9, tzinfo=UTC),
-        bot="@Rhoboto",
     )
 
-    assert values["title"] == "🐧 **August 12 Shift Registration Announcement** 🐧"
-    assert values["submission_deadline_line"] == ""
-    assert values["draft_shift_proposal_line"] == ""
-    assert values["final_shift_notice_line"] == "Final shift notice ⇒ August 14, 18:00"
-    assert values["deadline_processing_note"] == ""
+    assert values["day_number"] is None
+    assert values["event_date"].month_name == "Aug"
+    assert values["event_date"].day == 12
+    assert values["event_date"].weekday == "Wed"
+    assert values["submission_deadline"] is None
+    assert values["draft_shift_proposal"] is None
+    assert values["final_shift_notice"].day == 14
+    assert values["final_shift_notice"].weekday == "Fri"
+    assert values["final_shift_notice"].hour == 18
+
+
+def test_build_shift_info_template_values_uses_jst_date_for_milestone_weekday() -> None:
+    values = build_shift_info_template_values(
+        "ja",
+        day_number=None,
+        event_date=None,
+        recruitment_time_range="4-28",
+        submission_deadline_at=datetime(2026, 8, 12, 16, tzinfo=UTC),
+        draft_shift_proposal_at=None,
+        final_shift_notice_at=None,
+    )
+
+    assert values["event_date"] is None
+    assert values["submission_deadline"].day == 13
+    assert values["submission_deadline"].weekday == "木"
+    assert values["submission_deadline"].hour == 1
 
 
 @pytest.mark.asyncio
 async def test_render_shift_info_announcement_messages_uses_language_specific_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    captured: dict[str, dict[str, object]] = {}
+
     async def fake_get_announcement_languages(
         _guild_id: int,
         _logger: object = None,
     ) -> list[str]:
         return ["ja", "en"]
 
+    def fake_render_message_template(
+        template_key: str,
+        language: str,
+        **values: object,
+    ) -> str:
+        assert "bot" not in values
+        captured[language] = values
+        return f"\n{template_key}:{language}\n\nbody\n\n"
+
     monkeypatch.setattr(
         "utils.shift_register_timeline.get_announcement_languages",
         fake_get_announcement_languages,
+    )
+    monkeypatch.setattr(
+        "utils.shift_register_timeline.render_message_template",
+        fake_render_message_template,
     )
 
     rendered = await render_shift_info_announcement_messages(
@@ -266,18 +326,16 @@ async def test_render_shift_info_announcement_messages_uses_language_specific_va
         submission_deadline_at=datetime(2026, 8, 12, 12, tzinfo=UTC),
         draft_shift_proposal_at=None,
         final_shift_notice_at=datetime(2026, 8, 14, 9, tzinfo=UTC),
-        bot="@Rhoboto",
     )
 
     assert [item.language for item in rendered] == ["ja", "en"]
-    assert (
-        "2\u65e5\u76ee\uff088\u670812\u65e5\uff09"
-        "\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b"
-        in rendered[0].content
-    )
-    assert "募集締切" in rendered[0].content
-    assert "Day 2 (August 12) Shift Registration Announcement" in rendered[1].content
-    assert "Submission deadline ⇒ August 12, 21:00" in rendered[1].content
-    assert "Draft shift proposal" not in rendered[1].content
-    assert "@Rhoboto" in rendered[1].content
+    assert rendered[0].content == "shift.info:ja\n\nbody"
+    assert captured["ja"]["event_date"].weekday == "水"
+    assert captured["ja"]["submission_deadline"].weekday == "水"
+    assert captured["ja"]["submission_deadline"].hour == 21
+    assert captured["en"]["event_date"].weekday == "Wed"
+    assert captured["en"]["event_date"].month_name == "Aug"
+    assert captured["en"]["submission_deadline"].weekday == "Wed"
+    assert captured["en"]["submission_deadline"].hour == 21
+    assert captured["en"]["draft_shift_proposal"] is None
     assert "\n\n\n" not in rendered[1].content

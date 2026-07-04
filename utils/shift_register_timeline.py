@@ -48,6 +48,28 @@ class ShiftTimelineValues:
     final_shift_notice_at: datetime | None
 
 
+@dataclass(frozen=True)
+class ShiftInfoEventDateParts:
+    month: int
+    day: int
+    weekday: str
+    month_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ShiftInfoMilestoneParts:
+    day: int
+    weekday: str
+    hour: int
+
+
+WEEKDAYS: dict[str, tuple[str, ...]] = {
+    "ja": ("月", "火", "水", "木", "金", "土", "日"),
+    "zh_tw": ("一", "二", "三", "四", "五", "六", "日"),
+    "en": ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+}
+
+
 FULL_DATE_PATTERN = re.compile(
     r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{2})(?P=sep)(?P<day>\d{2})$"
 )
@@ -217,17 +239,41 @@ def as_jst(value: datetime) -> datetime:
     return value.astimezone(JST)
 
 
-def format_cjk_datetime(value: datetime) -> str:
-    local_value = as_jst(value)
-    return (
-        f"{local_value.month:02d}\u6708{local_value.day:02d}\u65e5 "
-        f"{local_value.hour:02d}\u6642"
-    )
-
-
 def format_iso_hour(value: datetime) -> str:
     local_value = as_jst(value)
     return local_value.strftime("%Y-%m-%d %H:00 JST")
+
+
+def _weekday_token(language: str, weekday_index: int) -> str:
+    return WEEKDAYS.get(language, WEEKDAYS["en"])[weekday_index]
+
+
+def _build_event_date_parts(
+    language: str,
+    value: date | None,
+) -> ShiftInfoEventDateParts | None:
+    if value is None:
+        return None
+    return ShiftInfoEventDateParts(
+        month=value.month,
+        day=value.day,
+        weekday=_weekday_token(language, value.weekday()),
+        month_name=calendar.month_abbr[value.month] if language == "en" else None,
+    )
+
+
+def _build_milestone_parts(
+    language: str,
+    value: datetime | None,
+) -> ShiftInfoMilestoneParts | None:
+    if value is None:
+        return None
+    local_value = as_jst(value)
+    return ShiftInfoMilestoneParts(
+        day=local_value.day,
+        weekday=_weekday_token(language, local_value.date().weekday()),
+        hour=local_value.hour,
+    )
 
 
 def build_shift_info_template_values(  # noqa: PLR0913
@@ -239,35 +285,23 @@ def build_shift_info_template_values(  # noqa: PLR0913
     submission_deadline_at: datetime | None,
     draft_shift_proposal_at: datetime | None,
     final_shift_notice_at: datetime | None,
-    bot: str,
-) -> dict[str, str]:
-    """Build locale-specific placeholders for Shift Register info templates."""
+) -> dict[str, object]:
+    """Build locale-specific values for Shift Register info templates."""
     return {
-        "title": _build_shift_info_title(language, day_number, event_date),
+        "day_number": day_number,
+        "event_date": _build_event_date_parts(language, event_date),
         "recruitment_time_range": recruitment_time_range,
-        "submission_deadline_line": _build_milestone_line(
+        "submission_deadline": _build_milestone_parts(
             language,
-            "submission_deadline",
             submission_deadline_at,
         ),
-        "draft_shift_proposal_line": _build_milestone_line(
+        "draft_shift_proposal": _build_milestone_parts(
             language,
-            "draft_shift_proposal",
             draft_shift_proposal_at,
         ),
-        "final_shift_notice_line": _build_milestone_line(
+        "final_shift_notice": _build_milestone_parts(
             language,
-            "final_shift_notice",
             final_shift_notice_at,
-        ),
-        "deadline_processing_note": (
-            render_message_template(
-                "shift.info_deadline_processing_note",
-                language,
-                bot=bot,
-            )
-            if submission_deadline_at is not None
-            else ""
         ),
     }
 
@@ -297,7 +331,6 @@ async def render_shift_info_announcement_messages(
                 final_shift_notice_at=_optional_datetime(
                     values.get("final_shift_notice_at")
                 ),
-                bot=str(values["bot"]),
             )
             content = render_message_template(template_key, language, **template_values)
         except MessageTemplateNotFoundError:
@@ -344,127 +377,3 @@ def _compact_shift_info_message(content: str) -> str:
         if index == 1 and compacted:
             compacted.append("")
     return "\n".join(compacted)
-
-
-def _build_shift_info_title(
-    language: str,
-    day_number: int | None,
-    event_date: date | None,
-) -> str:
-    if language == "ja":
-        return _build_ja_title(day_number, event_date)
-    if language == "zh_tw":
-        return _build_zh_tw_title(day_number, event_date)
-    return _build_en_title(day_number, event_date)
-
-
-def _build_ja_title(day_number: int | None, event_date: date | None) -> str:
-    if day_number is not None and event_date is not None:
-        return (
-            f"\U0001f427 **{day_number}\u65e5\u76ee"
-            f"\uff08{_format_title_cjk_date(event_date)}\uff09"
-            f"\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b** "
-            "\U0001f427"
-        )
-    if day_number is not None:
-        return (
-            f"\U0001f427 **{day_number}\u65e5\u76ee "
-            "\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b** "
-            "\U0001f427"
-        )
-    if event_date is not None:
-        return (
-            f"\U0001f427 **{_format_title_cjk_date(event_date)} "
-            "\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b** "
-            "\U0001f427"
-        )
-    return (
-        "\U0001f427 "
-        "**\u30b7\u30d5\u30c8\u767b\u9332\u306e\u304a\u77e5\u3089\u305b** "
-        "\U0001f427"
-    )
-
-
-def _build_zh_tw_title(day_number: int | None, event_date: date | None) -> str:
-    if day_number is not None and event_date is not None:
-        return (
-            f"\U0001f427 **\u7b2c {day_number} \u5929"
-            f"\uff08{_format_title_cjk_date(event_date)}\uff09"
-            "\u73ed\u8868\u767b\u8a18\u516c\u544a** \U0001f427"
-        )
-    if day_number is not None:
-        return (
-            f"\U0001f427 **\u7b2c {day_number} "
-            "\u5929\u73ed\u8868\u767b\u8a18\u516c\u544a** \U0001f427"
-        )
-    if event_date is not None:
-        return (
-            f"\U0001f427 **{_format_title_cjk_date(event_date)}"
-            "\u73ed\u8868\u767b\u8a18\u516c\u544a** \U0001f427"
-        )
-    return "\U0001f427 **\u73ed\u8868\u767b\u8a18\u516c\u544a** \U0001f427"
-
-
-def _build_en_title(day_number: int | None, event_date: date | None) -> str:
-    if day_number is not None and event_date is not None:
-        return (
-            f"\U0001f427 **Day {day_number} ({_format_en_date(event_date)}) "
-            "Shift Registration Announcement** \U0001f427"
-        )
-    if day_number is not None:
-        return (
-            f"\U0001f427 **Day {day_number} "
-            "Shift Registration Announcement** \U0001f427"
-        )
-    if event_date is not None:
-        return (
-            f"\U0001f427 **{_format_en_date(event_date)} "
-            "Shift Registration Announcement** \U0001f427"
-        )
-    return "\U0001f427 **Shift Registration Announcement** \U0001f427"
-
-
-def _build_milestone_line(
-    language: str,
-    milestone: str,
-    value: datetime | None,
-) -> str:
-    if value is None:
-        return ""
-    if language == "ja":
-        labels = {
-            "submission_deadline": "\u52df\u96c6\u7de0\u5207\u3000\u3000\u3000 \u21d2",
-            "draft_shift_proposal": "\u4eee\u30b7\u30d5\u30c8\u63d0\u793a\u3000 \u21d2",
-            "final_shift_notice": "\u78ba\u5b9a\u30b7\u30d5\u30c8\u63d0\u793a \u21d2",
-        }
-        return f"{labels[milestone]} {format_cjk_datetime(value)}"
-    if language == "zh_tw":
-        labels = {
-            "submission_deadline": "\u52df\u96c6\u622a\u6b62\u3000\u3000 \u21d2",
-            "draft_shift_proposal": "\u66ab\u5b9a\u73ed\u8868\u516c\u5e03 \u21d2",
-            "final_shift_notice": "\u78ba\u5b9a\u73ed\u8868\u516c\u5e03 \u21d2",
-        }
-        return f"{labels[milestone]} {format_cjk_datetime(value)}"
-
-    labels = {
-        "submission_deadline": "Submission deadline",
-        "draft_shift_proposal": "Draft shift proposal",
-        "final_shift_notice": "Final shift notice",
-    }
-    return f"{labels[milestone]} \u21d2 {_format_en_datetime(value)}"
-
-
-def _format_title_cjk_date(value: date) -> str:
-    return f"{value.month}\u6708{value.day}\u65e5"
-
-
-def _format_en_date(value: date) -> str:
-    return f"{calendar.month_name[value.month]} {value.day}"
-
-
-def _format_en_datetime(value: datetime) -> str:
-    local_value = as_jst(value)
-    return (
-        f"{calendar.month_name[local_value.month]} "
-        f"{local_value.day}, {local_value.hour:02d}:00"
-    )
