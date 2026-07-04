@@ -226,7 +226,7 @@ class ShiftRegister(
         )
         announcements = await render_shift_info_announcement_messages(
             self.info_template_key,
-            interaction.guild.id,
+            context.guild_id,
             self.logger,
             day_number=getattr(context.sheet_config, "day_number", None),
             event_date=getattr(context.sheet_config, "event_date", None),

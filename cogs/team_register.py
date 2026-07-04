@@ -6,7 +6,11 @@ from typing import TYPE_CHECKING, override
 from discord import Interaction, Member, Message, app_commands
 
 from bot import config
-from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.feature_channel_base import (
+    FeatureChannelBase,
+    _get_configured_feature_context,
+    _get_interaction_channel_context,
+)
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_settings_flow import (
     send_current_panel_followup,
@@ -184,48 +188,34 @@ class TeamRegister(
         FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
     )
     async def summary(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
+        interaction_context = _get_interaction_channel_context(interaction)
 
         await interaction.response.defer(ephemeral=True)
 
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        feature_channel = await FeatureChannel.get(
-            guild_id=guild_id,
-            channel_id=channel_id,
+        context = await _get_configured_feature_context(
+            interaction,
             feature_name=self.feature_name,
+            manager_type=self.ManagerType,
+            interaction_context=interaction_context,
         )
-
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            await interaction.followup.send(
-                content="Team Register is not configured for this channel.",
-                ephemeral=True,
-            )
+        if context is None:
             return
 
-        async with self.lock(interaction.channel.id):
+        async with self.lock(context.channel_id):
             try:
-                metadata = await manager.fetch_google_sheets_metadata()
-                manager.log_missing_worksheet_warnings(metadata)
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                context.manager.log_missing_worksheet_warnings(metadata)
 
-                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                    metadata,
-                    count=0,  # No teams to process, just refresh summary
+                metadata = (
+                    await context.manager.ensure_worksheets_and_upsert_sheet_config(
+                        metadata,
+                        count=0,  # No teams to process, just refresh summary
+                    )
                 )
 
-                summary_df = await manager.refresh_summary_worksheet(
+                summary_df = await context.manager.refresh_summary_worksheet(
                     metadata,
-                    member_by_names={m.name: m for m in interaction.guild.members},
+                    member_by_names={m.name: m for m in context.guild.members},
                 )
             except GoogleSheetsError as exc:
                 await send_google_sheets_error(interaction, exc)

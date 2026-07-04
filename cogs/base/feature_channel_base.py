@@ -5,7 +5,7 @@ from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from discord import Interaction, Message, app_commands
+from discord import Guild, Interaction, Message, app_commands
 from discord.ext import commands
 
 from bot import config
@@ -39,10 +39,34 @@ TUpsertResult = TypeVar("TUpsertResult")
 
 
 @dataclass(frozen=True)
+class _InteractionChannelContext:
+    guild: Guild
+    guild_id: int
+    channel_id: int
+
+
+@dataclass(frozen=True)
 class _ConfiguredFeatureContext(Generic[TManager]):
+    guild: Guild
+    guild_id: int
+    channel_id: int
     feature_channel: FeatureChannel
     manager: TManager
     sheet_config: object
+
+
+def _get_interaction_channel_context(
+    interaction: Interaction,
+) -> _InteractionChannelContext:
+    if interaction.channel is None or interaction.guild is None:
+        msg = "Cannot proceed without an interaction channel and guild."
+        raise ValueError(msg)
+
+    return _InteractionChannelContext(
+        guild=interaction.guild,
+        guild_id=interaction.guild.id,
+        channel_id=interaction.channel.id,
+    )
 
 
 async def _get_configured_feature_context[TConfiguredManager: ManagerBase](
@@ -50,14 +74,14 @@ async def _get_configured_feature_context[TConfiguredManager: ManagerBase](
     *,
     feature_name: str,
     manager_type: type[TConfiguredManager],
+    interaction_context: _InteractionChannelContext | None = None,
 ) -> _ConfiguredFeatureContext[TConfiguredManager] | None:
-    if interaction.channel is None or interaction.guild is None:
-        msg = "Cannot proceed without an interaction channel and guild."
-        raise ValueError(msg)
+    if interaction_context is None:
+        interaction_context = _get_interaction_channel_context(interaction)
 
     feature_channel = await FeatureChannel.get(
-        guild_id=interaction.guild.id,
-        channel_id=interaction.channel.id,
+        guild_id=interaction_context.guild_id,
+        channel_id=interaction_context.channel_id,
         feature_name=feature_name,
     )
     manager = manager_type(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
@@ -70,6 +94,9 @@ async def _get_configured_feature_context[TConfiguredManager: ManagerBase](
         return None
 
     return _ConfiguredFeatureContext(
+        guild=interaction_context.guild,
+        guild_id=interaction_context.guild_id,
+        channel_id=interaction_context.channel_id,
         feature_channel=feature_channel,
         manager=manager,
         sheet_config=sheet_config,
@@ -376,7 +403,7 @@ class FeatureChannelBase(
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
         announcements = await render_announcement_messages(
             self.help_template_key,
-            interaction.guild.id,
+            context.guild_id,
             self.logger,
             bot=bot_mention,
             sheet_url=context.sheet_config.sheet_url,
@@ -584,12 +611,7 @@ class FeatureChannelUserBase(
         """
         Delete the user's data for this feature in this channel.
         """
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with delete command."
-            )
-            raise ValueError(msg)
+        interaction_context = _get_interaction_channel_context(interaction)
 
         await interaction.response.defer(ephemeral=True)
 
@@ -598,23 +620,18 @@ class FeatureChannelUserBase(
             display_name=interaction.user.display_name,
         )
 
-        feature_channel = await FeatureChannel.get(
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
+        context = await _get_configured_feature_context(
+            interaction,
             feature_name=self.feature_name,
+            manager_type=self.ManagerType,
+            interaction_context=interaction_context,
         )
-
-        manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-
-        sheet_config = await manager.get_sheet_config_or_none()
-        if sheet_config is None:
-            await interaction.followup.send(
-                content=f"`{self.feature_name}` is not configured for this channel.",
-                ephemeral=True,
-            )
+        if context is None:
             return
 
-        async with self.FeatureChannelType.lock(interaction.channel.id):
+        manager = context.manager
+
+        async with self.FeatureChannelType.lock(context.channel_id):
             try:
                 metadata = await manager.fetch_google_sheets_metadata()
                 await self._delete_user_data(manager, user_info, metadata)

@@ -84,6 +84,80 @@ class ConfiguredMultiRangeShiftInfoManager(ConfiguredShiftInfoManager):
         return config
 
 
+class RecordingLock:
+    def __init__(self) -> None:
+        self.keys: list[int] = []
+
+    def __call__(self, key: int) -> RecordingLock:
+        self.keys.append(key)
+        return self
+
+    async def __aenter__(self) -> None:
+        return None
+
+    async def __aexit__(self, *_: object) -> bool:
+        return False
+
+
+class UnexpectedTeamRegisterManager:
+    def __init__(self, *_: object, **__: object) -> None:
+        msg = "summary should use self.ManagerType"
+        raise AssertionError(msg)
+
+
+class SummaryManager(ConfiguredManager):
+    last_instance: SummaryManager | None = None
+    summary_dataframe = object()
+
+    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+        super().__init__(feature_channel, service_account_path)
+        self.metadata = SimpleNamespace(name="metadata")
+        self.ensured_metadata = SimpleNamespace(name="ensured_metadata")
+        self.logged_metadata: object | None = None
+        self.ensure_count: int | None = None
+        self.refresh_metadata: object | None = None
+        self.member_by_names: dict[str, object] | None = None
+        SummaryManager.last_instance = self
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        return self.metadata
+
+    def log_missing_worksheet_warnings(self, metadata: object) -> None:
+        self.logged_metadata = metadata
+
+    async def ensure_worksheets_and_upsert_sheet_config(
+        self,
+        metadata: object,
+        *,
+        count: int | None = None,
+    ) -> SimpleNamespace:
+        self.ensure_count = count
+        assert metadata is self.metadata
+        return self.ensured_metadata
+
+    async def refresh_summary_worksheet(
+        self,
+        metadata: object,
+        *,
+        member_by_names: dict[str, object],
+    ) -> object:
+        self.refresh_metadata = metadata
+        self.member_by_names = member_by_names
+        return self.summary_dataframe
+
+
+class DeleteManager(ConfiguredManager):
+    last_instance: DeleteManager | None = None
+
+    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+        super().__init__(feature_channel, service_account_path)
+        self.metadata = SimpleNamespace(name="delete_metadata")
+        DeleteManager.last_instance = self
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        return self.metadata
+
+
 def fake_bot() -> SimpleNamespace:
     return SimpleNamespace(
         tree=SimpleNamespace(add_command=lambda _command: None),
@@ -94,6 +168,55 @@ def fake_bot() -> SimpleNamespace:
 def test_configured_feature_helpers_are_internal() -> None:
     assert not hasattr(feature_channel_base, "get_configured_feature_context")
     assert not hasattr(feature_channel_base, "send_public_announcement_followups")
+
+
+@pytest.mark.asyncio
+async def test_configured_feature_context_exposes_interaction_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    get_context = feature_channel_base._get_configured_feature_context  # noqa: SLF001
+
+    context = await get_context(
+        interaction,
+        feature_name="team_register",
+        manager_type=ConfiguredManager,
+    )
+
+    assert context is not None
+    assert context.guild is interaction.guild
+    assert context.guild_id == 111
+    assert context.channel_id == 222
+    assert context.feature_channel.guild_id == 111
+    assert context.feature_channel.channel_id == 222
+    assert context.feature_channel.feature_name == "team_register"
+    assert isinstance(context.manager, ConfiguredManager)
+    assert context.manager.feature_channel is context.feature_channel
+    assert context.sheet_config.sheet_url == "https://sheet.example"
+
+
+@pytest.mark.asyncio
+async def test_configured_feature_context_reports_missing_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    get_context = feature_channel_base._get_configured_feature_context  # noqa: SLF001
+
+    context = await get_context(
+        interaction,
+        feature_name="team_register",
+        manager_type=MissingConfigManager,
+    )
+
+    assert context is None
+    assert interaction.followup.messages == [
+        (
+            "`team_register` is not configured for this channel.",
+            {"ephemeral": True},
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -461,6 +584,202 @@ async def test_shift_info_defers_before_public_followup(
         ("ja info", {"ephemeral": False}),
         ("en info", {"ephemeral": False}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_team_summary_reports_default_missing_config_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.team_register.TeamRegisterManager",
+        UnexpectedTeamRegisterManager,
+    )
+    lock = RecordingLock()
+    interaction = FakeInteraction()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=MissingConfigManager,
+        lock=lock,
+    )
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages == [
+        (
+            "`team_register` is not configured for this channel.",
+            {"ephemeral": True},
+        )
+    ]
+    assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_team_summary_refreshes_with_configured_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.team_register.TeamRegisterManager",
+        UnexpectedTeamRegisterManager,
+    )
+    summary_embed = SimpleNamespace(title="summary")
+
+    def fake_build_summary_embed(summary_dataframe: object) -> SimpleNamespace:
+        assert summary_dataframe is SummaryManager.summary_dataframe
+        return summary_embed
+
+    monkeypatch.setattr(
+        "cogs.team_register.build_summary_embed",
+        fake_build_summary_embed,
+    )
+
+    members = [SimpleNamespace(name="alice"), SimpleNamespace(name="bob")]
+    guild = SimpleNamespace(id=111, members=members)
+    interaction = FakeInteraction(guild=guild)
+    lock = RecordingLock()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=SummaryManager,
+        lock=lock,
+    )
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    manager = SummaryManager.last_instance
+    assert manager is not None
+    assert interaction.response.deferred == [True]
+    assert lock.keys == [222]
+    assert manager.feature_channel.guild_id == 111
+    assert manager.feature_channel.channel_id == 222
+    assert manager.feature_channel.feature_name == "team_register"
+    assert manager.logged_metadata is manager.metadata
+    assert manager.ensure_count == 0
+    assert manager.refresh_metadata is manager.ensured_metadata
+    assert manager.member_by_names == {
+        "alice": members[0],
+        "bob": members[1],
+    }
+    assert interaction.followup.messages == [(None, {"embed": summary_embed})]
+
+
+@pytest.mark.asyncio
+async def test_team_summary_missing_guild_raises_before_defer() -> None:
+    interaction = FakeInteraction()
+    interaction.guild = None
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=SummaryManager,
+        lock=RecordingLock(),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot proceed without an interaction channel and guild.",
+    ):
+        await TeamRegister.summary.callback(subject, interaction)
+
+    assert interaction.response.deferred == []
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_reports_missing_config_without_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    lock = RecordingLock()
+
+    async def fail_delete(*_: object, **__: object) -> None:
+        raise AssertionError
+
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=MissingConfigManager,
+        FeatureChannelType=SimpleNamespace(lock=lock),
+        _delete_user_data=fail_delete,
+    )
+    interaction = FakeInteraction()
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages == [
+        (
+            "`team_register` is not configured for this channel.",
+            {"ephemeral": True},
+        )
+    ]
+    assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_deletes_with_configured_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    lock = RecordingLock()
+    deleted: list[tuple[object, object, object]] = []
+
+    async def fake_delete_user_data(
+        manager: object,
+        user_info: object,
+        metadata: object,
+    ) -> None:
+        deleted.append((manager, user_info, metadata))
+
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=DeleteManager,
+        FeatureChannelType=SimpleNamespace(lock=lock),
+        _delete_user_data=fake_delete_user_data,
+    )
+    interaction = FakeInteraction(locale="en-US")
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    manager = DeleteManager.last_instance
+    assert manager is not None
+    assert interaction.response.deferred == [True]
+    assert manager.feature_channel.guild_id == 111
+    assert manager.feature_channel.channel_id == 222
+    assert manager.feature_channel.feature_name == "team_register"
+    assert lock.keys == [222]
+    assert len(deleted) == 1
+    deleted_manager, user_info, metadata = deleted[0]
+    assert deleted_manager is manager
+    assert user_info.username == "alice"
+    assert user_info.display_name == "Alice"
+    assert metadata is manager.metadata
+    assert interaction.followup.messages == [
+        (
+            "✅ Your data for `team_register` has been deleted successfully.",
+            {"ephemeral": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_missing_channel_raises_before_defer() -> None:
+    async def fail_delete(*_: object, **__: object) -> None:
+        raise AssertionError
+
+    interaction = FakeInteraction()
+    interaction.channel = None
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=DeleteManager,
+        FeatureChannelType=SimpleNamespace(lock=RecordingLock()),
+        _delete_user_data=fail_delete,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot proceed without an interaction channel and guild.",
+    ):
+        await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.response.deferred == []
 
 
 @pytest.mark.asyncio
