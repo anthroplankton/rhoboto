@@ -74,7 +74,7 @@ When an approved migration plan changes command names, feature names, privileged
 
 ## Build, Test, and Development Commands
 
-Read `docs/project_setup.md` before changing project setup, dependencies, validation commands, CI, deployment, `.codex/`, `.agents/`, or agent harness behavior. That document owns the detailed setup, validation, deployment, and sandbox command contract.
+Read `docs/project_setup.md` before changing project setup, dependencies, validation commands, CI, deployment, `.codex/`, `.agents/`, or agent harness behavior. That document owns the detailed setup, validation, deployment, and sandbox command contract. The commands below are the normal local and CI command forms; in managed Codex sandboxes, use the repo-local cache-prefixed variants in `docs/project_setup.md` instead of these bare forms.
 
 - `uv sync`: install runtime and developer dependencies from `pyproject.toml` and `uv.lock`.
 - `uv lock --check`: verify that `uv.lock` is consistent with `pyproject.toml`.
@@ -83,12 +83,12 @@ Read `docs/project_setup.md` before changing project setup, dependencies, valida
 - `pre-commit run --all-files`: run all configured hooks; this may modify files because Black formats code and Ruff is configured with `--fix`.
 - `uv run ruff check --no-fix .`: lint with Ruff without modifying files.
 - `uv run ruff format --check .`: check Ruff formatting.
-- `uv run black --check --workers 1 main.py bot cogs components models utils`: check Black formatting.
+- `uv run black --check --workers 1 main.py bot cogs components models utils`: check Black formatting outside managed Codex sandboxes.
 - `uv run pytest`: run the automated test suite.
 
 CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, Black format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
 
-In managed Codex sandboxes, use the repo-local cache-prefixed validation commands documented in `docs/project_setup.md` instead of the bare local command forms above.
+For Black in managed Codex sandboxes, follow the guarded command in `docs/project_setup.md`; do not treat success-like Black stdout as proof of success without a clean exit code.
 
 ## Coding Style & Naming Conventions
 
