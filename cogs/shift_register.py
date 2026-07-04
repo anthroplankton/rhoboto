@@ -10,17 +10,12 @@ from cogs.base.feature_channel_base import (
     _get_configured_feature_context,
     _send_public_announcement_followups,
 )
-from components.ui_google_sheets_errors import send_google_sheets_error
-from components.ui_settings_flow import (
-    send_current_panel_followup,
-    send_settings_view_followup,
-)
 from components.ui_shift_register import (
+    SHIFT_REGISTER_DISPLAY_NAME,
     ShiftRegisterView,
     build_shift_register_settings_panel,
 )
 from models.feature_channel import FeatureChannel
-from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
@@ -29,8 +24,10 @@ from utils.shift_register_timeline import render_shift_info_announcement_message
 
 if TYPE_CHECKING:
     from discord import Interaction, Message
+    from discord.ui import View
 
     from bot import Rhoboto
+    from components.ui_settings_flow import SettingsPanel
     from utils.structs_base import UserInfo
 
 
@@ -39,55 +36,28 @@ class ShiftRegister(
     group_name="shift_register",
 ):
     feature_name = "shift_register"
+    feature_display_name = SHIFT_REGISTER_DISPLAY_NAME
     help_template_key = "shift.help"
     info_template_key = "shift.info"
     lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
 
-    async def setup_after_enable(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        feature_channel = await FeatureChannel.get(
-            guild_id=guild_id,
-            channel_id=channel_id,
-            feature_name=self.feature_name,
+    @override
+    def _build_initial_setup_view(self, manager: ShiftRegisterManager) -> View:
+        return ShiftRegisterView(shift_register_manager=manager)
+
+    @override
+    async def _build_settings_panel(
+        self,
+        _interaction: Interaction,
+        manager: ShiftRegisterManager,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        return await build_shift_register_settings_panel(
+            manager,
+            sheet_config,
         )
-
-        manager = ShiftRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        shift_register_config = await manager.get_sheet_config_or_none()
-        if shift_register_config is None:
-            content = (
-                "Shift Register is not yet configured for this channel. "
-                "Click below to set up."
-            )
-            view = ShiftRegisterView(shift_register_manager=manager)
-            await send_settings_view_followup(
-                interaction,
-                content=content,
-                view=view,
-            )
-            return
-
-        try:
-            panel = await build_shift_register_settings_panel(
-                manager,
-                shift_register_config,
-            )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
-            return
-
-        await send_current_panel_followup(interaction, panel)
 
     @override
     async def process_upsert_from_message(self, message: Message) -> Shift | None:

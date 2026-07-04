@@ -14,6 +14,11 @@ from components.ui_google_sheets_errors import (
     mark_google_sheets_message_failure,
     send_google_sheets_error,
 )
+from components.ui_settings_flow import (
+    initial_setup_content,
+    send_current_panel_followup,
+    send_settings_view_followup,
+)
 from models.feature_channel import FeatureChannel
 from utils.announcement_languages import (
     ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
@@ -27,7 +32,10 @@ from utils.structs_base import GoogleSheetsMetadata, UserInfo
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
+    from discord.ui import View
+
     from bot import Rhoboto
+    from components.ui_settings_flow import SettingsPanel
     from utils.announcement_languages import RenderedAnnouncement
     from utils.key_async_lock import KeyAsyncLock
 
@@ -180,9 +188,11 @@ class FeatureChannelBase(
 
     Attributes:
         feature_name (str): Name of the feature. Should be overridden by subclasses.
+        feature_display_name (str): Human-facing name for settings UI text.
     """
 
-    feature_name: str  # This should be overridden by subclasses
+    feature_name: str  # Stable feature identifier; overridden by subclasses.
+    feature_display_name: str  # Human-facing settings UI label.
     lock: KeyAsyncLock
 
     ManagerType: type[TManager]  # Type of the manager to use for this feature
@@ -287,14 +297,63 @@ class FeatureChannelBase(
                 self.logger,
             )
 
-    @abstractmethod
     async def setup_after_enable(self, interaction: Interaction) -> None:
-        """
-        Show current settings or prompt to set up if not configured.
-        This method should be implemented by subclasses to handle
-        feature-specific setup.
-        """
-        msg = "Subclasses must implement setup_after_enable method."
+        """Show current settings or prompt to set up if not configured."""
+        if interaction.channel is None or interaction.guild is None:
+            msg = (
+                "Interaction channel or guild is None. "
+                "Cannot proceed with setup message."
+            )
+            raise ValueError(msg)
+
+        feature_channel = await FeatureChannel.get(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel.id,
+            feature_name=self.feature_name,
+        )
+
+        manager = self.ManagerType(
+            feature_channel,
+            config.GOOGLE_SERVICE_ACCOUNT_PATH,
+        )
+
+        sheet_config = await manager.get_sheet_config_or_none()
+        if sheet_config is None:
+            view = self._build_initial_setup_view(manager)
+            await send_settings_view_followup(
+                interaction,
+                content=initial_setup_content(self.feature_display_name),
+                view=view,
+            )
+            return
+
+        try:
+            panel = await self._build_settings_panel(
+                interaction,
+                manager,
+                sheet_config,
+            )
+        except GoogleSheetsError as exc:
+            await send_google_sheets_error(interaction, exc)
+            return
+
+        await send_current_panel_followup(interaction, panel)
+
+    @abstractmethod
+    def _build_initial_setup_view(self, manager: TManager) -> View:
+        """Build the initial setup view for a feature with no sheet config."""
+        msg = "Subclasses must implement _build_initial_setup_view method."
+        raise NotImplementedError(msg)
+
+    @abstractmethod
+    async def _build_settings_panel(
+        self,
+        interaction: Interaction,
+        manager: TManager,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        """Build the current settings panel for a configured feature."""
+        msg = "Subclasses must implement _build_settings_panel method."
         raise NotImplementedError(msg)
 
     @app_commands.command(

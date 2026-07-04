@@ -67,6 +67,13 @@ def settings_description(
     return f"{prefix} {controls_description}"
 
 
+def initial_setup_content(feature_display_name: str) -> str:
+    return (
+        f"{feature_display_name} is not yet configured for this channel. "
+        "Click below to set up."
+    )
+
+
 def stale_setup_content(feature_display_name: str) -> str:
     return (
         f"{feature_display_name} is already configured for this channel. "

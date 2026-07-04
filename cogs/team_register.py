@@ -12,11 +12,8 @@ from cogs.base.feature_channel_base import (
     _get_interaction_channel_context,
 )
 from components.ui_google_sheets_errors import send_google_sheets_error
-from components.ui_settings_flow import (
-    send_current_panel_followup,
-    send_settings_view_followup,
-)
 from components.ui_team_register import (
+    TEAM_REGISTER_DISPLAY_NAME,
     TeamRegisterView,
     build_summary_embed,
     build_team_register_settings_panel,
@@ -29,62 +26,38 @@ from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import ClassifiedTeams, TeamParser
 
 if TYPE_CHECKING:
+    from discord.ui import View
+
     from bot import Rhoboto
+    from components.ui_settings_flow import SettingsPanel
 
 
 class TeamRegister(
     FeatureChannelBase[TeamRegisterManager, ClassifiedTeams], group_name="team_register"
 ):
     feature_name = "team_register"
+    feature_display_name = TEAM_REGISTER_DISPLAY_NAME
     help_template_key = "team.help"
     lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
 
-    async def setup_after_enable(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        feature_channel = await FeatureChannel.get(
-            guild_id=guild_id,
-            channel_id=channel_id,
-            feature_name=self.feature_name,
+    @override
+    def _build_initial_setup_view(self, manager: TeamRegisterManager) -> View:
+        return TeamRegisterView(team_register_manager=manager)
+
+    @override
+    async def _build_settings_panel(
+        self,
+        interaction: Interaction,
+        manager: TeamRegisterManager,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        return await build_team_register_settings_panel(
+            manager,
+            interaction,
+            sheet_config,
         )
-
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            content = (
-                "Team Register is not yet configured for this channel. "
-                "Click below to set up."
-            )
-            view = TeamRegisterView(team_register_manager=manager)
-            await send_settings_view_followup(
-                interaction,
-                content=content,
-                view=view,
-            )
-            return
-
-        try:
-            panel = await build_team_register_settings_panel(
-                manager,
-                interaction,
-                team_register_config,
-            )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
-            return
-
-        await send_current_panel_followup(interaction, panel)
 
     @override
     async def process_upsert_from_message(

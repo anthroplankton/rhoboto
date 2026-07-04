@@ -9,6 +9,7 @@ from components.ui_settings_flow import (
     SettingsPanel,
     SettingsTimeoutView,
     attach_settings_view_message,
+    initial_setup_content,
     prepare_replacement_settings_view,
     send_current_panel_followup,
     send_settings_view_followup,
@@ -56,6 +57,12 @@ def test_settings_description_uses_current_and_saved_forms() -> None:
     ) == (
         "Your Team Register settings were saved. "
         "Use the buttons below to edit sheet settings or Encore roles."
+    )
+
+
+def test_initial_setup_content_prompts_user_to_set_up() -> None:
+    assert initial_setup_content("Team Register") == (
+        "Team Register is not yet configured for this channel. Click below to set up."
     )
 
 

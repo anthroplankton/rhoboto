@@ -4,12 +4,14 @@ import datetime as dt
 from types import SimpleNamespace
 
 import pytest
+from discord import Embed
 
 from bot import config
 from cogs.base import feature_channel_base
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
+from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
 from models.feature_channel import FeatureChannel
 from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
 from utils.announcement_languages import RenderedAnnouncement
@@ -156,6 +158,20 @@ class DeleteManager(ConfiguredManager):
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
         return self.metadata
+
+
+class UnexpectedSetupManager:
+    def __init__(self, *_: object, **__: object) -> None:
+        msg = "setup_after_enable should use self.ManagerType"
+        raise AssertionError(msg)
+
+
+class PanelManager(ConfiguredManager):
+    last_instance: PanelManager | None = None
+
+    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+        super().__init__(feature_channel, service_account_path)
+        PanelManager.last_instance = self
 
 
 def fake_bot() -> SimpleNamespace:
@@ -782,6 +798,13 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
     assert interaction.response.deferred == []
 
 
+def test_team_and_shift_use_inherited_setup_after_enable() -> None:
+    assert TeamRegister.feature_display_name == "Team Register"
+    assert ShiftRegister.feature_display_name == "Shift Register"
+    assert "setup_after_enable" not in TeamRegister.__dict__
+    assert "setup_after_enable" not in ShiftRegister.__dict__
+
+
 @pytest.mark.asyncio
 async def test_team_settings_command_defers_and_reuses_setup_after_enable() -> None:
     called = 0
@@ -821,7 +844,11 @@ async def test_team_setup_after_enable_attaches_initial_setup_view_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
-    monkeypatch.setattr("cogs.team_register.TeamRegisterManager", MissingConfigManager)
+    monkeypatch.setattr(
+        "cogs.team_register.TeamRegisterManager",
+        UnexpectedSetupManager,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", MissingConfigManager)
     interaction = FakeInteraction()
     subject = TeamRegister(fake_bot())
 
@@ -842,8 +869,9 @@ async def test_shift_setup_after_enable_attaches_initial_setup_view_message(
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     monkeypatch.setattr(
         "cogs.shift_register.ShiftRegisterManager",
-        MissingConfigManager,
+        UnexpectedSetupManager,
     )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", MissingConfigManager)
     interaction = FakeInteraction()
     subject = ShiftRegister(fake_bot())
 
@@ -855,3 +883,167 @@ async def test_shift_setup_after_enable_attaches_initial_setup_view_message(
     )
     assert kwargs["wait"] is True
     assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
+
+
+@pytest.mark.asyncio
+async def test_team_setup_after_enable_sends_current_panel_from_base_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.team_register.TeamRegisterManager",
+        UnexpectedSetupManager,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", PanelManager)
+    PanelManager.last_instance = None
+    panel_view = SettingsTimeoutView()
+    panel = SettingsPanel(embed=Embed(title="Team Register Settings"), view=panel_view)
+    calls: list[tuple[object, object, object]] = []
+
+    async def fake_build_team_register_settings_panel(
+        manager: object,
+        interaction: object,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        calls.append((manager, interaction, sheet_config))
+        return panel
+
+    monkeypatch.setattr(
+        "cogs.team_register.build_team_register_settings_panel",
+        fake_build_team_register_settings_panel,
+    )
+    interaction = FakeInteraction()
+    subject = TeamRegister(fake_bot())
+
+    await subject.setup_after_enable(interaction)
+
+    manager = PanelManager.last_instance
+    assert manager is not None
+    assert len(calls) == 1
+    call_manager, call_interaction, sheet_config = calls[0]
+    assert call_manager is manager
+    assert call_interaction is interaction
+    assert sheet_config.sheet_url == "https://sheet.example"
+    assert interaction.followup.messages == [
+        (
+            None,
+            {
+                "embed": panel.embed,
+                "view": panel.view,
+                "ephemeral": True,
+                "wait": True,
+            },
+        )
+    ]
+    assert panel_view.message is interaction.followup.sent_message_objects[0]
+
+
+@pytest.mark.asyncio
+async def test_shift_setup_after_enable_sends_current_panel_from_base_flow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.shift_register.ShiftRegisterManager",
+        UnexpectedSetupManager,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", PanelManager)
+    PanelManager.last_instance = None
+    panel_view = SettingsTimeoutView()
+    panel = SettingsPanel(embed=Embed(title="Shift Register Settings"), view=panel_view)
+    calls: list[tuple[object, object]] = []
+
+    async def fake_build_shift_register_settings_panel(
+        manager: object,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        calls.append((manager, sheet_config))
+        return panel
+
+    monkeypatch.setattr(
+        "cogs.shift_register.build_shift_register_settings_panel",
+        fake_build_shift_register_settings_panel,
+    )
+    interaction = FakeInteraction()
+    subject = ShiftRegister(fake_bot())
+
+    await subject.setup_after_enable(interaction)
+
+    manager = PanelManager.last_instance
+    assert manager is not None
+    assert len(calls) == 1
+    call_manager, sheet_config = calls[0]
+    assert call_manager is manager
+    assert sheet_config.sheet_url == "https://sheet.example"
+    assert interaction.followup.messages == [
+        (
+            None,
+            {
+                "embed": panel.embed,
+                "view": panel.view,
+                "ephemeral": True,
+                "wait": True,
+            },
+        )
+    ]
+    assert panel_view.message is interaction.followup.sent_message_objects[0]
+
+
+@pytest.mark.asyncio
+async def test_setup_after_enable_routes_panel_google_sheets_error_from_base(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(
+        "cogs.team_register.TeamRegisterManager",
+        UnexpectedSetupManager,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", PanelManager)
+    PanelManager.last_instance = None
+    error = GoogleSheetsError(
+        GoogleSheetsErrorKind.TRANSIENT,
+        "Google Sheets is temporarily unavailable. Try again later.",
+    )
+    routed: list[tuple[object, GoogleSheetsError]] = []
+
+    async def raise_google_sheets_error(*_: object, **__: object) -> SettingsPanel:
+        raise error
+
+    async def fake_send_google_sheets_error(
+        interaction: object,
+        exc: GoogleSheetsError,
+    ) -> None:
+        routed.append((interaction, exc))
+
+    monkeypatch.setattr(
+        "cogs.team_register.build_team_register_settings_panel",
+        raise_google_sheets_error,
+    )
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.send_google_sheets_error",
+        fake_send_google_sheets_error,
+    )
+    interaction = FakeInteraction()
+    subject = TeamRegister(fake_bot())
+
+    await subject.setup_after_enable(interaction)
+
+    assert routed == [(interaction, error)]
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_setup_after_enable_missing_guild_raises_setup_specific_error() -> None:
+    interaction = FakeInteraction()
+    interaction.guild = None
+    subject = TeamRegister(fake_bot())
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Interaction channel or guild is None. Cannot proceed with setup message."
+        ),
+    ):
+        await subject.setup_after_enable(interaction)
+
+    assert interaction.followup.messages == []
