@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABCMeta, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from discord import Interaction, Message, app_commands
@@ -24,9 +25,10 @@ from utils.message_templates import locale_to_template_code, render_message_temp
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
     from bot import Rhoboto
+    from utils.announcement_languages import RenderedAnnouncement
     from utils.key_async_lock import KeyAsyncLock
 
 
@@ -34,6 +36,63 @@ TFeatureChannel = TypeVar("TFeatureChannel", bound="FeatureChannelBase")
 TManager = TypeVar("TManager", bound=ManagerBase)
 TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
 TUpsertResult = TypeVar("TUpsertResult")
+
+
+@dataclass(frozen=True)
+class _ConfiguredFeatureContext(Generic[TManager]):
+    feature_channel: FeatureChannel
+    manager: TManager
+    sheet_config: object
+
+
+async def _get_configured_feature_context[TConfiguredManager: ManagerBase](
+    interaction: Interaction,
+    *,
+    feature_name: str,
+    manager_type: type[TConfiguredManager],
+) -> _ConfiguredFeatureContext[TConfiguredManager] | None:
+    if interaction.channel is None or interaction.guild is None:
+        msg = "Cannot proceed without an interaction channel and guild."
+        raise ValueError(msg)
+
+    feature_channel = await FeatureChannel.get(
+        guild_id=interaction.guild.id,
+        channel_id=interaction.channel.id,
+        feature_name=feature_name,
+    )
+    manager = manager_type(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
+    sheet_config = await manager.get_sheet_config_or_none()
+    if sheet_config is None:
+        await interaction.followup.send(
+            content=f"`{feature_name}` is not configured for this channel.",
+            ephemeral=True,
+        )
+        return None
+
+    return _ConfiguredFeatureContext(
+        feature_channel=feature_channel,
+        manager=manager,
+        sheet_config=sheet_config,
+    )
+
+
+async def _send_public_announcement_followups(
+    interaction: Interaction,
+    announcements: Sequence[RenderedAnnouncement],
+) -> bool:
+    if not announcements:
+        await interaction.followup.send(
+            ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+            ephemeral=True,
+        )
+        return False
+
+    for announcement in announcements:
+        await interaction.followup.send(
+            announcement.content,
+            ephemeral=False,
+        )
+    return True
 
 
 class CogABCMeta(commands.CogMeta, ABCMeta):
@@ -304,29 +363,14 @@ class FeatureChannelBase(
         This method should be implemented by subclasses to provide
         feature-specific help text.
         """
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with help command."
-            )
-            raise ValueError(msg)
-
         await interaction.response.defer(ephemeral=False)
 
-        feature_channel = await FeatureChannel.get(
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
+        context = await _get_configured_feature_context(
+            interaction,
             feature_name=self.feature_name,
+            manager_type=self.ManagerType,
         )
-
-        manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-
-        sheet_config = await manager.get_sheet_config_or_none()
-        if sheet_config is None:
-            await interaction.followup.send(
-                content=f"`{self.feature_name}` is not configured for this channel.",
-                ephemeral=True,
-            )
+        if context is None:
             return
 
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
@@ -335,19 +379,9 @@ class FeatureChannelBase(
             interaction.guild.id,
             self.logger,
             bot=bot_mention,
-            sheet_url=sheet_config.sheet_url,
+            sheet_url=context.sheet_config.sheet_url,
         )
-        if not announcements:
-            await interaction.followup.send(
-                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
-                ephemeral=True,
-            )
-            return
-        for announcement in announcements:
-            await interaction.followup.send(
-                announcement.content,
-                ephemeral=False,
-            )
+        await _send_public_announcement_followups(interaction, announcements)
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
         """
@@ -611,29 +645,14 @@ class FeatureChannelUserBase(
         Show help for team registration.
         """
 
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with help command."
-            )
-            raise ValueError(msg)
-
         await interaction.response.defer(ephemeral=True)
 
-        feature_channel = await FeatureChannel.get(
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
+        context = await _get_configured_feature_context(
+            interaction,
             feature_name=self.feature_name,
+            manager_type=self.ManagerType,
         )
-
-        manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-
-        sheet_config = await manager.get_sheet_config_or_none()
-        if sheet_config is None:
-            await interaction.followup.send(
-                content=f"`{self.feature_name}` is not configured for this channel.",
-                ephemeral=True,
-            )
+        if context is None:
             return
 
         locale = locale_to_template_code(interaction.locale.value)
@@ -643,7 +662,7 @@ class FeatureChannelUserBase(
                 template_key,
                 locale,
                 bot=bot_mention,
-                sheet_url=sheet_config.sheet_url,
+                sheet_url=context.sheet_config.sheet_url,
             ),
             ephemeral=True,
         )

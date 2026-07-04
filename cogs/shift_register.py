@@ -5,7 +5,11 @@ from typing import TYPE_CHECKING, override
 from discord import app_commands
 
 from bot import config
-from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.feature_channel_base import (
+    FeatureChannelBase,
+    _get_configured_feature_context,
+    _send_public_announcement_followups,
+)
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_settings_flow import (
     send_current_panel_followup,
@@ -16,9 +20,6 @@ from components.ui_shift_register import (
     build_shift_register_settings_panel,
 )
 from models.feature_channel import FeatureChannel
-from utils.announcement_languages import (
-    ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
-)
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
@@ -210,68 +211,43 @@ class ShiftRegister(
         FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
     )
     async def info(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with help command."
-            )
-            raise ValueError(msg)
-
         await interaction.response.defer(ephemeral=False)
 
-        feature_channel = await FeatureChannel.get(
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
+        context = await _get_configured_feature_context(
+            interaction,
             feature_name=self.feature_name,
+            manager_type=self.ManagerType,
         )
-
-        manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-
-        sheet_config = await manager.get_sheet_config_or_none()
-        if sheet_config is None:
-            await interaction.followup.send(
-                content=f"`{self.feature_name}` is not configured for this channel.",
-                ephemeral=True,
-            )
+        if context is None:
             return
 
         recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(sheet_config, "recruitment_time_ranges", None)
+            getattr(context.sheet_config, "recruitment_time_ranges", None)
         )
         announcements = await render_shift_info_announcement_messages(
             self.info_template_key,
             interaction.guild.id,
             self.logger,
-            day_number=getattr(sheet_config, "day_number", None),
-            event_date=getattr(sheet_config, "event_date", None),
+            day_number=getattr(context.sheet_config, "day_number", None),
+            event_date=getattr(context.sheet_config, "event_date", None),
             recruitment_time_range=recruitment_ranges.announcement_display(),
             submission_deadline_at=getattr(
-                sheet_config,
+                context.sheet_config,
                 "submission_deadline_at",
                 None,
             ),
             draft_shift_proposal_at=getattr(
-                sheet_config,
+                context.sheet_config,
                 "draft_shift_proposal_at",
                 None,
             ),
             final_shift_notice_at=getattr(
-                sheet_config,
+                context.sheet_config,
                 "final_shift_notice_at",
                 None,
             ),
         )
-        if not announcements:
-            await interaction.followup.send(
-                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
-                ephemeral=True,
-            )
-            return
-        for announcement in announcements:
-            await interaction.followup.send(
-                announcement.content,
-                ephemeral=False,
-            )
+        await _send_public_announcement_followups(interaction, announcements)
 
     @app_commands.command(
         name="help",

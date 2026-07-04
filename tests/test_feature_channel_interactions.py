@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot import config
+from cogs.base import feature_channel_base
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
@@ -88,6 +89,11 @@ def fake_bot() -> SimpleNamespace:
         tree=SimpleNamespace(add_command=lambda _command: None),
         user=None,
     )
+
+
+def test_configured_feature_helpers_are_internal() -> None:
+    assert not hasattr(feature_channel_base, "get_configured_feature_context")
+    assert not hasattr(feature_channel_base, "send_public_announcement_followups")
 
 
 @pytest.mark.asyncio
@@ -337,6 +343,31 @@ async def test_public_register_help_sends_announcement_languages_in_order(
         ("ja help", {"ephemeral": False}),
         ("zh help", {"ephemeral": False}),
         ("en help", {"ephemeral": False}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_public_register_help_reports_missing_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        ManagerType=MissingConfigManager,
+        bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
+        help_template_key="team.help",
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+
+    assert interaction.response.deferred == [False]
+    assert interaction.followup.messages == [
+        (
+            "`team_register` is not configured for this channel.",
+            {"ephemeral": True},
+        )
     ]
 
 
