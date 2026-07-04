@@ -1508,6 +1508,33 @@ async def test_shift_timeline_modal_submit_updates_timeline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_timeline_modal_submit_normalizes_full_width_values() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="２",  # noqa: RUF001
+        event_date="２０２６／０８／１２",  # noqa: RUF001
+        submission_deadline_at="８／１２ ２１",  # noqa: RUF001
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.timeline_updates == [
+        {
+            "day_number": 2,
+            "event_date": dt.date(2026, 8, 12),
+            "submission_deadline_at": dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
+            "draft_shift_proposal_at": None,
+            "final_shift_notice_at": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_shift_timeline_modal_submit_reports_google_sheets_error_safely() -> None:
     manager = RecordingShiftRegisterManager()
     manager.metadata_error = GoogleSheetsError(
@@ -1586,6 +1613,25 @@ async def test_shift_recruitment_range_modal_submit_updates_range() -> None:
     assert len(interaction.followup.messages) == 1
     _, kwargs = interaction.followup.messages[0]
     assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_modal_submit_normalizes_full_width_values() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(
+        manager,
+        recruitment_time_range="４－８，８－１２",  # noqa: RUF001
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
+        [{"start": 4, "end": 12}]
+    ]
 
 
 @pytest.mark.asyncio
