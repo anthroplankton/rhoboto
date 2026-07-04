@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import itertools as it
 import re
+import unicodedata
 from dataclasses import InitVar, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self, override
 
@@ -197,20 +198,24 @@ class TeamParser:
     """
 
     PATTERN = re.compile(
-        r"(?P<leader_skill>[0-9]+)\s*[/\uff0f]\s*"
-        r"(?P<total_skill>[0-9]+)\s*[/\uff0f]\s*"
+        r"(?P<leader_skill>[0-9]+)\s*/\s*"
+        r"(?P<total_skill>[0-9]+)\s*/\s*"
         r"(?P<team_power>([0-9]+(\.[0-9]*)?|\.[0-9]+))"
     )
     NUMBER_TOKEN_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+")
     MIN_INVALID_ATTEMPT_NUMBER_TOKENS: ClassVar[int] = 3
 
+    @staticmethod
+    def _normalize_submission_text(value: str) -> str:
+        return unicodedata.normalize("NFKC", value)
+
     @classmethod
     def looks_like_invalid_attempt(cls, lines: list[str]) -> bool:
         return any(
-            not cls.PATTERN.search(line)
-            and len(cls.NUMBER_TOKEN_PATTERN.findall(line))
+            not cls.PATTERN.search(normalized_line)
+            and len(cls.NUMBER_TOKEN_PATTERN.findall(normalized_line))
             >= cls.MIN_INVALID_ATTEMPT_NUMBER_TOKENS
-            for line in lines
+            for normalized_line in map(cls._normalize_submission_text, lines)
         )
 
     @classmethod
@@ -228,7 +233,7 @@ class TeamParser:
         Raises:
             TeamFormatError: If the line does not match the expected format.
         """
-        match = cls.PATTERN.search(line)
+        match = cls.PATTERN.search(cls._normalize_submission_text(line))
         if not match:
             raise TeamFormatError(line)
         leader_skill_value = int(match.group("leader_skill"))
@@ -262,7 +267,7 @@ class TeamParser:
         teams: list[Team] = []
         invalid_attempts: list[str] = []
         for line in lines:
-            if cls.PATTERN.search(line):
+            if cls.PATTERN.search(cls._normalize_submission_text(line)):
                 teams.append(cls.parse_line(user_info, line))
                 continue
             if cls.looks_like_invalid_attempt([line]):

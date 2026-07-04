@@ -50,20 +50,18 @@ class HourRange:
 
 class HourRanges:
     RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
-        r"(?P<start>\d{1,2})\s*[-\uff0d~\uff5e]\s*"
+        r"(?<![\d:/\-~點点時时])"
+        r"(?P<start>\d{1,2})\s*[-~]\s*"
         r"(?P<end>\d{1,2})"
-        r"(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
+        r"(?![\d:/\-~點点時时])"
     )
-    TIME_VALUE_PATTERN: ClassVar[str] = (
-        r"\d{1,2}(?:\s*[:\uff1a]\s*\d{2}|\s*[點点時时])?"
-    )
+    TIME_VALUE_PATTERN: ClassVar[str] = r"\d{1,2}(?:\s*:\s*\d{2}|\s*[點点時时])?"
     INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e])(?:"
-        rf"{TIME_VALUE_PATTERN}\s*(?:[-\uff0d~\uff5e]|到)\s*"
+        rf"(?<![\d:/\-~])(?:"
+        rf"{TIME_VALUE_PATTERN}\s*(?:[-~]|到)\s*"
         rf"(?:{TIME_VALUE_PATTERN})?"
-        rf"|(?:[-\uff0d~\uff5e]|到)\s*{TIME_VALUE_PATTERN}"
-        rf")(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e])"
+        rf"|(?:[-~]|到)\s*{TIME_VALUE_PATTERN}"
+        rf")(?![\d:/\-~])"
     )
 
     def __init__(self, ranges: list[HourRange]) -> None:
@@ -347,21 +345,10 @@ class ShiftParser:
     HOUR_SLOTS: ClassVar[list[int]] = list(range(30))
     HOUR_LABELS: ClassVar[list[str]] = [f"{h}-{h + 1}" for h in HOUR_SLOTS]
 
-    PATTERN = re.compile(
-        r"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
-        r"(?P<start>\d{1,2})\s*[-\uff0d~\uff5e]\s*"
-        r"(?P<end>\d{1,2})"
-        r"(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e點点時时])"
-    )
-    TIME_VALUE_PATTERN: ClassVar[str] = (
-        r"\d{1,2}(?:\s*[:\uff1a]\s*\d{2}|\s*[點点時时])?"
-    )
-    INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?<![\d:\uff1a/\uff0f\-\uff0d~\uff5e])(?:"
-        rf"{TIME_VALUE_PATTERN}\s*(?:[-\uff0d~\uff5e]|到)\s*"
-        rf"(?:{TIME_VALUE_PATTERN})?"
-        rf"|(?:[-\uff0d~\uff5e]|到)\s*{TIME_VALUE_PATTERN}"
-        rf")(?![\d:\uff1a/\uff0f\-\uff0d~\uff5e])"
+    PATTERN: ClassVar[re.Pattern[str]] = HourRanges.RANGE_PATTERN
+    TIME_VALUE_PATTERN: ClassVar[str] = HourRanges.TIME_VALUE_PATTERN
+    INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = (
+        HourRanges.INVALID_ATTEMPT_PATTERN
     )
 
     @classmethod
