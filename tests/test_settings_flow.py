@@ -125,12 +125,12 @@ async def test_send_settings_view_followup_attaches_message_to_timeout_view() ->
 
     await send_settings_view_followup(
         interaction,
-        content="Setup Team Register",
+        content="Set Up Team Register",
         view=view,
     )
 
     content, kwargs = interaction.followup.messages[0]
-    assert content == "Setup Team Register"
+    assert content == "Set Up Team Register"
     assert kwargs["embed"] is None
     assert kwargs["ephemeral"] is True
     assert kwargs["wait"] is True

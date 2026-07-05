@@ -35,7 +35,7 @@ components:
 - old setup panels can remain visible after settings are saved.
 
 The stale setup panel is the main UX problem. If a user clicks an old
-`Setup Team Register` or `Setup Shift Register` button after settings already
+`Set Up Team Register` or `Set Up Shift Register` button after settings already
 exist, the callback should not open an empty setup modal.
 
 ## Scope
@@ -246,7 +246,7 @@ Retained until removed during Encore role editing.
 
 Setup prompt:
 
-- `Setup Team Register` remains primary because it is the only next step.
+- `Set Up Team Register` remains primary because it is the only next step.
 
 General current settings panel:
 

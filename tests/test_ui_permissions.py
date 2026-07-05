@@ -251,11 +251,27 @@ def child_with_label(view: object, label: str) -> object:
     )
 
 
+def test_team_register_setup_view_uses_set_up_button_label() -> None:
+    manager = RecordingTeamRegisterManager()
+
+    view = TeamRegisterView(manager, has_existing_settings=False)
+
+    assert [child.label for child in view.children] == ["Set Up Team Register"]
+
+
+def test_shift_register_setup_view_uses_set_up_button_label() -> None:
+    manager = RecordingShiftRegisterManager()
+
+    view = ShiftRegisterView(manager, has_existing_settings=False)
+
+    assert [child.label for child in view.children] == ["Set Up Shift Register"]
+
+
 @pytest.mark.asyncio
 async def test_team_settings_button_denies_unauthorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = unauthorized_interaction()
-    button = TeamRegisterButton("Setup Team Register", manager)
+    button = TeamRegisterButton("Set Up Team Register", manager)
 
     await button.callback(interaction)
 
@@ -268,7 +284,7 @@ async def test_team_settings_button_allows_authorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
     interaction = FakeInteraction()
-    button = TeamRegisterButton("Setup Team Register", manager)
+    button = TeamRegisterButton("Set Up Team Register", manager)
 
     await button.callback(interaction)
 
@@ -281,7 +297,7 @@ async def test_team_settings_button_allows_authorized_user() -> None:
 async def test_team_setup_button_with_existing_config_sends_current_panel() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = FakeInteraction()
-    button = TeamRegisterButton("Setup Team Register", manager)
+    button = TeamRegisterButton("Set Up Team Register", manager)
 
     await button.callback(interaction)
 
@@ -1194,7 +1210,7 @@ async def test_back_to_settings_uses_fresh_missing_settings_guard() -> None:
 async def test_shift_settings_button_denies_unauthorized_user() -> None:
     manager = RecordingShiftRegisterManager()
     interaction = unauthorized_interaction()
-    button = ShiftRegisterButton("Setup Shift Register", manager)
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
 
     await button.callback(interaction)
 
@@ -1207,7 +1223,7 @@ async def test_shift_settings_button_allows_authorized_user() -> None:
     manager = RecordingShiftRegisterManager()
     manager.config_exists = False
     interaction = FakeInteraction()
-    button = ShiftRegisterButton("Setup Shift Register", manager)
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
 
     await button.callback(interaction)
 
@@ -1220,7 +1236,7 @@ async def test_shift_settings_button_allows_authorized_user() -> None:
 async def test_shift_setup_button_with_existing_config_sends_current_panel() -> None:
     manager = RecordingShiftRegisterManager()
     interaction = FakeInteraction()
-    button = ShiftRegisterButton("Setup Shift Register", manager)
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
 
     await button.callback(interaction)
 

@@ -817,7 +817,7 @@ class TeamRegisterView(SettingsTimeoutView):
         label = (
             "Edit Team Register Settings"
             if has_existing_settings
-            else "Setup Team Register"
+            else "Set Up Team Register"
         )
         button = TeamRegisterButton(
             label=label,

@@ -754,7 +754,7 @@ class ShiftRegisterView(SettingsTimeoutView):
     ) -> None:
         super().__init__()
         label = (
-            "Edit Sheet Settings" if has_existing_settings else "Setup Shift Register"
+            "Edit Sheet Settings" if has_existing_settings else "Set Up Shift Register"
         )
         button = ShiftRegisterButton(
             label=label,

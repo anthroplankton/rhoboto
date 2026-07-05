@@ -402,7 +402,7 @@ async def test_team_settings_button_allows_authorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
     interaction = FakeInteraction()
-    button = TeamRegisterButton("Setup Team Register", manager)
+    button = TeamRegisterButton("Set Up Team Register", manager)
 
     await button.callback(interaction)
 
@@ -418,7 +418,7 @@ Add Team stale setup test:
 async def test_team_setup_button_with_existing_config_sends_current_panel() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = FakeInteraction()
-    button = TeamRegisterButton("Setup Team Register", manager)
+    button = TeamRegisterButton("Set Up Team Register", manager)
 
     await button.callback(interaction)
 
@@ -460,7 +460,7 @@ async def test_shift_settings_button_allows_authorized_user() -> None:
     manager = RecordingShiftRegisterManager()
     manager.config_exists = False
     interaction = FakeInteraction()
-    button = ShiftRegisterButton("Setup Shift Register", manager)
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
 
     await button.callback(interaction)
 
@@ -476,7 +476,7 @@ Add Shift stale setup test:
 async def test_shift_setup_button_with_existing_config_sends_current_panel() -> None:
     manager = RecordingShiftRegisterManager()
     interaction = FakeInteraction()
-    button = ShiftRegisterButton("Setup Shift Register", manager)
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
 
     await button.callback(interaction)
 
@@ -1731,7 +1731,7 @@ Team Register checklist:
 - Complete setup and confirm `Team Register Settings Saved` appears.
 - Confirm saved description mentions editing sheet settings or Encore roles.
 - Confirm `Edit Encore Roles` is primary only when no active Encore roles exist.
-- Click an old `Setup Team Register` panel and confirm it sends current settings instead of an empty modal.
+- Click an old `Set Up Team Register` panel and confirm it sends current settings instead of an empty modal.
 - Run `/team_register settings` and confirm stable current settings panel.
 - Open `Edit Encore Roles`; confirm description says `Choose Discord roles to show for matching members.`
 - With missing role IDs, click `Remove Missing IDs`; confirm preview shows `Removed Missing Role IDs`.
@@ -1744,7 +1744,7 @@ Shift Register checklist:
 - Complete setup and confirm `Shift Register Settings Saved` appears.
 - Confirm saved/current descriptions mention the settings button.
 - Confirm no Shift footer remains.
-- Click an old `Setup Shift Register` panel and confirm it sends current settings instead of an empty modal.
+- Click an old `Set Up Shift Register` panel and confirm it sends current settings instead of an empty modal.
 - Run `/shift_register settings` and confirm stable current settings panel.
 - Edit settings and confirm `final_schedule_anchor_cell` is still saved and displayed.
 
