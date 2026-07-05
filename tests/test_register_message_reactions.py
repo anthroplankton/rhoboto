@@ -62,27 +62,62 @@ class FakeMessage:
         self.removed_reactions.append((emoji, user))
 
 
-async def enabled(*_: object) -> bool:
-    return True
+async def fake_enabled_feature_channel_get_or_none(
+    *, guild_id: int, channel_id: int, feature_name: str
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        feature_name=feature_name,
+        is_enabled=True,
+    )
+
+
+class DummyManager:
+    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+        self.feature_channel = feature_channel
+        self.service_account_path = service_account_path
 
 
 def make_subject(feature_name: str) -> SimpleNamespace:
-    should_process_message = FeatureChannelBase._should_process_message  # noqa: SLF001
-    message_user_info = FeatureChannelBase._message_user_info  # noqa: SLF001
-    log_received_message = FeatureChannelBase._log_received_message  # noqa: SLF001
+    if feature_name == "team_register":
+        parse_message_submission = TeamRegister._parse_message_submission  # noqa: SLF001
+        process_configured = TeamRegister._process_configured_message_submission  # noqa: SLF001
+        manager_type = TeamRegister.ManagerType
+    else:
+        parse_message_submission = ShiftRegister._parse_message_submission  # noqa: SLF001
+        process_configured = ShiftRegister._process_configured_message_submission  # noqa: SLF001
+        manager_type = ShiftRegister.ManagerType
+
     subject = SimpleNamespace(
         feature_name=feature_name,
         logger=FakeLogger(),
         bot=SimpleNamespace(user=object()),
-        is_enabled=enabled,
+        ManagerType=manager_type,
     )
-    subject._should_process_message = MethodType(  # noqa: SLF001
-        should_process_message,
+    subject._parse_message_submission = MethodType(  # noqa: SLF001
+        parse_message_submission,
         subject,
     )
-    subject._message_user_info = MethodType(message_user_info, subject)  # noqa: SLF001
-    subject._log_received_message = MethodType(  # noqa: SLF001
-        log_received_message,
+    subject._process_configured_message_submission = MethodType(  # noqa: SLF001
+        process_configured,
+        subject,
+    )
+    for method_name in (
+        "_message_user_info",
+        "_log_received_message",
+        "_build_feature_manager_context",
+        "_get_feature_manager_context_or_none",
+        "_get_configured_feature_context",
+        "_get_message_feature_manager_context_or_none",
+    ):
+        method = getattr(FeatureChannelBase, method_name)
+        setattr(subject, method_name, MethodType(method, subject))
+    subject._get_enabled_feature_channel_or_none = (  # noqa: SLF001
+        FeatureChannelBase._get_enabled_feature_channel_or_none  # noqa: SLF001
+    )
+    subject.process_upsert_from_message = MethodType(
+        FeatureChannelBase.process_upsert_from_message,
         subject,
     )
     return subject
@@ -92,14 +127,16 @@ def make_subject(feature_name: str) -> SimpleNamespace:
 async def test_team_message_invalid_attempt_adds_confused_without_sheets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", DummyManager)
     subject = make_subject("team_register")
     message = FakeMessage("160//600/33")
 
-    result = await TeamRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == [config.CONFUSED_EMOJI]
@@ -109,14 +146,16 @@ async def test_team_message_invalid_attempt_adds_confused_without_sheets(
 async def test_team_message_strict_mixed_rejects_with_confused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", DummyManager)
     subject = make_subject("team_register")
     message = FakeMessage("150/740/33.4\n160//600/33")
 
-    result = await TeamRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == [config.CONFUSED_EMOJI]
@@ -126,14 +165,16 @@ async def test_team_message_strict_mixed_rejects_with_confused(
 async def test_team_message_ordinary_text_adds_no_reaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", DummyManager)
     subject = make_subject("team_register")
     message = FakeMessage("公告")
 
-    result = await TeamRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == []
@@ -143,14 +184,16 @@ async def test_team_message_ordinary_text_adds_no_reaction(
 async def test_shift_message_invalid_attempt_adds_confused_without_sheets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
     subject = make_subject("shift_register")
     message = FakeMessage("18:00-20:00")
 
-    result = await ShiftRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == [config.CONFUSED_EMOJI]
@@ -160,14 +203,16 @@ async def test_shift_message_invalid_attempt_adds_confused_without_sheets(
 async def test_shift_message_strict_mixed_rejects_with_confused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
     subject = make_subject("shift_register")
     message = FakeMessage("4-12\n18:00-20:00")
 
-    result = await ShiftRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == [config.CONFUSED_EMOJI]
@@ -198,19 +243,17 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
         async def upsert_or_delete_user_shift(self, *_: object) -> None:
             raise AssertionError
 
-    async def fake_get_or_none(**_: object) -> SimpleNamespace:
-        return SimpleNamespace()
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_get_or_none)
     monkeypatch.setattr(
-        "cogs.shift_register.ShiftRegisterManager",
-        FakeShiftRegisterManager,
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
     )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", FakeShiftRegisterManager)
     subject = make_subject("shift_register")
     subject.logger = NoInfoLogger()
     message = FakeMessage("0-30")
 
-    result = await ShiftRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == [config.CONFUSED_EMOJI]
@@ -269,22 +312,16 @@ async def test_shift_listener_marks_old_entry_header_google_sheets_error(
         ) -> ShiftRegisterGoogleSheetsMetadata:
             return active_metadata
 
-    async def fake_get_or_none(**_: object) -> SimpleNamespace:
-        return SimpleNamespace()
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_get_or_none)
     monkeypatch.setattr(
-        "cogs.shift_register.ShiftRegisterManager",
-        OldHeaderShiftRegisterManager,
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
     )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", OldHeaderShiftRegisterManager)
     bot_user = object()
     subject = make_subject("shift_register")
     subject.bot = SimpleNamespace(user=bot_user)
     subject.lock = ShiftRegister.lock
-    subject.process_upsert_from_message = MethodType(
-        ShiftRegister.process_upsert_from_message,
-        subject,
-    )
     write_shift_registration = ShiftRegister._write_shift_registration  # noqa: SLF001
     subject._write_shift_registration = MethodType(  # noqa: SLF001
         write_shift_registration,
@@ -306,14 +343,16 @@ async def test_shift_listener_marks_old_entry_header_google_sheets_error(
 async def test_shift_message_ordinary_text_adds_no_reaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fail_if_called(**_: object) -> None:
-        raise AssertionError
-
-    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
     subject = make_subject("shift_register")
     message = FakeMessage("20:00")
 
-    result = await ShiftRegister.process_upsert_from_message(subject, message)
+    result = await subject.process_upsert_from_message(message)
 
     assert result is None
     assert message.added_reactions == []

@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import logging
 from abc import ABCMeta, abstractmethod
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Generic, TypeVar
 
-from discord import Guild, Interaction, Message, app_commands
+from discord import Interaction, Message, app_commands
 from discord.ext import commands
 
 from bot import config
+from cogs.base.feature_context import (
+    ConfiguredFeatureContext,
+    FeatureContextMixin,
+    FeatureManagerContext,
+    MessageParseResult,
+    MessageParseStatus,
+)
 from components.ui_feature_channel import DisableAndClearConfirmView
 from components.ui_google_sheets_errors import (
     mark_google_sheets_message_failure,
@@ -27,6 +33,7 @@ from utils.announcement_languages import (
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
+from utils.reactions import add_reaction_if_possible
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
 
 if TYPE_CHECKING:
@@ -43,72 +50,8 @@ if TYPE_CHECKING:
 TFeatureChannel = TypeVar("TFeatureChannel", bound="FeatureChannelBase")
 TManager = TypeVar("TManager", bound=ManagerBase)
 TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
+TSubmission = TypeVar("TSubmission")
 TUpsertResult = TypeVar("TUpsertResult")
-
-
-@dataclass(frozen=True)
-class _InteractionChannelContext:
-    guild: Guild
-    guild_id: int
-    channel_id: int
-
-
-@dataclass(frozen=True)
-class _ConfiguredFeatureContext(Generic[TManager]):
-    guild: Guild
-    guild_id: int
-    channel_id: int
-    feature_channel: FeatureChannel
-    manager: TManager
-    sheet_config: object
-
-
-def _get_interaction_channel_context(
-    interaction: Interaction,
-) -> _InteractionChannelContext:
-    if interaction.channel is None or interaction.guild is None:
-        msg = "Cannot proceed without an interaction channel and guild."
-        raise ValueError(msg)
-
-    return _InteractionChannelContext(
-        guild=interaction.guild,
-        guild_id=interaction.guild.id,
-        channel_id=interaction.channel.id,
-    )
-
-
-async def _get_configured_feature_context[TConfiguredManager: ManagerBase](
-    interaction: Interaction,
-    *,
-    feature_name: str,
-    manager_type: type[TConfiguredManager],
-    interaction_context: _InteractionChannelContext | None = None,
-) -> _ConfiguredFeatureContext[TConfiguredManager] | None:
-    if interaction_context is None:
-        interaction_context = _get_interaction_channel_context(interaction)
-
-    feature_channel = await FeatureChannel.get(
-        guild_id=interaction_context.guild_id,
-        channel_id=interaction_context.channel_id,
-        feature_name=feature_name,
-    )
-    manager = manager_type(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-    sheet_config = await manager.get_sheet_config_or_none()
-    if sheet_config is None:
-        await interaction.followup.send(
-            content=f"`{feature_name}` is not configured for this channel.",
-            ephemeral=True,
-        )
-        return None
-
-    return _ConfiguredFeatureContext(
-        guild=interaction_context.guild,
-        guild_id=interaction_context.guild_id,
-        channel_id=interaction_context.channel_id,
-        feature_channel=feature_channel,
-        manager=manager,
-        sheet_config=sheet_config,
-    )
 
 
 async def _send_public_announcement_followups(
@@ -174,9 +117,10 @@ class FeatureChannelErrorHandler:
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True, manage_channels=True)
 class FeatureChannelBase(
+    FeatureContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
-    Generic[TManager, TUpsertResult],
+    Generic[TManager, TSubmission, TUpsertResult],
     metaclass=CogABCMeta,
 ):
     """
@@ -210,7 +154,6 @@ class FeatureChannelBase(
         self.context_menu.error(self.cog_app_command_error)
         bot.tree.add_command(self.context_menu)
 
-    @abstractmethod
     async def process_upsert_from_message(
         self, message: Message
     ) -> TUpsertResult | None:
@@ -219,16 +162,78 @@ class FeatureChannelBase(
         Args:
             message (Message): The Discord message to process.
         """
-        msg = "Subclasses must implement this method."
+        manager_context = await self._get_message_feature_manager_context_or_none(
+            message
+        )
+        if manager_context is None:
+            return None
+
+        self._log_received_message(message)
+
+        parse_result = await self._parse_message_submission(message)
+        if parse_result.status is MessageParseStatus.IGNORED:
+            return None
+
+        if parse_result.status is MessageParseStatus.INVALID:
+            await add_reaction_if_possible(
+                message,
+                config.CONFUSED_EMOJI,
+                log=self.logger,
+            )
+            return None
+
+        context = await self._get_configured_feature_context(manager_context)
+        if context is None:
+            self.logger.debug(
+                "Feature `%s` in Guild: `%s` Channel: `%s` has no feature config; "
+                "ignoring parsed message.",
+                self.feature_name,
+                manager_context.guild_id,
+                manager_context.channel_id,
+            )
+            return None
+
+        if parse_result.submission is None or parse_result.user_info is None:
+            msg = "Parsed message result is missing submission or user info."
+            raise ValueError(msg)
+
+        return await self._process_configured_message_submission(
+            message,
+            context,
+            parse_result.submission,
+            parse_result.user_info,
+        )
+
+    async def _get_message_feature_manager_context_or_none(
+        self,
+        message: Message,
+    ) -> FeatureManagerContext[TManager] | None:
+        if message.author.bot or message.guild is None or message.channel is None:
+            return None
+        return await self._get_feature_manager_context_or_none(
+            guild=message.guild,
+            channel_id=message.channel.id,
+            require_enabled=True,
+        )
+
+    @abstractmethod
+    async def _parse_message_submission(
+        self,
+        message: Message,
+    ) -> MessageParseResult[TSubmission]:
+        msg = "Subclasses must implement _parse_message_submission method."
         raise NotImplementedError(msg)
 
-    async def _should_process_message(self, message: Message) -> bool:
-        return not (
-            message.author.bot
-            or not message.guild
-            or not message.channel
-            or not await self.is_enabled(message.guild.id, message.channel.id)
-        )
+    @abstractmethod
+    async def _process_configured_message_submission(
+        self,
+        message: Message,
+        context: ConfiguredFeatureContext[TManager],
+        submission: TSubmission,
+        user_info: UserInfo,
+    ) -> TUpsertResult | None:
+        msg = "Subclasses must implement _process_configured_message_submission method."
+        raise NotImplementedError(msg)
 
     def _message_user_info(self, message: Message) -> UserInfo:
         return UserInfo(
@@ -254,9 +259,7 @@ class FeatureChannelBase(
         """
         Upsert registration data for this feature from a message (context menu).
         """
-        if interaction.channel is None or interaction.guild is None:
-            msg = "Interaction channel or guild is None."
-            raise ValueError(msg)
+        self._get_interaction_channel_context(interaction)
 
         await interaction.response.defer(ephemeral=False)
 
@@ -299,27 +302,11 @@ class FeatureChannelBase(
 
     async def setup_after_enable(self, interaction: Interaction) -> None:
         """Show current settings or prompt to set up if not configured."""
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
-
-        feature_channel = await FeatureChannel.get(
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
-            feature_name=self.feature_name,
-        )
-
-        manager = self.ManagerType(
-            feature_channel,
-            config.GOOGLE_SERVICE_ACCOUNT_PATH,
-        )
-
-        sheet_config = await manager.get_sheet_config_or_none()
-        if sheet_config is None:
-            view = self._build_initial_setup_view(manager)
+        interaction_context = self._get_interaction_channel_context(interaction)
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
+        if context is None:
+            view = self._build_initial_setup_view(manager_context.manager)
             await send_settings_view_followup(
                 interaction,
                 content=initial_setup_content(self.feature_display_name),
@@ -330,8 +317,8 @@ class FeatureChannelBase(
         try:
             panel = await self._build_settings_panel(
                 interaction,
-                manager,
-                sheet_config,
+                context.manager,
+                context.feature_config,
             )
         except GoogleSheetsError as exc:
             await send_google_sheets_error(interaction, exc)
@@ -451,12 +438,11 @@ class FeatureChannelBase(
         """
         await interaction.response.defer(ephemeral=False)
 
-        context = await _get_configured_feature_context(
-            interaction,
-            feature_name=self.feature_name,
-            manager_type=self.ManagerType,
-        )
+        interaction_context = self._get_interaction_channel_context(interaction)
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
         if context is None:
+            await self._send_missing_config_followup(interaction)
             return
 
         bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
@@ -465,7 +451,7 @@ class FeatureChannelBase(
             context.guild_id,
             self.logger,
             bot=bot_mention,
-            sheet_url=context.sheet_config.sheet_url,
+            sheet_url=context.feature_config.sheet_url,
         )
         await _send_public_announcement_followups(interaction, announcements)
 
@@ -566,12 +552,14 @@ class FeatureChannelBase(
         """
         if feature_name is None:
             feature_name = cls.feature_name
-        feature = await FeatureChannel.get_or_none(
-            guild_id=guild_id,
-            channel_id=channel_id,
-            feature_name=feature_name,
+        return (
+            await cls._get_enabled_feature_channel_or_none(
+                guild_id,
+                channel_id,
+                feature_name,
+            )
+            is not None
         )
-        return bool(feature and feature.is_enabled)
 
     @staticmethod
     def feature_enabled_prefix_command_predicate(feature_name: str) -> Callable:
@@ -630,6 +618,7 @@ class FeatureChannelBase(
 
 @app_commands.guild_only()
 class FeatureChannelUserBase(
+    FeatureContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
     Generic[TFeatureChannel, TManager, TGoogleSheetsMetadata],
@@ -670,7 +659,7 @@ class FeatureChannelUserBase(
         """
         Delete the user's data for this feature in this channel.
         """
-        interaction_context = _get_interaction_channel_context(interaction)
+        interaction_context = self._get_interaction_channel_context(interaction)
 
         await interaction.response.defer(ephemeral=True)
 
@@ -679,13 +668,10 @@ class FeatureChannelUserBase(
             display_name=interaction.user.display_name,
         )
 
-        context = await _get_configured_feature_context(
-            interaction,
-            feature_name=self.feature_name,
-            manager_type=self.ManagerType,
-            interaction_context=interaction_context,
-        )
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
         if context is None:
+            await self._send_missing_config_followup(interaction)
             return
 
         manager = context.manager
@@ -723,12 +709,11 @@ class FeatureChannelUserBase(
 
         await interaction.response.defer(ephemeral=True)
 
-        context = await _get_configured_feature_context(
-            interaction,
-            feature_name=self.feature_name,
-            manager_type=self.ManagerType,
-        )
+        interaction_context = self._get_interaction_channel_context(interaction)
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
         if context is None:
+            await self._send_missing_config_followup(interaction)
             return
 
         locale = locale_to_template_code(interaction.locale.value)
@@ -738,7 +723,7 @@ class FeatureChannelUserBase(
                 template_key,
                 locale,
                 bot=bot_mention,
-                sheet_url=context.sheet_config.sheet_url,
+                sheet_url=context.feature_config.sheet_url,
             ),
             ephemeral=True,
         )

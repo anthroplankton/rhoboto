@@ -7,15 +7,14 @@ from discord import app_commands
 from bot import config
 from cogs.base.feature_channel_base import (
     FeatureChannelBase,
-    _get_configured_feature_context,
     _send_public_announcement_followups,
 )
+from cogs.base.feature_context import ConfiguredFeatureContext, MessageParseResult
 from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
     ShiftRegisterView,
     build_shift_register_settings_panel,
 )
-from models.feature_channel import FeatureChannel
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
@@ -32,7 +31,7 @@ if TYPE_CHECKING:
 
 
 class ShiftRegister(
-    FeatureChannelBase[ShiftRegisterManager, Shift],
+    FeatureChannelBase[ShiftRegisterManager, Shift, Shift],
     group_name="shift_register",
 ):
     feature_name = "shift_register"
@@ -60,48 +59,33 @@ class ShiftRegister(
         )
 
     @override
-    async def process_upsert_from_message(self, message: Message) -> Shift | None:
-        """
-        Listen for messages to provide a button for shift register setup/edit.
-        This is used in channels where the feature is enabled.
-        """
-        if not await self._should_process_message(message):
-            return None
-
-        self._log_received_message(message)
-
+    async def _parse_message_submission(
+        self,
+        message: Message,
+    ) -> MessageParseResult[Shift]:
         user_info = self._message_user_info(message)
         lines = message.content.splitlines()
         parse_result = ShiftParser.parse_lines(user_info, lines)
         if parse_result.invalid_attempts:
-            await add_reaction_if_possible(
-                message,
-                config.CONFUSED_EMOJI,
-                log=self.logger,
-            )
-            return None
+            return MessageParseResult.invalid(user_info=user_info)
 
         shift = parse_result.shift
         if shift is None:
-            return None
+            return MessageParseResult.ignored()
 
-        feature_channel = await FeatureChannel.get_or_none(
-            guild_id=message.guild.id,
-            channel_id=message.channel.id,
-            feature_name=self.feature_name,
-        )
-        manager = None
-        shift_register_config = None
-        if feature_channel:
-            manager = ShiftRegisterManager(
-                feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-            )
-            shift_register_config = await manager.get_sheet_config_or_none()
-        if manager is None or shift_register_config is None:
-            return None
+        return MessageParseResult.parsed(shift, user_info=user_info)
 
+    @override
+    async def _process_configured_message_submission(
+        self,
+        message: Message,
+        context: ConfiguredFeatureContext[ShiftRegisterManager],
+        submission: Shift,
+        user_info: UserInfo,
+    ) -> Shift | None:
+        shift = submission
         recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(shift_register_config, "recruitment_time_ranges", None)
+            getattr(context.feature_config, "recruitment_time_ranges", None)
         )
         if not recruitment_ranges.contains_slots(set(shift)):
             await add_reaction_if_possible(
@@ -115,7 +99,7 @@ class ShiftRegister(
             message,
             user_info,
             shift,
-            manager,
+            context.manager,
         )
 
     async def _write_shift_registration(
@@ -183,36 +167,35 @@ class ShiftRegister(
     async def info(self, interaction: Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
 
-        context = await _get_configured_feature_context(
-            interaction,
-            feature_name=self.feature_name,
-            manager_type=self.ManagerType,
-        )
+        interaction_context = self._get_interaction_channel_context(interaction)
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
         if context is None:
+            await self._send_missing_config_followup(interaction)
             return
 
         recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(context.sheet_config, "recruitment_time_ranges", None)
+            getattr(context.feature_config, "recruitment_time_ranges", None)
         )
         announcements = await render_shift_info_announcement_messages(
             self.info_template_key,
             context.guild_id,
             self.logger,
-            day_number=getattr(context.sheet_config, "day_number", None),
-            event_date=getattr(context.sheet_config, "event_date", None),
+            day_number=getattr(context.feature_config, "day_number", None),
+            event_date=getattr(context.feature_config, "event_date", None),
             recruitment_time_range=recruitment_ranges.announcement_display(),
             submission_deadline_at=getattr(
-                context.sheet_config,
+                context.feature_config,
                 "submission_deadline_at",
                 None,
             ),
             draft_shift_proposal_at=getattr(
-                context.sheet_config,
+                context.feature_config,
                 "draft_shift_proposal_at",
                 None,
             ),
             final_shift_notice_at=getattr(
-                context.sheet_config,
+                context.feature_config,
                 "final_shift_notice_at",
                 None,
             ),

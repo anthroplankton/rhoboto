@@ -8,7 +8,16 @@ from discord import Embed
 
 from bot import config
 from cogs.base import feature_channel_base
-from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
+from cogs.base.feature_channel_base import (
+    FeatureChannelBase,
+    FeatureChannelUserBase,
+    FeatureNotEnabled,
+)
+from cogs.base.feature_context import (
+    ConfiguredFeatureContext,
+    FeatureContextMixin,
+    MessageParseResult,
+)
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
@@ -16,6 +25,7 @@ from models.feature_channel import FeatureChannel
 from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.structs_base import UserInfo
 
 
 async def fake_feature_channel_get(
@@ -25,6 +35,17 @@ async def fake_feature_channel_get(
         guild_id=guild_id,
         channel_id=channel_id,
         feature_name=feature_name,
+    )
+
+
+async def fake_feature_channel_get_or_none(
+    *, guild_id: int, channel_id: int, feature_name: str
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        feature_name=feature_name,
+        is_enabled=True,
     )
 
 
@@ -174,6 +195,65 @@ class PanelManager(ConfiguredManager):
         PanelManager.last_instance = self
 
 
+class MessageOrchestrationManager(ConfiguredManager):
+    last_instance: MessageOrchestrationManager | None = None
+
+    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+        super().__init__(feature_channel, service_account_path)
+        MessageOrchestrationManager.last_instance = self
+
+
+class MissingMessageConfigManager(MessageOrchestrationManager):
+    async def get_sheet_config_or_none(self) -> None:
+        return None
+
+
+class RecordingMessageSubject(FeatureContextMixin[MessageOrchestrationManager]):
+    feature_name = "team_register"
+    ManagerType = MessageOrchestrationManager
+
+    def __init__(self, parse_result: MessageParseResult[object]) -> None:
+        self.parse_result = parse_result
+        self.logger = NullLogger()
+        self.bot = SimpleNamespace(user=object())
+        self.configured_calls: list[
+            tuple[
+                object,
+                ConfiguredFeatureContext[MessageOrchestrationManager],
+                object,
+                UserInfo,
+            ]
+        ] = []
+
+    async def _get_message_feature_manager_context_or_none(
+        self,
+        message: object,
+    ) -> object | None:
+        return await FeatureChannelBase._get_message_feature_manager_context_or_none(  # noqa: SLF001
+            self,
+            message,
+        )
+
+    def _log_received_message(self, message: object) -> None:
+        FeatureChannelBase._log_received_message(self, message)  # noqa: SLF001
+
+    async def _parse_message_submission(
+        self,
+        _message: object,
+    ) -> MessageParseResult[object]:
+        return self.parse_result
+
+    async def _process_configured_message_submission(
+        self,
+        message: object,
+        context: ConfiguredFeatureContext[MessageOrchestrationManager],
+        submission: object,
+        user_info: UserInfo,
+    ) -> str:
+        self.configured_calls.append((message, context, submission, user_info))
+        return "processed"
+
+
 def fake_bot() -> SimpleNamespace:
     return SimpleNamespace(
         tree=SimpleNamespace(add_command=lambda _command: None),
@@ -181,23 +261,47 @@ def fake_bot() -> SimpleNamespace:
     )
 
 
-def test_configured_feature_helpers_are_internal() -> None:
+def feature_context_subject(**attributes: object) -> SimpleNamespace:
+    subject = SimpleNamespace(**attributes)
+    for method_name in (
+        "_get_interaction_channel_context",
+        "_get_feature_manager_context",
+        "_get_configured_feature_context",
+        "_build_feature_manager_context",
+        "_send_missing_config_followup",
+    ):
+        method = getattr(FeatureChannelBase, method_name)
+        setattr(subject, method_name, method.__get__(subject, type(subject)))
+    return subject
+
+
+def test_old_configured_feature_helpers_are_removed() -> None:
+    assert not hasattr(feature_channel_base, "_get_interaction_channel_context")
+    assert not hasattr(feature_channel_base, "_get_configured_feature_context")
     assert not hasattr(feature_channel_base, "get_configured_feature_context")
     assert not hasattr(feature_channel_base, "send_public_announcement_followups")
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_context_exposes_interaction_context(
+async def test_configured_feature_context_exposes_feature_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(TeamRegister, "ManagerType", ConfiguredManager)
     interaction = FakeInteraction()
-    get_context = feature_channel_base._get_configured_feature_context  # noqa: SLF001
+    subject = TeamRegister(fake_bot())
 
-    context = await get_context(
+    interaction_context = FeatureChannelBase._get_interaction_channel_context(  # noqa: SLF001
+        subject,
         interaction,
-        feature_name="team_register",
-        manager_type=ConfiguredManager,
+    )
+    manager_context = await FeatureChannelBase._get_feature_manager_context(  # noqa: SLF001
+        subject,
+        interaction_context,
+    )
+    context = await FeatureChannelBase._get_configured_feature_context(  # noqa: SLF001
+        subject,
+        manager_context,
     )
 
     assert context is not None
@@ -209,30 +313,109 @@ async def test_configured_feature_context_exposes_interaction_context(
     assert context.feature_channel.feature_name == "team_register"
     assert isinstance(context.manager, ConfiguredManager)
     assert context.manager.feature_channel is context.feature_channel
-    assert context.sheet_config.sheet_url == "https://sheet.example"
+    assert context.feature_config.sheet_url == "https://sheet.example"
+    assert not hasattr(context, "sheet_config")
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_context_reports_missing_config(
+async def test_configured_feature_context_missing_config_is_pure_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(TeamRegister, "ManagerType", MissingConfigManager)
     interaction = FakeInteraction()
-    get_context = feature_channel_base._get_configured_feature_context  # noqa: SLF001
+    subject = TeamRegister(fake_bot())
 
-    context = await get_context(
+    interaction_context = FeatureChannelBase._get_interaction_channel_context(  # noqa: SLF001
+        subject,
         interaction,
-        feature_name="team_register",
-        manager_type=MissingConfigManager,
+    )
+    manager_context = await FeatureChannelBase._get_feature_manager_context(  # noqa: SLF001
+        subject,
+        interaction_context,
+    )
+    context = await FeatureChannelBase._get_configured_feature_context(  # noqa: SLF001
+        subject,
+        manager_context,
     )
 
     assert context is None
-    assert interaction.followup.messages == [
-        (
-            "`team_register` is not configured for this channel.",
-            {"ephemeral": True},
-        )
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_is_enabled_uses_enabled_feature_channel_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, int, str | None]] = []
+
+    async def fake_enabled_lookup(
+        _cls: type[FeatureChannelBase],
+        guild_id: int,
+        channel_id: int,
+        feature_name: str | None = None,
+    ) -> object | None:
+        calls.append((guild_id, channel_id, feature_name))
+        if feature_name == "team_register":
+            return object()
+        return None
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(fake_enabled_lookup),
+    )
+
+    assert await FeatureChannelBase.is_enabled(111, 222, "team_register") is True
+    assert await FeatureChannelBase.is_enabled(111, 222, "shift_register") is False
+    assert calls == [
+        (111, 222, "team_register"),
+        (111, 222, "shift_register"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_app_command_predicate_still_reports_not_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def disabled_lookup(*_: object, **__: object) -> object | None:
+        return None
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(disabled_lookup),
+    )
+    predicate = FeatureChannelBase.feature_enabled_app_command_predicate(
+        "team_register"
+    )
+
+    with pytest.raises(FeatureNotEnabled, match="Feature `team_register` not enabled"):
+        await predicate(FakeInteraction())
+
+
+@pytest.mark.asyncio
+async def test_prefix_command_predicate_still_reports_not_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def disabled_lookup(*_: object, **__: object) -> object | None:
+        return None
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(disabled_lookup),
+    )
+    predicate = FeatureChannelBase.feature_enabled_prefix_command_predicate(
+        "team_register"
+    )
+    ctx = SimpleNamespace(
+        guild=SimpleNamespace(id=111),
+        channel=SimpleNamespace(id=222),
+    )
+
+    with pytest.raises(FeatureNotEnabled, match="Feature `team_register` not enabled"):
+        await predicate(ctx)
 
 
 @pytest.mark.asyncio
@@ -241,7 +424,7 @@ async def test_user_help_defers_before_followup(
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction(locale="zh-TW")
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
@@ -257,46 +440,172 @@ async def test_user_help_defers_before_followup(
 
 
 @pytest.mark.asyncio
-async def test_message_processing_helpers_build_context_and_user_info() -> None:
-    async def is_enabled(
-        guild_id: int,
-        channel_id: int,
-        feature_name: str | None = None,
-    ) -> bool:
-        return (guild_id, channel_id, feature_name) == (111, 222, None)
-
-    subject = SimpleNamespace(
-        feature_name="team_register",
-        logger=NullLogger(),
-        is_enabled=is_enabled,
-    )
+async def test_message_processing_helpers_build_context_and_user_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(content="150/740/33")
-    should_process_message = FeatureChannelBase._should_process_message  # noqa: SLF001
     message_user_info = FeatureChannelBase._message_user_info  # noqa: SLF001
     log_received_message = FeatureChannelBase._log_received_message  # noqa: SLF001
 
-    assert await should_process_message(subject, message)
+    manager_context = (
+        await FeatureChannelBase._get_message_feature_manager_context_or_none(  # noqa: SLF001
+            subject,
+            message,
+        )
+    )
     user_info = message_user_info(subject, message)
     log_received_message(subject, message)
 
+    assert manager_context is not None
+    assert manager_context.guild_id == 111
+    assert manager_context.channel_id == 222
     assert user_info.username == "alice"
     assert user_info.display_name == "Alice"
 
 
 @pytest.mark.asyncio
-async def test_message_processing_helper_ignores_bot_messages() -> None:
-    async def fail_if_called(*_: object, **__: object) -> bool:
+async def test_message_processing_helper_ignores_bot_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_if_called(*_: object, **__: object) -> object | None:
         raise AssertionError
 
-    subject = SimpleNamespace(
-        feature_name="team_register",
-        logger=NullLogger(),
-        is_enabled=fail_if_called,
-    )
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(author_bot=True)
-    should_process_message = FeatureChannelBase._should_process_message  # noqa: SLF001
 
-    assert not await should_process_message(subject, message)
+    manager_context = (
+        await FeatureChannelBase._get_message_feature_manager_context_or_none(  # noqa: SLF001
+            subject,
+            message,
+        )
+    )
+
+    assert manager_context is None
+
+
+@pytest.mark.asyncio
+async def test_base_message_orchestration_ignored_skips_config_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    subject = RecordingMessageSubject(MessageParseResult.ignored())
+    message = FakeRegisterMessage(content="公告")
+
+    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+
+    assert result is None
+    assert message.added_reactions == []
+    assert subject.configured_calls == []
+
+
+@pytest.mark.asyncio
+async def test_base_message_orchestration_invalid_adds_confused_without_config_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    user_info = UserInfo(username="alice", display_name="Alice")
+    subject = RecordingMessageSubject(MessageParseResult.invalid(user_info=user_info))
+    message = FakeRegisterMessage(content="160//600/33")
+
+    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+
+    assert result is None
+    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert subject.configured_calls == []
+
+
+@pytest.mark.asyncio
+async def test_base_message_orchestration_missing_config_debug_logs_and_stops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    user_info = UserInfo(username="alice", display_name="Alice")
+    subject = RecordingMessageSubject(
+        MessageParseResult.parsed("submission", user_info=user_info)
+    )
+    subject.ManagerType = MissingMessageConfigManager
+    debug_messages: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def record_debug(*args: object, **kwargs: object) -> None:
+        debug_messages.append((args, kwargs))
+
+    subject.logger = SimpleNamespace(debug=record_debug)
+    message = FakeRegisterMessage(content="150/740/33")
+
+    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+
+    assert result is None
+    assert message.added_reactions == []
+    assert subject.configured_calls == []
+    assert any(
+        args
+        and "has no feature config" in str(args[0])
+        and args[1:4] == ("team_register", 111, 222)
+        for args, _kwargs in debug_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_base_message_orchestration_configured_calls_hook(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    MessageOrchestrationManager.last_instance = None
+    user_info = UserInfo(username="alice", display_name="Alice")
+    subject = RecordingMessageSubject(
+        MessageParseResult.parsed("submission", user_info=user_info)
+    )
+    message = FakeRegisterMessage(content="150/740/33")
+
+    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+
+    assert result == "processed"
+    assert len(subject.configured_calls) == 1
+    call_message, context, submission, call_user_info = subject.configured_calls[0]
+    assert call_message is message
+    assert context.manager is MessageOrchestrationManager.last_instance
+    assert context.feature_config.sheet_url == "https://sheet.example"
+    assert submission == "submission"
+    assert call_user_info is user_info
+
+
+@pytest.mark.asyncio
+async def test_team_inherited_message_upsert_ignores_bot_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_if_called(**_: object) -> object | None:
+        msg = "bot-authored messages should not look up feature channels"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    subject = TeamRegister(fake_bot())
+    message = FakeRegisterMessage(author_bot=True)
+
+    result = await subject.process_upsert_from_message(message)
+
+    assert result is None
+    assert message.added_reactions == []
+
+
+@pytest.mark.asyncio
+async def test_shift_inherited_message_upsert_ignores_bot_messages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_if_called(**_: object) -> object | None:
+        msg = "bot-authored messages should not look up feature channels"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_if_called)
+    subject = ShiftRegister(fake_bot())
+    message = FakeRegisterMessage(author_bot=True)
+
+    result = await subject.process_upsert_from_message(message)
+
+    assert result is None
+    assert message.added_reactions == []
 
 
 @pytest.mark.asyncio
@@ -312,7 +621,7 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
         )
 
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         process_upsert_from_message=raise_google_sheets_error,
         bot=SimpleNamespace(user=bot_user),
@@ -351,7 +660,7 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
         await message.add_reaction(config.CONFUSED_EMOJI)
 
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         process_upsert_from_message=process_invalid_attempt,
         bot=SimpleNamespace(user=object()),
@@ -374,7 +683,7 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
         return None
 
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         process_upsert_from_message=process_ordinary_text,
         bot=SimpleNamespace(user=object()),
@@ -425,7 +734,7 @@ async def test_user_help_uses_followup_for_missing_config(
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=MissingConfigManager,
         bot=SimpleNamespace(user=None),
@@ -437,6 +746,29 @@ async def test_user_help_uses_followup_for_missing_config(
     message, kwargs = interaction.followup.messages[0]
     assert kwargs["ephemeral"] is True
     assert message == "`team_register` is not configured for this channel."
+
+
+@pytest.mark.asyncio
+async def test_user_help_missing_channel_raises_after_defer() -> None:
+    interaction = FakeInteraction()
+    interaction.channel = None
+    subject = feature_context_subject(
+        feature_name="team_register",
+        ManagerType=ConfiguredManager,
+        bot=SimpleNamespace(user=None),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Cannot proceed without an interaction channel and guild.",
+    ):
+        await FeatureChannelUserBase.send_help_message(
+            subject,
+            interaction,
+            "team.help",
+        )
+
+    assert interaction.response.deferred == [True]
 
 
 @pytest.mark.asyncio
@@ -467,7 +799,7 @@ async def test_public_register_help_sends_announcement_languages_in_order(
     )
 
     interaction = FakeInteraction(locale="en-US")
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
@@ -491,7 +823,7 @@ async def test_public_register_help_reports_missing_config(
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=MissingConfigManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
@@ -528,7 +860,7 @@ async def test_public_register_help_reports_render_failure(
     )
 
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
@@ -582,7 +914,7 @@ async def test_shift_info_defers_before_public_followup(
     )
 
     interaction = FakeInteraction(locale="ja")
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="shift_register",
         ManagerType=ConfiguredMultiRangeShiftInfoManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
@@ -613,7 +945,7 @@ async def test_team_summary_reports_default_missing_config_message(
     )
     lock = RecordingLock()
     interaction = FakeInteraction()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=MissingConfigManager,
         lock=lock,
@@ -655,7 +987,7 @@ async def test_team_summary_refreshes_with_configured_context(
     guild = SimpleNamespace(id=111, members=members)
     interaction = FakeInteraction(guild=guild)
     lock = RecordingLock()
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=SummaryManager,
         lock=lock,
@@ -684,7 +1016,7 @@ async def test_team_summary_refreshes_with_configured_context(
 async def test_team_summary_missing_guild_raises_before_defer() -> None:
     interaction = FakeInteraction()
     interaction.guild = None
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=SummaryManager,
         lock=RecordingLock(),
@@ -709,7 +1041,7 @@ async def test_delete_callback_reports_missing_config_without_lock(
     async def fail_delete(*_: object, **__: object) -> None:
         raise AssertionError
 
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=MissingConfigManager,
         FeatureChannelType=SimpleNamespace(lock=lock),
@@ -744,7 +1076,7 @@ async def test_delete_callback_deletes_with_configured_context(
     ) -> None:
         deleted.append((manager, user_info, metadata))
 
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=DeleteManager,
         FeatureChannelType=SimpleNamespace(lock=lock),
@@ -782,7 +1114,7 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
 
     interaction = FakeInteraction()
     interaction.channel = None
-    subject = SimpleNamespace(
+    subject = feature_context_subject(
         feature_name="team_register",
         ManagerType=DeleteManager,
         FeatureChannelType=SimpleNamespace(lock=RecordingLock()),
@@ -803,6 +1135,15 @@ def test_team_and_shift_use_inherited_setup_after_enable() -> None:
     assert ShiftRegister.feature_display_name == "Shift Register"
     assert "setup_after_enable" not in TeamRegister.__dict__
     assert "setup_after_enable" not in ShiftRegister.__dict__
+
+
+def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
+    assert "process_upsert_from_message" not in TeamRegister.__dict__
+    assert "process_upsert_from_message" not in ShiftRegister.__dict__
+    assert "_parse_message_submission" in TeamRegister.__dict__
+    assert "_parse_message_submission" in ShiftRegister.__dict__
+    assert "_process_configured_message_submission" in TeamRegister.__dict__
+    assert "_process_configured_message_submission" in ShiftRegister.__dict__
 
 
 @pytest.mark.asyncio
@@ -1033,16 +1374,16 @@ async def test_setup_after_enable_routes_panel_google_sheets_error_from_base(
 
 
 @pytest.mark.asyncio
-async def test_setup_after_enable_missing_guild_raises_setup_specific_error() -> None:
+async def test_setup_after_enable_missing_guild_raises_shared_interaction_error() -> (
+    None
+):
     interaction = FakeInteraction()
     interaction.guild = None
     subject = TeamRegister(fake_bot())
 
     with pytest.raises(
         ValueError,
-        match=(
-            "Interaction channel or guild is None. Cannot proceed with setup message."
-        ),
+        match="Cannot proceed without an interaction channel and guild.",
     ):
         await subject.setup_after_enable(interaction)
 

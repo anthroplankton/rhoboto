@@ -6,11 +6,8 @@ from typing import TYPE_CHECKING, override
 from discord import Interaction, Member, Message, app_commands
 
 from bot import config
-from cogs.base.feature_channel_base import (
-    FeatureChannelBase,
-    _get_configured_feature_context,
-    _get_interaction_channel_context,
-)
+from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.feature_context import ConfiguredFeatureContext, MessageParseResult
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_team_register import (
     TEAM_REGISTER_DISPLAY_NAME,
@@ -18,22 +15,23 @@ from components.ui_team_register import (
     build_summary_embed,
     build_team_register_settings_panel,
 )
-from models.feature_channel import FeatureChannel
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.team_register_manager import TeamRegisterManager
-from utils.team_register_structs import ClassifiedTeams, TeamParser
+from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
 if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
     from components.ui_settings_flow import SettingsPanel
+    from utils.structs_base import UserInfo
 
 
 class TeamRegister(
-    FeatureChannelBase[TeamRegisterManager, ClassifiedTeams], group_name="team_register"
+    FeatureChannelBase[TeamRegisterManager, list[Team], ClassifiedTeams],
+    group_name="team_register",
 ):
     feature_name = "team_register"
     feature_display_name = TEAM_REGISTER_DISPLAY_NAME
@@ -60,29 +58,30 @@ class TeamRegister(
         )
 
     @override
-    async def process_upsert_from_message(
+    async def _parse_message_submission(
         self, message: Message
-    ) -> ClassifiedTeams | None:
-        if not await self._should_process_message(message):
-            return None
-
-        self._log_received_message(message)
-
+    ) -> MessageParseResult[list[Team]]:
         user_info = self._message_user_info(message)
         lines = message.content.splitlines()
         parse_result = TeamParser.parse_submission(user_info, lines=lines)
         if parse_result.invalid_attempts:
-            await add_reaction_if_possible(
-                message,
-                config.CONFUSED_EMOJI,
-                log=self.logger,
-            )
-            return None
+            return MessageParseResult.invalid(user_info=user_info)
 
         teams = parse_result.teams
         if not teams:
-            return None
+            return MessageParseResult.ignored()
 
+        return MessageParseResult.parsed(teams, user_info=user_info)
+
+    @override
+    async def _process_configured_message_submission(
+        self,
+        message: Message,
+        context: ConfiguredFeatureContext[TeamRegisterManager],
+        submission: list[Team],
+        user_info: UserInfo,
+    ) -> ClassifiedTeams | None:
+        teams = submission
         self.logger.info(
             "Parsed teams in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%s)",
             message.guild.id,
@@ -95,22 +94,6 @@ class TeamRegister(
             ),
         )
 
-        feature_channel = await FeatureChannel.get_or_none(
-            guild_id=message.guild.id,
-            channel_id=message.channel.id,
-            feature_name=self.feature_name,
-        )
-        if not feature_channel:
-            return None
-
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            return None
-
         if self.bot.user is not None:
             await add_reaction_if_possible(
                 message,
@@ -120,8 +103,9 @@ class TeamRegister(
 
         classified_teams = TeamParser.classify_teams(teams)
         team_tuple = classified_teams.as_tuple()
+        manager = context.manager
 
-        async with self.lock(message.channel.id):
+        async with self.lock(context.channel_id):
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 
@@ -161,17 +145,14 @@ class TeamRegister(
         FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
     )
     async def summary(self, interaction: Interaction) -> None:
-        interaction_context = _get_interaction_channel_context(interaction)
+        interaction_context = self._get_interaction_channel_context(interaction)
 
         await interaction.response.defer(ephemeral=True)
 
-        context = await _get_configured_feature_context(
-            interaction,
-            feature_name=self.feature_name,
-            manager_type=self.ManagerType,
-            interaction_context=interaction_context,
-        )
+        manager_context = await self._get_feature_manager_context(interaction_context)
+        context = await self._get_configured_feature_context(manager_context)
         if context is None:
+            await self._send_missing_config_followup(interaction)
             return
 
         async with self.lock(context.channel_id):
