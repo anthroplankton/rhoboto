@@ -18,6 +18,7 @@ from utils.structs_base import UserInfo
 
 class ContextSubject(FeatureContextMixin[ConfiguredManager]):
     feature_name = "team_register"
+    feature_display_name = "Team Register"
     ManagerType = ConfiguredManager
 
 
@@ -102,6 +103,7 @@ async def test_configured_feature_context_missing_config_returns_none_without_fo
 ) -> None:
     class MissingConfigSubject(FeatureContextMixin[MissingConfigManager]):
         feature_name = "team_register"
+        feature_display_name = "Team Register"
         ManagerType = MissingConfigManager
 
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -115,6 +117,21 @@ async def test_configured_feature_context_missing_config_returns_none_without_fo
 
     assert context is None
     assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_missing_config_followup_uses_feature_display_name() -> None:
+    interaction = FakeInteraction()
+    subject = ContextSubject()
+
+    await subject._send_missing_config_followup(interaction)
+
+    assert interaction.followup.messages == [
+        (
+            "Team Register is not configured for this channel.",
+            {"ephemeral": True},
+        )
+    ]
 
 
 @pytest.mark.asyncio

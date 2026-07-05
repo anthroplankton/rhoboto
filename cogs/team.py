@@ -23,6 +23,7 @@ class Team(
     group_name=app_commands.locale_str("team"),
 ):
     feature_name = TeamRegister.feature_name
+    feature_display_name = TeamRegister.feature_display_name
 
     FeatureChannelType = TeamRegister
     ManagerType = TeamRegisterManager
@@ -50,7 +51,10 @@ class Team(
         ),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def delete(self, interaction: Interaction) -> None:
         await self.delete_callback(interaction)
@@ -60,7 +64,10 @@ class Team(
         description=locale_str("Show how to register your teams."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def help(self, interaction: Interaction) -> None:
         """Show how to register your teams.

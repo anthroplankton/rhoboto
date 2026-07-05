@@ -22,6 +22,7 @@ class Shift(
     group_name=locale_str("shift"),
 ):
     feature_name = ShiftRegister.feature_name
+    feature_display_name = ShiftRegister.feature_display_name
 
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
@@ -46,7 +47,10 @@ class Shift(
         ),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def delete(self, interaction: Interaction) -> None:
         await self.delete_callback(interaction)
@@ -56,7 +60,10 @@ class Shift(
         description=locale_str("Show how to register your shifts."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def help(self, interaction: Interaction) -> None:
         """Show how to register your shifts.

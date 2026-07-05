@@ -151,7 +151,10 @@ class ShiftRegister(
         description="Show and edit current feature settings for this channel.",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def settings(self, interaction: Interaction) -> None:
         """Slash command to show and edit current feature settings."""
@@ -162,7 +165,10 @@ class ShiftRegister(
         name="info",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def info(self, interaction: Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
@@ -207,7 +213,10 @@ class ShiftRegister(
         description="Show the all language how to register your data for this feature.",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def help(self, interaction: Interaction) -> None:
         await self._help_callback(interaction)

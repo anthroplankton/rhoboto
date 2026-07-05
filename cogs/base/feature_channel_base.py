@@ -82,11 +82,11 @@ class FeatureNotEnabled(commands.CheckFailure, app_commands.CheckFailure):
     Exception raised when a required feature is not enabled in the channel.
 
     Args:
-        feature_name (str): Name of the feature that is not enabled.
+        feature_display_name (str): Human-facing name of the feature.
     """
 
-    def __init__(self, feature_name: str) -> None:
-        msg = f"Feature `{feature_name}` not enabled in this channel."
+    def __init__(self, feature_display_name: str) -> None:
+        msg = f"{feature_display_name} is not enabled in this channel."
         super().__init__(msg)
 
 
@@ -145,11 +145,14 @@ class FeatureChannelBase(
         self.bot = bot
         self.logger = logging.getLogger(self.__class__.__name__)
         self.context_menu = app_commands.ContextMenu(
-            name=f"{self.feature_name} upsert",
+            name=f"{self.feature_display_name} Upsert",
             callback=self.upsert_from_content_menu,
         )
         self.context_menu.add_check(
-            self.feature_enabled_app_command_predicate(self.feature_name)
+            self.feature_enabled_app_command_predicate(
+                self.feature_name,
+                self.feature_display_name,
+            )
         )
         self.context_menu.error(self.cog_app_command_error)
         bot.tree.add_command(self.context_menu)
@@ -278,9 +281,12 @@ class FeatureChannelBase(
             return
 
         content = (
-            f"Failed to upsert for `{self.feature_name}`."
+            f"Failed to upsert for {self.feature_display_name}."
             if result is None
-            else f"Upsert for `{self.feature_name}` complete. Data: ```js\n{result}```"
+            else (
+                f"Upsert for {self.feature_display_name} complete. "
+                f"Data: ```js\n{result}```"
+            )
         )
         await interaction.followup.send(content, ephemeral=False)
 
@@ -358,7 +364,8 @@ class FeatureChannelBase(
         channel_id = interaction.channel.id
         await self._enable_channel(guild_id, channel_id)
         await interaction.response.send_message(
-            f"Feature `{self.feature_name}` enabled in this channel.", ephemeral=True
+            f"Feature {self.feature_display_name} enabled in this channel.",
+            ephemeral=True,
         )
         await self.setup_after_enable(interaction)
 
@@ -378,9 +385,9 @@ class FeatureChannelBase(
         channel_id = interaction.channel.id
         result = await self._disable_channel(guild_id, channel_id)
         msg = (
-            f"Feature `{self.feature_name}` disabled in this channel."
+            f"Feature {self.feature_display_name} disabled in this channel."
             if result
-            else f"Feature `{self.feature_name}` is not enabled in this channel."
+            else f"Feature {self.feature_display_name} is not enabled in this channel."
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -405,7 +412,7 @@ class FeatureChannelBase(
         view = DisableAndClearConfirmView()
         await interaction.response.send_message(
             f"Are you sure you want to disable and clear all settings for feature "
-            f"`{self.feature_name}` in this channel?",
+            f"{self.feature_display_name} in this channel?",
             view=view,
             ephemeral=True,
         )
@@ -416,8 +423,9 @@ class FeatureChannelBase(
             channel_id = interaction.channel.id
             await self._clear_feature_settings(guild_id, channel_id)
             await interaction.followup.send(
-                f"Feature `{self.feature_name}` has been disabled and all bot settings "
-                f"for this feature in this channel have been permanently cleared.",
+                f"Feature {self.feature_display_name} has been disabled and all bot "
+                f"settings for this feature in this channel have been permanently "
+                f"cleared.",
                 ephemeral=True,
             )
         elif view.value is False:
@@ -562,12 +570,16 @@ class FeatureChannelBase(
         )
 
     @staticmethod
-    def feature_enabled_prefix_command_predicate(feature_name: str) -> Callable:
+    def feature_enabled_prefix_command_predicate(
+        feature_name: str,
+        feature_display_name: str,
+    ) -> Callable:
         """
         Predicate for prefix command: require feature to be enabled in this channel.
 
         Args:
             feature_name (str): Feature name to check.
+            feature_display_name (str): Human-facing feature name for errors.
 
         Returns:
             callable: Predicate function for command check.
@@ -583,18 +595,22 @@ class FeatureChannelBase(
             if not await FeatureChannelBase.is_enabled(
                 ctx.guild.id, ctx.channel.id, feature_name
             ):
-                raise FeatureNotEnabled(feature_name)
+                raise FeatureNotEnabled(feature_display_name)
             return True
 
         return predicate
 
     @staticmethod
-    def feature_enabled_app_command_predicate(feature_name: str) -> Callable:
+    def feature_enabled_app_command_predicate(
+        feature_name: str,
+        feature_display_name: str,
+    ) -> Callable:
         """
         Predicate for app command: require feature to be enabled in this channel.
 
         Args:
             feature_name (str): Feature name to check.
+            feature_display_name (str): Human-facing feature name for errors.
 
         Returns:
             callable: Predicate function for app command check.
@@ -610,7 +626,7 @@ class FeatureChannelBase(
             if not await FeatureChannelBase.is_enabled(
                 interaction.guild.id, interaction.channel.id, feature_name
             ):
-                raise FeatureNotEnabled(feature_name)
+                raise FeatureNotEnabled(feature_display_name)
             return True
 
         return predicate
@@ -687,12 +703,14 @@ class FeatureChannelUserBase(
             locale = interaction.locale.value
 
             if locale.startswith("zh"):
-                content = f"✅ 已成功刪除 `{self.feature_name}` 登記的資料。"
+                content = f"✅ 已成功刪除 {self.feature_display_name} 登記的資料。"
             elif locale.startswith("ja"):
-                content = f"✅ `{self.feature_name}` の入力データを正常に削除しました。"
+                content = (
+                    f"✅ {self.feature_display_name} の入力データを正常に削除しました。"
+                )
             else:
                 content = (
-                    f"✅ Your data for `{self.feature_name}` has been "
+                    f"✅ Your data for {self.feature_display_name} has been "
                     f"deleted successfully."
                 )
 

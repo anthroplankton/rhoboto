@@ -18,7 +18,9 @@ from cogs.base.feature_context import (
     FeatureContextMixin,
     MessageParseResult,
 )
+from cogs.shift import Shift
 from cogs.shift_register import ShiftRegister
+from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
 from models.feature_channel import FeatureChannel
@@ -375,10 +377,18 @@ async def test_is_enabled_uses_enabled_feature_channel_lookup(
 
 
 @pytest.mark.asyncio
-async def test_app_command_predicate_still_reports_not_enabled(
+async def test_app_command_predicate_uses_lookup_key_and_display_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def disabled_lookup(*_: object, **__: object) -> object | None:
+    calls: list[tuple[int, int, str | None]] = []
+
+    async def disabled_lookup(
+        _cls: type[FeatureChannelBase],
+        guild_id: int,
+        channel_id: int,
+        feature_name: str | None = None,
+    ) -> object | None:
+        calls.append((guild_id, channel_id, feature_name))
         return None
 
     monkeypatch.setattr(
@@ -387,18 +397,29 @@ async def test_app_command_predicate_still_reports_not_enabled(
         classmethod(disabled_lookup),
     )
     predicate = FeatureChannelBase.feature_enabled_app_command_predicate(
-        "team_register"
+        "team_register",
+        "Team Register",
     )
 
-    with pytest.raises(FeatureNotEnabled, match="Feature `team_register` not enabled"):
+    with pytest.raises(FeatureNotEnabled, match="Team Register is not enabled"):
         await predicate(FakeInteraction())
+
+    assert calls == [(111, 222, "team_register")]
 
 
 @pytest.mark.asyncio
-async def test_prefix_command_predicate_still_reports_not_enabled(
+async def test_prefix_command_predicate_uses_lookup_key_and_display_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def disabled_lookup(*_: object, **__: object) -> object | None:
+    calls: list[tuple[int, int, str | None]] = []
+
+    async def disabled_lookup(
+        _cls: type[FeatureChannelBase],
+        guild_id: int,
+        channel_id: int,
+        feature_name: str | None = None,
+    ) -> object | None:
+        calls.append((guild_id, channel_id, feature_name))
         return None
 
     monkeypatch.setattr(
@@ -407,15 +428,82 @@ async def test_prefix_command_predicate_still_reports_not_enabled(
         classmethod(disabled_lookup),
     )
     predicate = FeatureChannelBase.feature_enabled_prefix_command_predicate(
-        "team_register"
+        "team_register",
+        "Team Register",
     )
     ctx = SimpleNamespace(
         guild=SimpleNamespace(id=111),
         channel=SimpleNamespace(id=222),
     )
 
-    with pytest.raises(FeatureNotEnabled, match="Feature `team_register` not enabled"):
+    with pytest.raises(FeatureNotEnabled, match="Team Register is not enabled"):
         await predicate(ctx)
+
+    assert calls == [(111, 222, "team_register")]
+
+
+@pytest.mark.asyncio
+async def test_enable_response_uses_feature_display_name() -> None:
+    setup_calls: list[object] = []
+
+    async def fake_enable_channel(_guild_id: int, _channel_id: int) -> None:
+        return None
+
+    async def fake_setup_after_enable(interaction: object) -> None:
+        setup_calls.append(interaction)
+
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _enable_channel=fake_enable_channel,
+        setup_after_enable=fake_setup_after_enable,
+    )
+    interaction = FakeInteraction()
+
+    await FeatureChannelBase.enable.callback(subject, interaction)
+
+    assert interaction.response.messages == [
+        ("Feature Team Register enabled in this channel.", {"ephemeral": True})
+    ]
+    assert setup_calls == [interaction]
+
+
+@pytest.mark.asyncio
+async def test_disable_response_uses_feature_display_name() -> None:
+    async def fake_disable_channel(_guild_id: int, _channel_id: int) -> bool:
+        return True
+
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _disable_channel=fake_disable_channel,
+    )
+    interaction = FakeInteraction()
+
+    await FeatureChannelBase.disable.callback(subject, interaction)
+
+    assert interaction.response.messages == [
+        ("Feature Team Register disabled in this channel.", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_disable_response_uses_feature_display_name_when_not_enabled() -> None:
+    async def fake_disable_channel(_guild_id: int, _channel_id: int) -> bool:
+        return False
+
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _disable_channel=fake_disable_channel,
+    )
+    interaction = FakeInteraction()
+
+    await FeatureChannelBase.disable.callback(subject, interaction)
+
+    assert interaction.response.messages == [
+        ("Feature Team Register is not enabled in this channel.", {"ephemeral": True})
+    ]
 
 
 @pytest.mark.asyncio
@@ -662,6 +750,7 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     interaction = FakeInteraction()
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         process_upsert_from_message=process_invalid_attempt,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
@@ -671,7 +760,7 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
 
     assert message.added_reactions == [config.CONFUSED_EMOJI]
     assert interaction.followup.messages == [
-        ("Failed to upsert for `team_register`.", {"ephemeral": False})
+        ("Failed to upsert for Team Register.", {"ephemeral": False})
     ]
 
 
@@ -685,6 +774,7 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
     interaction = FakeInteraction()
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         process_upsert_from_message=process_ordinary_text,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
@@ -694,7 +784,33 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
 
     assert message.added_reactions == []
     assert interaction.followup.messages == [
-        ("Failed to upsert for `team_register`.", {"ephemeral": False})
+        ("Failed to upsert for Team Register.", {"ephemeral": False})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_menu_success_followup_uses_feature_display_name() -> None:
+    message = FakeMessage()
+
+    async def process_valid_text(_message: FakeMessage) -> str:
+        return "{'ok': true}"
+
+    interaction = FakeInteraction()
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        process_upsert_from_message=process_valid_text,
+        bot=SimpleNamespace(user=object()),
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+
+    assert interaction.followup.messages == [
+        (
+            "Upsert for Team Register complete. Data: ```js\n{'ok': true}```",
+            {"ephemeral": False},
+        )
     ]
 
 
@@ -736,6 +852,7 @@ async def test_user_help_uses_followup_for_missing_config(
     interaction = FakeInteraction()
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=MissingConfigManager,
         bot=SimpleNamespace(user=None),
     )
@@ -745,7 +862,7 @@ async def test_user_help_uses_followup_for_missing_config(
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
     assert kwargs["ephemeral"] is True
-    assert message == "`team_register` is not configured for this channel."
+    assert message == "Team Register is not configured for this channel."
 
 
 @pytest.mark.asyncio
@@ -825,6 +942,7 @@ async def test_public_register_help_reports_missing_config(
     interaction = FakeInteraction()
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=MissingConfigManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
         help_template_key="team.help",
@@ -836,7 +954,7 @@ async def test_public_register_help_reports_missing_config(
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
         (
-            "`team_register` is not configured for this channel.",
+            "Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
@@ -947,6 +1065,7 @@ async def test_team_summary_reports_default_missing_config_message(
     interaction = FakeInteraction()
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=MissingConfigManager,
         lock=lock,
     )
@@ -956,7 +1075,7 @@ async def test_team_summary_reports_default_missing_config_message(
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
-            "`team_register` is not configured for this channel.",
+            "Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
@@ -1043,6 +1162,7 @@ async def test_delete_callback_reports_missing_config_without_lock(
 
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=MissingConfigManager,
         FeatureChannelType=SimpleNamespace(lock=lock),
         _delete_user_data=fail_delete,
@@ -1054,7 +1174,7 @@ async def test_delete_callback_reports_missing_config_without_lock(
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
-            "`team_register` is not configured for this channel.",
+            "Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
@@ -1078,6 +1198,7 @@ async def test_delete_callback_deletes_with_configured_context(
 
     subject = feature_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=DeleteManager,
         FeatureChannelType=SimpleNamespace(lock=lock),
         _delete_user_data=fake_delete_user_data,
@@ -1101,9 +1222,61 @@ async def test_delete_callback_deletes_with_configured_context(
     assert metadata is manager.metadata
     assert interaction.followup.messages == [
         (
-            "✅ Your data for `team_register` has been deleted successfully.",
+            "✅ Your data for Team Register has been deleted successfully.",
             {"ephemeral": True},
         )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_uses_feature_display_name_in_zh_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    lock = RecordingLock()
+
+    async def fake_delete_user_data(*_: object) -> None:
+        return None
+
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        ManagerType=DeleteManager,
+        FeatureChannelType=SimpleNamespace(lock=lock),
+        _delete_user_data=fake_delete_user_data,
+    )
+    interaction = FakeInteraction(locale="zh-TW")
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.followup.messages == [
+        ("✅ 已成功刪除 Team Register 登記的資料。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_uses_feature_display_name_in_ja_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    lock = RecordingLock()
+
+    async def fake_delete_user_data(*_: object) -> None:
+        return None
+
+    subject = feature_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        ManagerType=DeleteManager,
+        FeatureChannelType=SimpleNamespace(lock=lock),
+        _delete_user_data=fake_delete_user_data,
+    )
+    interaction = FakeInteraction(locale="ja")
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.followup.messages == [
+        ("✅ Team Register の入力データを正常に削除しました。", {"ephemeral": True})
     ]
 
 
@@ -1133,8 +1306,18 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
 def test_team_and_shift_use_inherited_setup_after_enable() -> None:
     assert TeamRegister.feature_display_name == "Team Register"
     assert ShiftRegister.feature_display_name == "Shift Register"
+    assert Team.feature_display_name == "Team Register"
+    assert Shift.feature_display_name == "Shift Register"
     assert "setup_after_enable" not in TeamRegister.__dict__
     assert "setup_after_enable" not in ShiftRegister.__dict__
+
+
+def test_register_context_menu_names_use_feature_display_name() -> None:
+    team_register = TeamRegister(fake_bot())
+    shift_register = ShiftRegister(fake_bot())
+
+    assert team_register.context_menu.name == "Team Register Upsert"
+    assert shift_register.context_menu.name == "Shift Register Upsert"
 
 
 def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:

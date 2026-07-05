@@ -142,7 +142,10 @@ class TeamRegister(
         ),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def summary(self, interaction: Interaction) -> None:
         interaction_context = self._get_interaction_channel_context(interaction)
@@ -189,7 +192,10 @@ class TeamRegister(
         description="Show and edit current feature settings for this channel.",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def settings(self, interaction: Interaction) -> None:
         """Slash command to show and edit current feature settings."""
@@ -201,7 +207,10 @@ class TeamRegister(
         description="Show the all language how to register your data for this feature.",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def help(self, interaction: Interaction) -> None:
         await self._help_callback(interaction)

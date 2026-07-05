@@ -89,6 +89,7 @@ class MessageParseResult(Generic[TSubmission]):
 
 class FeatureContextMixin(Generic[TManager]):
     feature_name: str
+    feature_display_name: str
     ManagerType: type[TManager]
 
     def _get_interaction_channel_context(
@@ -207,6 +208,6 @@ class FeatureContextMixin(Generic[TManager]):
         ephemeral: bool = True,
     ) -> None:
         await interaction.followup.send(
-            content=f"`{self.feature_name}` is not configured for this channel.",
+            content=f"{self.feature_display_name} is not configured for this channel.",
             ephemeral=ephemeral,
         )
