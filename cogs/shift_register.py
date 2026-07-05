@@ -10,7 +10,10 @@ from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     _send_public_announcement_followups,
 )
-from cogs.base.feature_context import ConfiguredFeatureContext, MessageParseResult
+from cogs.base.feature_channel_context import (
+    ConfiguredFeatureChannelContext,
+    MessageParseResult,
+)
 from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
     ShiftRegisterView,
@@ -80,7 +83,7 @@ class ShiftRegister(
     async def _process_configured_message_submission(
         self,
         message: Message,
-        context: ConfiguredFeatureContext[ShiftRegisterManager],
+        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
         submission: Shift,
         user_info: UserInfo,
     ) -> Shift | None:
@@ -178,8 +181,10 @@ class ShiftRegister(
             interaction,
             action="show shift info",
         )
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             await self._send_missing_config_followup(interaction)
             return

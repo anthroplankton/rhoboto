@@ -81,12 +81,18 @@ class DummyManager:
 
 def make_subject(feature_name: str) -> SimpleNamespace:
     if feature_name == "team_register":
-        parse_message_submission = TeamRegister._parse_message_submission  # noqa: SLF001
-        process_configured = TeamRegister._process_configured_message_submission  # noqa: SLF001
+        parse_message_submission = getattr(TeamRegister, "_parse_message_submission")
+        process_configured = (
+            getattr(TeamRegister, "_process_configured_message_submission")
+        )
         manager_type = TeamRegister.ManagerType
     else:
-        parse_message_submission = ShiftRegister._parse_message_submission  # noqa: SLF001
-        process_configured = ShiftRegister._process_configured_message_submission  # noqa: SLF001
+        parse_message_submission = (
+            getattr(ShiftRegister, "_parse_message_submission")
+        )
+        process_configured = (
+            getattr(ShiftRegister, "_process_configured_message_submission")
+        )
         manager_type = ShiftRegister.ManagerType
 
     subject = SimpleNamespace(
@@ -106,10 +112,10 @@ def make_subject(feature_name: str) -> SimpleNamespace:
     for method_name in (
         "_message_user_info",
         "_log_received_message",
-        "_build_feature_manager_context",
-        "_get_feature_manager_context_or_none",
-        "_get_configured_feature_context",
-        "_get_message_feature_manager_context_or_none",
+        "_build_feature_channel_context",
+        "_get_feature_channel_context_or_none",
+        "_get_configured_feature_channel_context",
+        "_get_message_feature_channel_context_or_none",
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, MethodType(method, subject))

@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 
 from cogs.base.discord_context import require_guild_channel_source
-from cogs.base.feature_context import (
-    FeatureContextMixin,
+from cogs.base.feature_channel_context import (
+    FeatureChannelContextMixin,
     MessageParseResult,
     MessageParseStatus,
 )
@@ -17,7 +17,7 @@ from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
 from utils.structs_base import UserInfo
 
 
-class ContextSubject(FeatureContextMixin[ConfiguredManager]):
+class ContextSubject(FeatureChannelContextMixin[ConfiguredManager]):
     feature_name = "team_register"
     feature_display_name = "Team Register"
     ManagerType = ConfiguredManager
@@ -35,7 +35,7 @@ async def fake_feature_channel_get(
 
 
 @pytest.mark.asyncio
-async def test_feature_manager_context_uses_manager_type(
+async def test_feature_channel_context_uses_manager_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -43,10 +43,10 @@ async def test_feature_manager_context_uses_manager_type(
     subject = ContextSubject()
     source = require_guild_channel_source(
         interaction,
-        action="inspect feature context",
+        action="inspect feature channel context",
     )
 
-    context = await subject._get_feature_manager_context(source)
+    context = await subject._get_feature_channel_context(source)
 
     assert context.guild_id == 111
     assert context.channel_id == 222
@@ -57,7 +57,7 @@ async def test_feature_manager_context_uses_manager_type(
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_context_returns_feature_config_without_followup(
+async def test_configured_feature_channel_context_returns_feature_config_without_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -65,13 +65,15 @@ async def test_configured_feature_context_returns_feature_config_without_followu
     subject = ContextSubject()
     source = require_guild_channel_source(
         interaction,
-        action="inspect feature context",
+        action="inspect feature channel context",
     )
-    manager_context = await subject._get_feature_manager_context(
+    feature_channel_context = await subject._get_feature_channel_context(
         source,
     )
 
-    context = await subject._get_configured_feature_context(manager_context)
+    context = await subject._get_configured_feature_channel_context(
+        feature_channel_context
+    )
 
     assert context is not None
     assert context.guild_id == 111
@@ -83,10 +85,10 @@ async def test_configured_feature_context_returns_feature_config_without_followu
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_context_missing_config_returns_none_without_followup(
+async def test_configured_feature_channel_context_missing_config_returns_none_without_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class MissingConfigSubject(FeatureContextMixin[MissingConfigManager]):
+    class MissingConfigSubject(FeatureChannelContextMixin[MissingConfigManager]):
         feature_name = "team_register"
         feature_display_name = "Team Register"
         ManagerType = MissingConfigManager
@@ -96,13 +98,15 @@ async def test_configured_feature_context_missing_config_returns_none_without_fo
     subject = MissingConfigSubject()
     source = require_guild_channel_source(
         interaction,
-        action="inspect feature context",
+        action="inspect feature channel context",
     )
-    manager_context = await subject._get_feature_manager_context(
+    feature_channel_context = await subject._get_feature_channel_context(
         source,
     )
 
-    context = await subject._get_configured_feature_context(manager_context)
+    context = await subject._get_configured_feature_channel_context(
+        feature_channel_context
+    )
 
     assert context is None
     assert interaction.followup.messages == []
@@ -168,7 +172,7 @@ async def test_enabled_feature_channel_lookup_filters_disabled(
 
 
 @pytest.mark.asyncio
-async def test_feature_manager_context_or_none_respects_enabled_requirement(
+async def test_feature_channel_context_or_none_respects_enabled_requirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     disabled_row = SimpleNamespace(
@@ -191,7 +195,7 @@ async def test_feature_manager_context_or_none_respects_enabled_requirement(
     interaction = FakeInteraction()
     subject = ContextSubject()
 
-    context = await subject._get_feature_manager_context_or_none(
+    context = await subject._get_feature_channel_context_or_none(
         guild_id=interaction.guild.id,
         channel_id=222,
     )
@@ -205,7 +209,7 @@ async def test_feature_manager_context_or_none_respects_enabled_requirement(
     assert context.manager.feature_channel is disabled_row
 
     assert (
-        await subject._get_feature_manager_context_or_none(
+        await subject._get_feature_channel_context_or_none(
             guild_id=interaction.guild.id,
             channel_id=222,
             require_enabled=True,
@@ -216,7 +220,7 @@ async def test_feature_manager_context_or_none_respects_enabled_requirement(
     rows["current"] = None
 
     assert (
-        await subject._get_feature_manager_context_or_none(
+        await subject._get_feature_channel_context_or_none(
             guild_id=interaction.guild.id,
             channel_id=222,
         )

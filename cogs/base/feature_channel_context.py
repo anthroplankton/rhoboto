@@ -21,7 +21,7 @@ TSubmission = TypeVar("TSubmission")
 
 
 @dataclass(frozen=True)
-class FeatureManagerContext(Generic[TManager]):
+class FeatureChannelContext(Generic[TManager]):
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -29,7 +29,7 @@ class FeatureManagerContext(Generic[TManager]):
 
 
 @dataclass(frozen=True)
-class ConfiguredFeatureContext(Generic[TManager]):
+class ConfiguredFeatureChannelContext(Generic[TManager]):
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -79,7 +79,7 @@ class MessageParseResult(Generic[TSubmission]):
         )
 
 
-class FeatureContextMixin(Generic[TManager]):
+class FeatureChannelContextMixin(Generic[TManager]):
     feature_name: str
     feature_display_name: str
     ManagerType: type[TManager]
@@ -103,43 +103,43 @@ class FeatureContextMixin(Generic[TManager]):
             return None
         return feature_channel
 
-    async def _get_feature_manager_context(
+    async def _get_feature_channel_context(
         self,
         source: GuildChannelSource,
-    ) -> FeatureManagerContext[TManager]:
+    ) -> FeatureChannelContext[TManager]:
         feature_channel = await FeatureChannel.get(
             guild_id=source.guild.id,
             channel_id=source.channel.id,
             feature_name=self.feature_name,
         )
-        return self._build_feature_manager_context(
+        return self._build_feature_channel_context(
             guild_id=source.guild.id,
             channel_id=source.channel.id,
             feature_channel=feature_channel,
         )
 
-    def _build_feature_manager_context(
+    def _build_feature_channel_context(
         self,
         *,
         guild_id: int,
         channel_id: int,
         feature_channel: FeatureChannel,
-    ) -> FeatureManagerContext[TManager]:
+    ) -> FeatureChannelContext[TManager]:
         manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
-        return FeatureManagerContext(
+        return FeatureChannelContext(
             guild_id=guild_id,
             channel_id=channel_id,
             feature_channel=feature_channel,
             manager=manager,
         )
 
-    async def _get_feature_manager_context_or_none(
+    async def _get_feature_channel_context_or_none(
         self,
         *,
         guild_id: int,
         channel_id: int,
         require_enabled: bool = False,
-    ) -> FeatureManagerContext[TManager] | None:
+    ) -> FeatureChannelContext[TManager] | None:
         if require_enabled:
             feature_channel = await self._get_enabled_feature_channel_or_none(
                 guild_id,
@@ -155,25 +155,27 @@ class FeatureContextMixin(Generic[TManager]):
         if feature_channel is None:
             return None
 
-        return self._build_feature_manager_context(
+        return self._build_feature_channel_context(
             guild_id=guild_id,
             channel_id=channel_id,
             feature_channel=feature_channel,
         )
 
-    async def _get_configured_feature_context(
+    async def _get_configured_feature_channel_context(
         self,
-        manager_context: FeatureManagerContext[TManager],
-    ) -> ConfiguredFeatureContext[TManager] | None:
-        feature_config = await manager_context.manager.get_sheet_config_or_none()
+        feature_channel_context: FeatureChannelContext[TManager],
+    ) -> ConfiguredFeatureChannelContext[TManager] | None:
+        feature_config = (
+            await feature_channel_context.manager.get_sheet_config_or_none()
+        )
         if feature_config is None:
             return None
 
-        return ConfiguredFeatureContext(
-            guild_id=manager_context.guild_id,
-            channel_id=manager_context.channel_id,
-            feature_channel=manager_context.feature_channel,
-            manager=manager_context.manager,
+        return ConfiguredFeatureChannelContext(
+            guild_id=feature_channel_context.guild_id,
+            channel_id=feature_channel_context.channel_id,
+            feature_channel=feature_channel_context.feature_channel,
+            manager=feature_channel_context.manager,
             feature_config=feature_config,
         )
 

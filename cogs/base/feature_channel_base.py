@@ -9,10 +9,10 @@ from discord.ext import commands
 
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
-from cogs.base.feature_context import (
-    ConfiguredFeatureContext,
-    FeatureContextMixin,
-    FeatureManagerContext,
+from cogs.base.feature_channel_context import (
+    ConfiguredFeatureChannelContext,
+    FeatureChannelContext,
+    FeatureChannelContextMixin,
     MessageParseResult,
     MessageParseStatus,
 )
@@ -118,7 +118,7 @@ class FeatureChannelErrorHandler:
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True, manage_channels=True)
 class FeatureChannelBase(
-    FeatureContextMixin[TManager],
+    FeatureChannelContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
     Generic[TManager, TSubmission, TUpsertResult],
@@ -166,10 +166,10 @@ class FeatureChannelBase(
         Args:
             message (Message): The Discord message to process.
         """
-        manager_context = await self._get_message_feature_manager_context_or_none(
-            message
+        feature_channel_context = (
+            await self._get_message_feature_channel_context_or_none(message)
         )
-        if manager_context is None:
+        if feature_channel_context is None:
             return None
 
         self._log_received_message(message)
@@ -186,14 +186,16 @@ class FeatureChannelBase(
             )
             return None
 
-        context = await self._get_configured_feature_context(manager_context)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             self.logger.debug(
                 "Feature `%s` in Guild: `%s` Channel: `%s` has no feature config; "
                 "ignoring parsed message.",
                 self.feature_name,
-                manager_context.guild_id,
-                manager_context.channel_id,
+                feature_channel_context.guild_id,
+                feature_channel_context.channel_id,
             )
             return None
 
@@ -208,13 +210,13 @@ class FeatureChannelBase(
             parse_result.user_info,
         )
 
-    async def _get_message_feature_manager_context_or_none(
+    async def _get_message_feature_channel_context_or_none(
         self,
         message: Message,
-    ) -> FeatureManagerContext[TManager] | None:
+    ) -> FeatureChannelContext[TManager] | None:
         if message.author.bot or message.guild is None or message.channel is None:
             return None
-        return await self._get_feature_manager_context_or_none(
+        return await self._get_feature_channel_context_or_none(
             guild_id=message.guild.id,
             channel_id=message.channel.id,
             require_enabled=True,
@@ -232,7 +234,7 @@ class FeatureChannelBase(
     async def _process_configured_message_submission(
         self,
         message: Message,
-        context: ConfiguredFeatureContext[TManager],
+        context: ConfiguredFeatureChannelContext[TManager],
         submission: TSubmission,
         user_info: UserInfo,
     ) -> TUpsertResult | None:
@@ -316,10 +318,12 @@ class FeatureChannelBase(
             interaction,
             action="set up feature settings",
         )
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
-            view = self._build_initial_setup_view(manager_context.manager)
+            view = self._build_initial_setup_view(feature_channel_context.manager)
             await send_settings_view_followup(
                 interaction,
                 content=initial_setup_content(self.feature_display_name),
@@ -445,8 +449,10 @@ class FeatureChannelBase(
             interaction,
             action="show feature help",
         )
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             await self._send_missing_config_followup(interaction)
             return
@@ -632,7 +638,7 @@ class FeatureChannelBase(
 
 @app_commands.guild_only()
 class FeatureChannelUserBase(
-    FeatureContextMixin[TManager],
+    FeatureChannelContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
     Generic[TFeatureChannel, TManager, TGoogleSheetsMetadata],
@@ -685,8 +691,10 @@ class FeatureChannelUserBase(
             display_name=interaction.user.display_name,
         )
 
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             await self._send_missing_config_followup(interaction)
             return
@@ -732,8 +740,10 @@ class FeatureChannelUserBase(
             interaction,
             action="send feature help message",
         )
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             await self._send_missing_config_followup(interaction)
             return

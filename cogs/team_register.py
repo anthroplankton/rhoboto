@@ -8,7 +8,10 @@ from discord import Interaction, Member, Message, app_commands
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import FeatureChannelBase
-from cogs.base.feature_context import ConfiguredFeatureContext, MessageParseResult
+from cogs.base.feature_channel_context import (
+    ConfiguredFeatureChannelContext,
+    MessageParseResult,
+)
 from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_team_register import (
     TEAM_REGISTER_DISPLAY_NAME,
@@ -78,7 +81,7 @@ class TeamRegister(
     async def _process_configured_message_submission(
         self,
         message: Message,
-        context: ConfiguredFeatureContext[TeamRegisterManager],
+        context: ConfiguredFeatureChannelContext[TeamRegisterManager],
         submission: list[Team],
         user_info: UserInfo,
     ) -> ClassifiedTeams | None:
@@ -157,8 +160,10 @@ class TeamRegister(
 
         await interaction.response.defer(ephemeral=True)
 
-        manager_context = await self._get_feature_manager_context(source)
-        context = await self._get_configured_feature_context(manager_context)
+        feature_channel_context = await self._get_feature_channel_context(source)
+        context = await self._get_configured_feature_channel_context(
+            feature_channel_context
+        )
         if context is None:
             await self._send_missing_config_followup(interaction)
             return
