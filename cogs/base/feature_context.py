@@ -9,8 +9,9 @@ from models.feature_channel import FeatureChannel
 from utils.manager_base import ManagerBase
 
 if TYPE_CHECKING:
-    from discord import Guild, Interaction
+    from discord import Interaction
 
+    from cogs.base.discord_context import GuildChannelSource
     from models.base.sheet_config_base import SheetConfigBase
     from utils.structs_base import UserInfo
 
@@ -20,15 +21,7 @@ TSubmission = TypeVar("TSubmission")
 
 
 @dataclass(frozen=True)
-class InteractionChannelContext:
-    guild: Guild
-    guild_id: int
-    channel_id: int
-
-
-@dataclass(frozen=True)
 class FeatureManagerContext(Generic[TManager]):
-    guild: Guild
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -37,7 +30,6 @@ class FeatureManagerContext(Generic[TManager]):
 
 @dataclass(frozen=True)
 class ConfiguredFeatureContext(Generic[TManager]):
-    guild: Guild
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -92,20 +84,6 @@ class FeatureContextMixin(Generic[TManager]):
     feature_display_name: str
     ManagerType: type[TManager]
 
-    def _get_interaction_channel_context(
-        self,
-        interaction: Interaction,
-    ) -> InteractionChannelContext:
-        if interaction.channel is None or interaction.guild is None:
-            msg = "Cannot proceed without an interaction channel and guild."
-            raise ValueError(msg)
-
-        return InteractionChannelContext(
-            guild=interaction.guild,
-            guild_id=interaction.guild.id,
-            channel_id=interaction.channel.id,
-        )
-
     @classmethod
     async def _get_enabled_feature_channel_or_none(
         cls,
@@ -127,30 +105,29 @@ class FeatureContextMixin(Generic[TManager]):
 
     async def _get_feature_manager_context(
         self,
-        interaction_context: InteractionChannelContext,
+        source: GuildChannelSource,
     ) -> FeatureManagerContext[TManager]:
         feature_channel = await FeatureChannel.get(
-            guild_id=interaction_context.guild_id,
-            channel_id=interaction_context.channel_id,
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
             feature_name=self.feature_name,
         )
         return self._build_feature_manager_context(
-            guild=interaction_context.guild,
-            channel_id=interaction_context.channel_id,
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
             feature_channel=feature_channel,
         )
 
     def _build_feature_manager_context(
         self,
         *,
-        guild: Guild,
+        guild_id: int,
         channel_id: int,
         feature_channel: FeatureChannel,
     ) -> FeatureManagerContext[TManager]:
         manager = self.ManagerType(feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH)
         return FeatureManagerContext(
-            guild=guild,
-            guild_id=guild.id,
+            guild_id=guild_id,
             channel_id=channel_id,
             feature_channel=feature_channel,
             manager=manager,
@@ -159,19 +136,19 @@ class FeatureContextMixin(Generic[TManager]):
     async def _get_feature_manager_context_or_none(
         self,
         *,
-        guild: Guild,
+        guild_id: int,
         channel_id: int,
         require_enabled: bool = False,
     ) -> FeatureManagerContext[TManager] | None:
         if require_enabled:
             feature_channel = await self._get_enabled_feature_channel_or_none(
-                guild.id,
+                guild_id,
                 channel_id,
                 self.feature_name,
             )
         else:
             feature_channel = await FeatureChannel.get_or_none(
-                guild_id=guild.id,
+                guild_id=guild_id,
                 channel_id=channel_id,
                 feature_name=self.feature_name,
             )
@@ -179,7 +156,7 @@ class FeatureContextMixin(Generic[TManager]):
             return None
 
         return self._build_feature_manager_context(
-            guild=guild,
+            guild_id=guild_id,
             channel_id=channel_id,
             feature_channel=feature_channel,
         )
@@ -193,7 +170,6 @@ class FeatureContextMixin(Generic[TManager]):
             return None
 
         return ConfiguredFeatureContext(
-            guild=manager_context.guild,
             guild_id=manager_context.guild_id,
             channel_id=manager_context.channel_id,
             feature_channel=manager_context.feature_channel,

@@ -2,6 +2,7 @@ from discord import Embed, Interaction, app_commands
 from discord.ext import commands
 
 from bot import Rhoboto, config
+from cogs.base.discord_context import require_guild_channel_source
 from models.feature_channel import FeatureChannel
 
 
@@ -13,14 +14,13 @@ class Features(commands.Cog):
         description="View all features and whether they are enabled in this channel",
     )
     async def features(self, interaction: Interaction) -> None:
-        if interaction.guild is None or interaction.channel is None:
-            msg = (
-                "Interaction guild or channel is None. "
-                "Cannot proceed with features command."
-            )
-            raise ValueError(msg)
+        source = require_guild_channel_source(
+            interaction,
+            action="proceed with features command",
+        )
         feature_channel = await FeatureChannel.filter(
-            guild_id=interaction.guild.id, channel_id=interaction.channel.id
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
         ).all()
         embed = Embed(
             title="Features in This Channel", color=config.DEFAULT_EMBED_COLOR

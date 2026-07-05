@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from discord import Permissions, app_commands
 from discord.ext import commands
 
+from cogs.base.discord_context import require_guild_source
 from components.ui_language_settings import (
     build_announcement_language_settings_panel,
 )
@@ -43,19 +44,20 @@ class Language(commands.Cog):
         description="Configure public announcement languages for this server.",
     )
     async def announcement(self, interaction: Interaction) -> None:
-        if interaction.guild is None:
-            msg = "Interaction guild is None. Cannot configure language settings."
-            raise ValueError(msg)
+        source = require_guild_source(
+            interaction,
+            action="configure language settings",
+        )
         if not await require_settings_permissions(interaction):
             return
 
         await interaction.response.defer(ephemeral=True)
         language_codes = await get_announcement_languages(
-            interaction.guild.id,
+            source.guild.id,
             self.logger,
         )
         panel = build_announcement_language_settings_panel(
-            interaction.guild.id,
+            source.guild.id,
             language_codes,
         )
         await send_current_panel_followup(interaction, panel)

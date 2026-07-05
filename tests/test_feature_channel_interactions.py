@@ -8,6 +8,7 @@ from discord import Embed
 
 from bot import config
 from cogs.base import feature_channel_base
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     FeatureChannelUserBase,
@@ -24,7 +25,12 @@ from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
 from models.feature_channel import FeatureChannel
-from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
+from tests.fakes import (
+    ConfiguredManager,
+    FakeContext,
+    FakeInteraction,
+    MissingConfigManager,
+)
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.structs_base import UserInfo
@@ -266,7 +272,6 @@ def fake_bot() -> SimpleNamespace:
 def feature_context_subject(**attributes: object) -> SimpleNamespace:
     subject = SimpleNamespace(**attributes)
     for method_name in (
-        "_get_interaction_channel_context",
         "_get_feature_manager_context",
         "_get_configured_feature_context",
         "_build_feature_manager_context",
@@ -279,6 +284,7 @@ def feature_context_subject(**attributes: object) -> SimpleNamespace:
 
 def test_old_configured_feature_helpers_are_removed() -> None:
     assert not hasattr(feature_channel_base, "_get_interaction_channel_context")
+    assert not hasattr(FeatureChannelBase, "_get_interaction_channel_context")
     assert not hasattr(feature_channel_base, "_get_configured_feature_context")
     assert not hasattr(feature_channel_base, "get_configured_feature_context")
     assert not hasattr(feature_channel_base, "send_public_announcement_followups")
@@ -293,13 +299,13 @@ async def test_configured_feature_context_exposes_feature_config(
     interaction = FakeInteraction()
     subject = TeamRegister(fake_bot())
 
-    interaction_context = FeatureChannelBase._get_interaction_channel_context(  # noqa: SLF001
-        subject,
+    source = require_guild_channel_source(
         interaction,
+        action="inspect feature context",
     )
     manager_context = await FeatureChannelBase._get_feature_manager_context(  # noqa: SLF001
         subject,
-        interaction_context,
+        source,
     )
     context = await FeatureChannelBase._get_configured_feature_context(  # noqa: SLF001
         subject,
@@ -307,9 +313,9 @@ async def test_configured_feature_context_exposes_feature_config(
     )
 
     assert context is not None
-    assert context.guild is interaction.guild
     assert context.guild_id == 111
     assert context.channel_id == 222
+    assert not hasattr(context, "guild")
     assert context.feature_channel.guild_id == 111
     assert context.feature_channel.channel_id == 222
     assert context.feature_channel.feature_name == "team_register"
@@ -328,13 +334,13 @@ async def test_configured_feature_context_missing_config_is_pure_lookup(
     interaction = FakeInteraction()
     subject = TeamRegister(fake_bot())
 
-    interaction_context = FeatureChannelBase._get_interaction_channel_context(  # noqa: SLF001
-        subject,
+    source = require_guild_channel_source(
         interaction,
+        action="inspect feature context",
     )
     manager_context = await FeatureChannelBase._get_feature_manager_context(  # noqa: SLF001
         subject,
-        interaction_context,
+        source,
     )
     context = await FeatureChannelBase._get_configured_feature_context(  # noqa: SLF001
         subject,
@@ -431,10 +437,7 @@ async def test_prefix_command_predicate_uses_lookup_key_and_display_error(
         "team_register",
         "Team Register",
     )
-    ctx = SimpleNamespace(
-        guild=SimpleNamespace(id=111),
-        channel=SimpleNamespace(id=222),
-    )
+    ctx = FakeContext()
 
     with pytest.raises(FeatureNotEnabled, match="Team Register is not enabled"):
         await predicate(ctx)
@@ -877,7 +880,9 @@ async def test_user_help_missing_channel_raises_after_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Cannot proceed without an interaction channel and guild.",
+        match=(
+            "Interaction guild or channel is None. Cannot send feature help message."
+        ),
     ):
         await FeatureChannelUserBase.send_help_message(
             subject,
@@ -1143,7 +1148,7 @@ async def test_team_summary_missing_guild_raises_before_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Cannot proceed without an interaction channel and guild.",
+        match="Interaction guild or channel is None. Cannot refresh team summary.",
     ):
         await TeamRegister.summary.callback(subject, interaction)
 
@@ -1296,7 +1301,9 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Cannot proceed without an interaction channel and guild.",
+        match=(
+            "Interaction guild or channel is None. Cannot delete feature user data."
+        ),
     ):
         await FeatureChannelUserBase.delete_callback(subject, interaction)
 
@@ -1566,7 +1573,7 @@ async def test_setup_after_enable_missing_guild_raises_shared_interaction_error(
 
     with pytest.raises(
         ValueError,
-        match="Cannot proceed without an interaction channel and guild.",
+        match=("Interaction guild or channel is None. Cannot set up feature settings."),
     ):
         await subject.setup_after_enable(interaction)
 

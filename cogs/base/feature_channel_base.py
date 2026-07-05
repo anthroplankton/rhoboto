@@ -8,6 +8,7 @@ from discord import Interaction, Message, app_commands
 from discord.ext import commands
 
 from bot import config
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_context import (
     ConfiguredFeatureContext,
     FeatureContextMixin,
@@ -214,7 +215,7 @@ class FeatureChannelBase(
         if message.author.bot or message.guild is None or message.channel is None:
             return None
         return await self._get_feature_manager_context_or_none(
-            guild=message.guild,
+            guild_id=message.guild.id,
             channel_id=message.channel.id,
             require_enabled=True,
         )
@@ -262,7 +263,10 @@ class FeatureChannelBase(
         """
         Upsert registration data for this feature from a message (context menu).
         """
-        self._get_interaction_channel_context(interaction)
+        require_guild_channel_source(
+            interaction,
+            action="upsert feature data from context menu",
+        )
 
         await interaction.response.defer(ephemeral=False)
 
@@ -308,8 +312,11 @@ class FeatureChannelBase(
 
     async def setup_after_enable(self, interaction: Interaction) -> None:
         """Show current settings or prompt to set up if not configured."""
-        interaction_context = self._get_interaction_channel_context(interaction)
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        source = require_guild_channel_source(
+            interaction,
+            action="set up feature settings",
+        )
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             view = self._build_initial_setup_view(manager_context.manager)
@@ -354,15 +361,11 @@ class FeatureChannelBase(
     )
     async def enable(self, interaction: Interaction) -> None:
         """Slash command to enable this feature in the current channel."""
-        if interaction.guild is None or interaction.channel is None:
-            msg = (
-                "Interaction guild or channel is None. "
-                "Cannot proceed with enable command."
-            )
-            raise ValueError(msg)
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        await self._enable_channel(guild_id, channel_id)
+        source = require_guild_channel_source(
+            interaction,
+            action="proceed with enable command",
+        )
+        await self._enable_channel(source.guild.id, source.channel.id)
         await interaction.response.send_message(
             f"Feature {self.feature_display_name} enabled in this channel.",
             ephemeral=True,
@@ -375,15 +378,11 @@ class FeatureChannelBase(
     )
     async def disable(self, interaction: Interaction) -> None:
         """Slash command to disable this feature in the current channel."""
-        if interaction.guild is None or interaction.channel is None:
-            msg = (
-                "Interaction guild or channel is None. "
-                "Cannot proceed with disable command."
-            )
-            raise ValueError(msg)
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        result = await self._disable_channel(guild_id, channel_id)
+        source = require_guild_channel_source(
+            interaction,
+            action="proceed with disable command",
+        )
+        result = await self._disable_channel(source.guild.id, source.channel.id)
         msg = (
             f"Feature {self.feature_display_name} disabled in this channel."
             if result
@@ -403,12 +402,10 @@ class FeatureChannelBase(
         Slash command to disable this feature and permanently clear all bot
         feature settings for this feature in the current channel.
         """
-        if interaction.guild is None or interaction.channel is None:
-            msg = (
-                "Interaction guild or channel is None. "
-                "Cannot proceed with disable and clear command."
-            )
-            raise ValueError(msg)
+        source = require_guild_channel_source(
+            interaction,
+            action="proceed with disable and clear command",
+        )
         view = DisableAndClearConfirmView()
         await interaction.response.send_message(
             f"Are you sure you want to disable and clear all settings for feature "
@@ -419,9 +416,7 @@ class FeatureChannelBase(
         # Wait for user interaction
         await view.wait()
         if view.value:
-            guild_id = interaction.guild.id
-            channel_id = interaction.channel.id
-            await self._clear_feature_settings(guild_id, channel_id)
+            await self._clear_feature_settings(source.guild.id, source.channel.id)
             await interaction.followup.send(
                 f"Feature {self.feature_display_name} has been disabled and all bot "
                 f"settings for this feature in this channel have been permanently "
@@ -446,8 +441,11 @@ class FeatureChannelBase(
         """
         await interaction.response.defer(ephemeral=False)
 
-        interaction_context = self._get_interaction_channel_context(interaction)
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        source = require_guild_channel_source(
+            interaction,
+            action="show feature help",
+        )
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             await self._send_missing_config_followup(interaction)
@@ -586,14 +584,14 @@ class FeatureChannelBase(
         """
 
         async def predicate(ctx: commands.Context) -> bool:
-            if ctx.guild is None or ctx.channel is None:
-                msg = (
-                    f"Context guild or channel is None. "
-                    f"Cannot check feature status for feature: {feature_name}."
-                )
-                raise ValueError(msg)
+            source = require_guild_channel_source(
+                ctx,
+                action=f"check feature status for feature: {feature_name}",
+            )
             if not await FeatureChannelBase.is_enabled(
-                ctx.guild.id, ctx.channel.id, feature_name
+                source.guild.id,
+                source.channel.id,
+                feature_name,
             ):
                 raise FeatureNotEnabled(feature_display_name)
             return True
@@ -617,14 +615,14 @@ class FeatureChannelBase(
         """
 
         async def predicate(interaction: Interaction) -> bool:
-            if interaction.guild is None or interaction.channel is None:
-                msg = (
-                    f"Interaction guild or channel is None. "
-                    f"Cannot check feature status for feature: {feature_name}."
-                )
-                raise ValueError(msg)
+            source = require_guild_channel_source(
+                interaction,
+                action=f"check feature status for feature: {feature_name}",
+            )
             if not await FeatureChannelBase.is_enabled(
-                interaction.guild.id, interaction.channel.id, feature_name
+                source.guild.id,
+                source.channel.id,
+                feature_name,
             ):
                 raise FeatureNotEnabled(feature_display_name)
             return True
@@ -675,7 +673,10 @@ class FeatureChannelUserBase(
         """
         Delete the user's data for this feature in this channel.
         """
-        interaction_context = self._get_interaction_channel_context(interaction)
+        source = require_guild_channel_source(
+            interaction,
+            action="delete feature user data",
+        )
 
         await interaction.response.defer(ephemeral=True)
 
@@ -684,7 +685,7 @@ class FeatureChannelUserBase(
             display_name=interaction.user.display_name,
         )
 
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             await self._send_missing_config_followup(interaction)
@@ -727,8 +728,11 @@ class FeatureChannelUserBase(
 
         await interaction.response.defer(ephemeral=True)
 
-        interaction_context = self._get_interaction_channel_context(interaction)
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        source = require_guild_channel_source(
+            interaction,
+            action="send feature help message",
+        )
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             await self._send_missing_config_followup(interaction)

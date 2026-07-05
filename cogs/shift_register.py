@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, override
 from discord import app_commands
 
 from bot import config
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     _send_public_announcement_followups,
@@ -173,8 +174,11 @@ class ShiftRegister(
     async def info(self, interaction: Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
 
-        interaction_context = self._get_interaction_channel_context(interaction)
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        source = require_guild_channel_source(
+            interaction,
+            action="show shift info",
+        )
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             await self._send_missing_config_followup(interaction)

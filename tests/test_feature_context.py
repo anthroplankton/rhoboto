@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_context import (
     FeatureContextMixin,
     MessageParseResult,
@@ -33,32 +34,6 @@ async def fake_feature_channel_get(
     )
 
 
-def test_interaction_channel_context_extracts_ids() -> None:
-    interaction = FakeInteraction()
-    subject = ContextSubject()
-
-    context = subject._get_interaction_channel_context(interaction)
-
-    assert context.guild is interaction.guild
-    assert context.guild_id == 111
-    assert context.channel_id == 222
-
-
-@pytest.mark.parametrize("missing_attr", ["guild", "channel"])
-def test_interaction_channel_context_missing_dependency_raises_shared_error(
-    missing_attr: str,
-) -> None:
-    interaction = FakeInteraction()
-    setattr(interaction, missing_attr, None)
-    subject = ContextSubject()
-
-    with pytest.raises(
-        ValueError,
-        match="Cannot proceed without an interaction channel and guild.",
-    ):
-        subject._get_interaction_channel_context(interaction)
-
-
 @pytest.mark.asyncio
 async def test_feature_manager_context_uses_manager_type(
     monkeypatch: pytest.MonkeyPatch,
@@ -66,13 +41,16 @@ async def test_feature_manager_context_uses_manager_type(
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
     subject = ContextSubject()
-    interaction_context = subject._get_interaction_channel_context(interaction)
+    source = require_guild_channel_source(
+        interaction,
+        action="inspect feature context",
+    )
 
-    context = await subject._get_feature_manager_context(interaction_context)
+    context = await subject._get_feature_manager_context(source)
 
-    assert context.guild is interaction.guild
     assert context.guild_id == 111
     assert context.channel_id == 222
+    assert not hasattr(context, "guild")
     assert context.feature_channel.feature_name == "team_register"
     assert isinstance(context.manager, ConfiguredManager)
     assert context.manager.feature_channel is context.feature_channel
@@ -85,13 +63,20 @@ async def test_configured_feature_context_returns_feature_config_without_followu
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
     subject = ContextSubject()
+    source = require_guild_channel_source(
+        interaction,
+        action="inspect feature context",
+    )
     manager_context = await subject._get_feature_manager_context(
-        subject._get_interaction_channel_context(interaction)
+        source,
     )
 
     context = await subject._get_configured_feature_context(manager_context)
 
     assert context is not None
+    assert context.guild_id == 111
+    assert context.channel_id == 222
+    assert not hasattr(context, "guild")
     assert context.feature_config.sheet_url == "https://sheet.example"
     assert not hasattr(context, "sheet_config")
     assert interaction.followup.messages == []
@@ -109,8 +94,12 @@ async def test_configured_feature_context_missing_config_returns_none_without_fo
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
     subject = MissingConfigSubject()
+    source = require_guild_channel_source(
+        interaction,
+        action="inspect feature context",
+    )
     manager_context = await subject._get_feature_manager_context(
-        subject._get_interaction_channel_context(interaction)
+        source,
     )
 
     context = await subject._get_configured_feature_context(manager_context)
@@ -203,21 +192,21 @@ async def test_feature_manager_context_or_none_respects_enabled_requirement(
     subject = ContextSubject()
 
     context = await subject._get_feature_manager_context_or_none(
-        guild=interaction.guild,
+        guild_id=interaction.guild.id,
         channel_id=222,
     )
 
     assert context is not None
-    assert context.guild is interaction.guild
     assert context.guild_id == 111
     assert context.channel_id == 222
+    assert not hasattr(context, "guild")
     assert context.feature_channel is disabled_row
     assert isinstance(context.manager, ConfiguredManager)
     assert context.manager.feature_channel is disabled_row
 
     assert (
         await subject._get_feature_manager_context_or_none(
-            guild=interaction.guild,
+            guild_id=interaction.guild.id,
             channel_id=222,
             require_enabled=True,
         )
@@ -228,7 +217,7 @@ async def test_feature_manager_context_or_none_respects_enabled_requirement(
 
     assert (
         await subject._get_feature_manager_context_or_none(
-            guild=interaction.guild,
+            guild_id=interaction.guild.id,
             channel_id=222,
         )
         is None

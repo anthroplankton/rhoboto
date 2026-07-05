@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, override
 from discord import Interaction, Member, Message, app_commands
 
 from bot import config
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import FeatureChannelBase
 from cogs.base.feature_context import ConfiguredFeatureContext, MessageParseResult
 from components.ui_google_sheets_errors import send_google_sheets_error
@@ -148,11 +149,15 @@ class TeamRegister(
         )
     )
     async def summary(self, interaction: Interaction) -> None:
-        interaction_context = self._get_interaction_channel_context(interaction)
+        source = require_guild_channel_source(
+            interaction,
+            action="refresh team summary",
+        )
+        member_by_names = {member.name: member for member in source.guild.members}
 
         await interaction.response.defer(ephemeral=True)
 
-        manager_context = await self._get_feature_manager_context(interaction_context)
+        manager_context = await self._get_feature_manager_context(source)
         context = await self._get_configured_feature_context(manager_context)
         if context is None:
             await self._send_missing_config_followup(interaction)
@@ -172,7 +177,7 @@ class TeamRegister(
 
                 summary_df = await context.manager.refresh_summary_worksheet(
                     metadata,
-                    member_by_names={m.name: m for m in context.guild.members},
+                    member_by_names=member_by_names,
                 )
             except GoogleSheetsError as exc:
                 await send_google_sheets_error(interaction, exc)

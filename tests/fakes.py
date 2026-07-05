@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 MISSING_CONTENT: object = object()
+DEFAULT_FAKE_CONTEXT_VALUE: object = object()
 
 
 class FakeDiscordResponse:
@@ -56,10 +57,15 @@ class FakePermissions:
 
 class FakeGuild:
     def __init__(
-        self, *, guild_id: int = 111, roles: list[object] | None = None
+        self,
+        *,
+        guild_id: int = 111,
+        roles: list[object] | None = None,
+        members: list[object] | None = None,
     ) -> None:
         self.id = guild_id
         self.roles = roles or []
+        self.members = members or []
 
     def get_role(self, role_id: int) -> object | None:
         return next((role for role in self.roles if role.id == role_id), None)
@@ -88,6 +94,24 @@ class FakeInteraction:
         self.locale = SimpleNamespace(value=locale)
         self.response = FakeDiscordResponse()
         self.followup = FakeDiscordFollowup()
+
+
+class FakeContext:
+    def __init__(
+        self,
+        *,
+        guild: object | None = DEFAULT_FAKE_CONTEXT_VALUE,
+        channel: object | None = DEFAULT_FAKE_CONTEXT_VALUE,
+        roles: list[object] | None = None,
+    ) -> None:
+        self.guild = (
+            FakeGuild(roles=roles) if guild is DEFAULT_FAKE_CONTEXT_VALUE else guild
+        )
+        self.channel = (
+            SimpleNamespace(id=222)
+            if channel is DEFAULT_FAKE_CONTEXT_VALUE
+            else channel
+        )
 
 
 class ConfiguredManager:
