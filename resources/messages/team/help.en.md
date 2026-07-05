@@ -21,4 +21,4 @@ Example:
 > -# {{ bot }} treats that message as the latest data and **overwrites all previous team registrations**. Teams not included in the new message will be cleared.
 > -# Editing an old message does not update your registration.
 
-After registration, {{ bot }} will automatically process your teams and record the results in [Google Sheets]({{ sheet_url }}) for you to view and confirm.
+After registration, {{ bot }} will automatically process your teams. A ✅ means the result was recorded in [Google Sheets]({{ sheet_url }}) for you to view and confirm. If ⚠️ appears on your message, the registration may not have completed successfully.

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 from abc import ABCMeta, abstractmethod
+from dataclasses import dataclass
+from enum import Enum, auto
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from discord import Interaction, Message, app_commands
@@ -53,6 +55,38 @@ TManager = TypeVar("TManager", bound=ManagerBase)
 TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
 TSubmission = TypeVar("TSubmission")
 TUpsertResult = TypeVar("TUpsertResult")
+
+
+class _MessageUpsertStatus(Enum):
+    IGNORED = auto()
+    INVALID = auto()
+    MISSING_CONFIG = auto()
+    PROCESSED = auto()
+
+
+@dataclass(frozen=True)
+class _MessageUpsertOutcome(Generic[TUpsertResult]):
+    status: _MessageUpsertStatus
+    result: TUpsertResult | None = None
+
+    @classmethod
+    def ignored(cls) -> _MessageUpsertOutcome[TUpsertResult]:
+        return cls(status=_MessageUpsertStatus.IGNORED)
+
+    @classmethod
+    def invalid(cls) -> _MessageUpsertOutcome[TUpsertResult]:
+        return cls(status=_MessageUpsertStatus.INVALID)
+
+    @classmethod
+    def missing_config(cls) -> _MessageUpsertOutcome[TUpsertResult]:
+        return cls(status=_MessageUpsertStatus.MISSING_CONFIG)
+
+    @classmethod
+    def processed(
+        cls,
+        result: TUpsertResult | None,
+    ) -> _MessageUpsertOutcome[TUpsertResult]:
+        return cls(status=_MessageUpsertStatus.PROCESSED, result=result)
 
 
 async def _send_public_announcement_followups(
@@ -166,25 +200,24 @@ class FeatureChannelBase(
         Args:
             message (Message): The Discord message to process.
         """
+        outcome = await self._process_upsert_from_message_with_outcome(message)
+        return outcome.result
+
+    async def _process_upsert_from_message_with_outcome(
+        self,
+        message: Message,
+    ) -> _MessageUpsertOutcome[TUpsertResult]:
         feature_channel_context = (
             await self._get_message_feature_channel_context_or_none(message)
         )
         if feature_channel_context is None:
-            return None
+            return _MessageUpsertOutcome.ignored()
 
         self._log_received_message(message)
 
         parse_result = await self._parse_message_submission(message)
         if parse_result.status is MessageParseStatus.IGNORED:
-            return None
-
-        if parse_result.status is MessageParseStatus.INVALID:
-            await add_reaction_if_possible(
-                message,
-                config.CONFUSED_EMOJI,
-                log=self.logger,
-            )
-            return None
+            return _MessageUpsertOutcome.ignored()
 
         context = await self._get_configured_feature_channel_context(
             feature_channel_context
@@ -197,18 +230,23 @@ class FeatureChannelBase(
                 feature_channel_context.guild_id,
                 feature_channel_context.channel_id,
             )
-            return None
+            return _MessageUpsertOutcome.missing_config()
+
+        if parse_result.status is MessageParseStatus.INVALID:
+            await self._add_invalid_registration_reactions(message)
+            return _MessageUpsertOutcome.invalid()
 
         if parse_result.submission is None or parse_result.user_info is None:
             msg = "Parsed message result is missing submission or user info."
             raise ValueError(msg)
 
-        return await self._process_configured_message_submission(
+        result = await self._process_configured_message_submission(
             message,
             context,
             parse_result.submission,
             parse_result.user_info,
         )
+        return _MessageUpsertOutcome.processed(result)
 
     async def _get_message_feature_channel_context_or_none(
         self,
@@ -258,6 +296,18 @@ class FeatureChannelBase(
             message.content,
         )
 
+    async def _add_invalid_registration_reactions(self, message: Message) -> None:
+        await add_reaction_if_possible(
+            message,
+            config.WARNING_EMOJI,
+            log=self.logger,
+        )
+        await add_reaction_if_possible(
+            message,
+            config.CONFUSED_EMOJI,
+            log=self.logger,
+        )
+
     @app_commands.default_permissions(administrator=True, manage_channels=True)
     async def upsert_from_content_menu(
         self, interaction: Interaction, message: Message
@@ -270,10 +320,10 @@ class FeatureChannelBase(
             action="upsert feature data from context menu",
         )
 
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
 
         try:
-            result = await self.process_upsert_from_message(message)
+            outcome = await self._process_upsert_from_message_with_outcome(message)
         except GoogleSheetsError as exc:
             logger = getattr(self, "logger", None)
             bot_user = getattr(getattr(self, "bot", None), "user", None)
@@ -283,18 +333,22 @@ class FeatureChannelBase(
                 exc,
                 logger,
             )
-            await send_google_sheets_error(interaction, exc, ephemeral=False)
+            await send_google_sheets_error(interaction, exc)
+            return
+
+        if outcome.status is _MessageUpsertStatus.MISSING_CONFIG:
+            await self._send_missing_config_followup(interaction)
             return
 
         content = (
             f"Failed to upsert for {self.feature_display_name}."
-            if result is None
+            if outcome.result is None
             else (
                 f"Upsert for {self.feature_display_name} complete. "
-                f"Data: ```js\n{result}```"
+                f"Data: ```js\n{outcome.result}```"
             )
         )
-        await interaction.followup.send(content, ephemeral=False)
+        await interaction.followup.send(content, ephemeral=True)
 
     @commands.Cog.listener()
     async def on_message(self, message: Message) -> None:

@@ -79,19 +79,30 @@ class DummyManager:
         self.service_account_path = service_account_path
 
 
+class ConfiguredDummyManager(DummyManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            sheet_url="https://sheet.example",
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        )
+
+
+class MissingConfigDummyManager(DummyManager):
+    async def get_sheet_config_or_none(self) -> None:
+        return None
+
+
 def make_subject(feature_name: str) -> SimpleNamespace:
     if feature_name == "team_register":
-        parse_message_submission = getattr(TeamRegister, "_parse_message_submission")
+        parse_message_submission = TeamRegister._parse_message_submission  # noqa: SLF001
         process_configured = (
-            getattr(TeamRegister, "_process_configured_message_submission")
+            TeamRegister._process_configured_message_submission  # noqa: SLF001
         )
         manager_type = TeamRegister.ManagerType
     else:
-        parse_message_submission = (
-            getattr(ShiftRegister, "_parse_message_submission")
-        )
+        parse_message_submission = ShiftRegister._parse_message_submission  # noqa: SLF001
         process_configured = (
-            getattr(ShiftRegister, "_process_configured_message_submission")
+            ShiftRegister._process_configured_message_submission  # noqa: SLF001
         )
         manager_type = ShiftRegister.ManagerType
 
@@ -116,6 +127,8 @@ def make_subject(feature_name: str) -> SimpleNamespace:
         "_get_feature_channel_context_or_none",
         "_get_configured_feature_channel_context",
         "_get_message_feature_channel_context_or_none",
+        "_process_upsert_from_message_with_outcome",
+        "_add_invalid_registration_reactions",
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, MethodType(method, subject))
@@ -138,14 +151,14 @@ async def test_team_message_invalid_attempt_adds_confused_without_sheets(
         "get_or_none",
         fake_enabled_feature_channel_get_or_none,
     )
-    monkeypatch.setattr(TeamRegister, "ManagerType", DummyManager)
+    monkeypatch.setattr(TeamRegister, "ManagerType", ConfiguredDummyManager)
     subject = make_subject("team_register")
     message = FakeMessage("160//600/33")
 
     result = await subject.process_upsert_from_message(message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
 
 
 @pytest.mark.asyncio
@@ -157,14 +170,33 @@ async def test_team_message_strict_mixed_rejects_with_confused(
         "get_or_none",
         fake_enabled_feature_channel_get_or_none,
     )
-    monkeypatch.setattr(TeamRegister, "ManagerType", DummyManager)
+    monkeypatch.setattr(TeamRegister, "ManagerType", ConfiguredDummyManager)
     subject = make_subject("team_register")
     message = FakeMessage("150/740/33.4\n160//600/33")
 
     result = await subject.process_upsert_from_message(message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
+
+
+@pytest.mark.asyncio
+async def test_team_message_invalid_missing_config_stays_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", MissingConfigDummyManager)
+    subject = make_subject("team_register")
+    message = FakeMessage("160//600/33")
+
+    result = await subject.process_upsert_from_message(message)
+
+    assert result is None
+    assert message.added_reactions == []
 
 
 @pytest.mark.asyncio
@@ -195,14 +227,14 @@ async def test_shift_message_invalid_attempt_adds_confused_without_sheets(
         "get_or_none",
         fake_enabled_feature_channel_get_or_none,
     )
-    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredDummyManager)
     subject = make_subject("shift_register")
     message = FakeMessage("18:00-20:00")
 
     result = await subject.process_upsert_from_message(message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
 
 
 @pytest.mark.asyncio
@@ -214,14 +246,33 @@ async def test_shift_message_strict_mixed_rejects_with_confused(
         "get_or_none",
         fake_enabled_feature_channel_get_or_none,
     )
-    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredDummyManager)
     subject = make_subject("shift_register")
     message = FakeMessage("4-12\n18:00-20:00")
 
     result = await subject.process_upsert_from_message(message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
+
+
+@pytest.mark.asyncio
+async def test_shift_message_invalid_missing_config_stays_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", MissingConfigDummyManager)
+    subject = make_subject("shift_register")
+    message = FakeMessage("18:00-20:00")
+
+    result = await subject.process_upsert_from_message(message)
+
+    assert result is None
+    assert message.added_reactions == []
 
 
 @pytest.mark.asyncio
@@ -262,7 +313,7 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
     result = await subject.process_upsert_from_message(message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
 
 
 @pytest.mark.asyncio

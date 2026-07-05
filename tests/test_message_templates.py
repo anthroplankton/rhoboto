@@ -208,3 +208,48 @@ def test_help_templates_render_jinja_values(key: str, locale: str) -> None:
     assert "https://docs.google.com/spreadsheets/d/example" in content
     assert "{bot}" not in content
     assert "{sheet_url}" not in content
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected"),
+    [
+        (
+            "ja",
+            (
+                "成功すると ✅ を付けて結果を "
+                "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
+                "に記録します。⚠️ が付いた場合は、登録が正常に完了していない"
+                "可能性があります。"
+            ),
+        ),
+        (
+            "zh_tw",
+            (
+                "成功時會加上 ✅，並將結果記錄在 "  # noqa: RUF001
+                "[Google Sheets](https://docs.google.com/spreadsheets/d/example)"
+                "，提供查看與確認。若訊息上出現 ⚠️，代表登記可能沒有正常完成。"  # noqa: RUF001
+            ),
+        ),
+        (
+            "en",
+            (
+                "A ✅ means the result was recorded in "
+                "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
+                "for you to view and confirm. If ⚠️ appears on your message, "
+                "the registration may not have completed successfully."
+            ),
+        ),
+    ],
+)
+def test_team_help_describes_registration_reactions(
+    locale: str,
+    expected: str,
+) -> None:
+    content = render_message_template(
+        "team.help",
+        locale,
+        bot="@Rhoboto",
+        sheet_url="https://docs.google.com/spreadsheets/d/example",
+    )
+
+    assert expected in content

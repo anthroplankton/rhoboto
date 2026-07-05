@@ -237,14 +237,24 @@ class RecordingMessageSubject(FeatureChannelContextMixin[MessageOrchestrationMan
         self,
         message: object,
     ) -> object | None:
-        get_context = getattr(
-            FeatureChannelBase,
-            "_get_message_feature_channel_context_or_none",
+        get_context = (
+            FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
         )
         return await get_context(self, message)
 
+    async def _process_upsert_from_message_with_outcome(
+        self,
+        message: object,
+    ) -> object:
+        process = FeatureChannelBase._process_upsert_from_message_with_outcome  # noqa: SLF001
+        return await process(self, message)
+
     def _log_received_message(self, message: object) -> None:
         FeatureChannelBase._log_received_message(self, message)  # noqa: SLF001
+
+    async def _add_invalid_registration_reactions(self, message: object) -> None:
+        add_reactions = FeatureChannelBase._add_invalid_registration_reactions  # noqa: SLF001
+        await add_reactions(self, message)
 
     async def _parse_message_submission(
         self,
@@ -543,12 +553,10 @@ async def test_message_processing_helpers_build_context_and_user_info(
     message_user_info = FeatureChannelBase._message_user_info  # noqa: SLF001
     log_received_message = FeatureChannelBase._log_received_message  # noqa: SLF001
 
-    feature_channel_context = (
-        await getattr(
-            FeatureChannelBase,
-            "_get_message_feature_channel_context_or_none",
-        )(subject, message)
+    get_message_context = (
+        FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
     )
+    feature_channel_context = await get_message_context(subject, message)
     user_info = message_user_info(subject, message)
     log_received_message(subject, message)
 
@@ -570,12 +578,10 @@ async def test_message_processing_helper_ignores_bot_messages(
     subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(author_bot=True)
 
-    feature_channel_context = (
-        await getattr(
-            FeatureChannelBase,
-            "_get_message_feature_channel_context_or_none",
-        )(subject, message)
+    get_message_context = (
+        FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
     )
+    feature_channel_context = await get_message_context(subject, message)
 
     assert feature_channel_context is None
 
@@ -596,7 +602,7 @@ async def test_base_message_orchestration_ignored_skips_config_lookup(
 
 
 @pytest.mark.asyncio
-async def test_base_message_orchestration_invalid_adds_confused_without_config_lookup(
+async def test_base_message_orchestration_invalid_configured_adds_warning_then_confused(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
@@ -607,7 +613,24 @@ async def test_base_message_orchestration_invalid_adds_confused_without_config_l
     result = await FeatureChannelBase.process_upsert_from_message(subject, message)
 
     assert result is None
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
+    assert subject.configured_calls == []
+
+
+@pytest.mark.asyncio
+async def test_base_message_orchestration_invalid_missing_config_stays_silent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    user_info = UserInfo(username="alice", display_name="Alice")
+    subject = RecordingMessageSubject(MessageParseResult.invalid(user_info=user_info))
+    subject.ManagerType = MissingMessageConfigManager
+    message = FakeRegisterMessage(content="160//600/33")
+
+    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+
+    assert result is None
+    assert message.added_reactions == []
     assert subject.configured_calls == []
 
 
@@ -717,7 +740,7 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
-        process_upsert_from_message=raise_google_sheets_error,
+        _process_upsert_from_message_with_outcome=raise_google_sheets_error,
         bot=SimpleNamespace(user=bot_user),
         logger=NullLogger(),
     )
@@ -728,12 +751,12 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
         message,
     )
 
-    assert interaction.response.deferred == [False]
+    assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
             "Google Sheets could not complete this action. "
             "Google Sheets is rate-limiting requests. Try again later.",
-            {"ephemeral": False},
+            {"ephemeral": True},
         )
     ]
     assert message.removed_reactions == [
@@ -750,23 +773,26 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
 async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     message = FakeMessage()
 
-    async def process_invalid_attempt(message: FakeMessage) -> None:
+    async def process_invalid_attempt(message: FakeMessage) -> object:
+        await message.add_reaction(config.WARNING_EMOJI)
         await message.add_reaction(config.CONFUSED_EMOJI)
+        return feature_channel_base._MessageUpsertOutcome.invalid()  # noqa: SLF001
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        process_upsert_from_message=process_invalid_attempt,
+        _process_upsert_from_message_with_outcome=process_invalid_attempt,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
 
     await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
 
-    assert message.added_reactions == [config.CONFUSED_EMOJI]
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
+    assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": False})
+        ("Failed to upsert for Team Register.", {"ephemeral": True})
     ]
 
 
@@ -774,23 +800,24 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
 async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> None:
     message = FakeMessage()
 
-    async def process_ordinary_text(_message: FakeMessage) -> None:
-        return None
+    async def process_ordinary_text(_message: FakeMessage) -> object:
+        return feature_channel_base._MessageUpsertOutcome.ignored()  # noqa: SLF001
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        process_upsert_from_message=process_ordinary_text,
+        _process_upsert_from_message_with_outcome=process_ordinary_text,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
 
     await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
 
+    assert interaction.response.deferred == [True]
     assert message.added_reactions == []
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": False})
+        ("Failed to upsert for Team Register.", {"ephemeral": True})
     ]
 
 
@@ -798,25 +825,52 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
 async def test_context_menu_success_followup_uses_feature_display_name() -> None:
     message = FakeMessage()
 
-    async def process_valid_text(_message: FakeMessage) -> str:
-        return "{'ok': true}"
+    async def process_valid_text(_message: FakeMessage) -> object:
+        return feature_channel_base._MessageUpsertOutcome.processed(  # noqa: SLF001
+            "{'ok': true}"
+        )
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        process_upsert_from_message=process_valid_text,
+        _process_upsert_from_message_with_outcome=process_valid_text,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
 
     await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
 
+    assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
             "Upsert for Team Register complete. Data: ```js\n{'ok': true}```",
-            {"ephemeral": False},
+            {"ephemeral": True},
         )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_menu_missing_config_reports_private_clear_message() -> None:
+    message = FakeMessage()
+
+    async def process_missing_config(_message: FakeMessage) -> object:
+        return feature_channel_base._MessageUpsertOutcome.missing_config()  # noqa: SLF001
+
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _process_upsert_from_message_with_outcome=process_missing_config,
+        bot=SimpleNamespace(user=object()),
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages == [
+        ("Team Register is not configured for this channel.", {"ephemeral": True})
     ]
 
 

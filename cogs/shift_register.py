@@ -92,11 +92,7 @@ class ShiftRegister(
             getattr(context.feature_config, "recruitment_time_ranges", None)
         )
         if not recruitment_ranges.contains_slots(set(shift)):
-            await add_reaction_if_possible(
-                message,
-                config.CONFUSED_EMOJI,
-                log=self.logger,
-            )
+            await self._add_invalid_registration_reactions(message)
             return None
 
         return await self._write_shift_registration(
