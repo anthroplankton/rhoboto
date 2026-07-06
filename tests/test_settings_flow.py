@@ -4,6 +4,7 @@ import pytest
 from discord import Embed
 from discord.ui import Button, View
 
+import components.ui_settings_flow as settings_flow
 from components.ui_settings_flow import (
     SETTINGS_VIEW_TIMEOUT_SECONDS,
     SettingsPanel,
@@ -88,6 +89,12 @@ def test_settings_timeout_view_uses_shared_timeout() -> None:
 
     assert view.timeout == SETTINGS_VIEW_TIMEOUT_SECONDS
     assert SETTINGS_VIEW_TIMEOUT_SECONDS == 180.0
+
+
+def test_settings_flow_keeps_single_partial_success_helper() -> None:
+    assert hasattr(settings_flow, "send_settings_partial_success")
+    assert not hasattr(settings_flow, "send_settings_setup_save_error")
+    assert not hasattr(settings_flow, "_classify_settings_storage_error")
 
 
 @pytest.mark.asyncio

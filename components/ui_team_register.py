@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools as it
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -9,19 +10,21 @@ from discord import ButtonStyle, Embed, Interaction, Object, Role, TextStyle
 from discord.ui import Button, Modal, RoleSelect, TextInput
 
 from bot import config
-from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
+    SETTINGS_STORAGE_EXCEPTIONS,
     SettingsPanel,
     SettingsTimeoutView,
     disable_view_items,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_partial_success,
+    send_settings_refresh_failure,
+    send_settings_storage_error,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
 )
-from utils.google_sheets_errors import GoogleSheetsError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -39,6 +42,8 @@ TEAM_REGISTER_DISPLAY_NAME = "Team Register"
 TEAM_REGISTER_CURRENT_CONTROLS = (
     "Use the buttons below to update sheet settings or Encore roles."
 )
+logger = logging.getLogger(__name__)
+TEAM_REGISTER_FEATURE_NAME = "team_register"
 TEAM_REGISTER_SAVED_CONTROLS = (
     "Use the buttons below to edit sheet settings or Encore roles."
 )
@@ -193,7 +198,17 @@ async def get_fresh_team_register_config_or_respond(
     team_register_manager: TeamRegisterManager,
     interaction: Interaction,
 ) -> object | None:
-    team_register = await team_register_manager.get_fresh_sheet_config()
+    try:
+        team_register = await team_register_manager.get_fresh_sheet_config()
+    except SETTINGS_STORAGE_EXCEPTIONS as exc:
+        await send_settings_storage_error(
+            interaction,
+            exc,
+            operation="team_register_settings_fetch_config",
+            feature_name=TEAM_REGISTER_FEATURE_NAME,
+            log=logger,
+        )
+        return None
     if team_register is None:
         await send_settings_missing(interaction)
         return None
@@ -321,19 +336,45 @@ class TeamRegisterSheetModal(Modal):
                     summary_worksheet_title=summary_worksheet_title,
                 )
             )
-            team_register = await self.team_register_manager.get_sheet_config()
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_partial_success(
+                interaction,
+                exc,
+                operation="team_register_setup",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
             return
 
-        panel = await build_team_register_settings_panel(
-            self.team_register_manager,
-            interaction,
-            team_register,
-            is_save_action=True,
-            metadata=metadata,
-        )
+        try:
+            team_register = await self.team_register_manager.get_sheet_config()
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_partial_success(
+                interaction,
+                exc,
+                operation="team_register_setup_refresh_config",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
 
+        try:
+            panel = await build_team_register_settings_panel(
+                self.team_register_manager,
+                interaction,
+                team_register,
+                is_save_action=True,
+                metadata=metadata,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="team_register_setup_refresh_panel",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         await send_current_panel_followup(interaction, panel)
 
 
@@ -373,8 +414,10 @@ class TeamRegisterButton(Button):
             handled = await send_stale_setup_panel_if_configured(
                 interaction,
                 self.team_register_manager,
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
                 feature_display_name=TEAM_REGISTER_DISPLAY_NAME,
                 build_current_panel=build_current_panel,
+                log=logger,
             )
             if handled:
                 return
@@ -641,21 +684,30 @@ class ConfirmEncoreRolesButton(Button):
         )
         if team_register is None:
             return
-        await view.team_register_manager.update_encore_role_ids_record(role_ids)
+        try:
+            await view.team_register_manager.update_encore_role_ids_record(role_ids)
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="team_register_encore_roles_save",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
 
         roles = list(interaction.guild.roles) if interaction.guild else []
         try:
             metadata = await view.team_register_manager.fetch_google_sheets_metadata()
-        except GoogleSheetsError as exc:
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
             view.stop()
-            await interaction.response.edit_message(
-                content=(
-                    "Encore roles saved, but the settings view could not be "
-                    f"refreshed. Google Sheets could not complete this action. "
-                    f"{exc.user_message}"
-                ),
-                embed=None,
-                view=None,
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="team_register_encore_roles_refresh",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+                clear_current_message=True,
             )
             return
 

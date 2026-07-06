@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from types import SimpleNamespace
 
 import pytest
 from discord import ButtonStyle
+from tortoise.exceptions import DBConnectionError, IntegrityError
 
 from components.ui_feature_channel import DisableAndClearConfirmView
+from components.ui_language_settings import AnnouncementLanguageSettingsView
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
 from components.ui_settings_flow import (
     SETTINGS_VIEW_TIMEOUT_SECONDS,
@@ -42,6 +45,10 @@ class RecordingTeamRegisterManager:
         self.config_exists = True
         self.sheet_url = "https://sheet.example"
         self.metadata = team_register_metadata()
+        self.upsert_error: Exception | None = None
+        self.save_error: Exception | None = None
+        self.fresh_config_error: Exception | None = None
+        self.refresh_error: Exception | None = None
         self.metadata_error: GoogleSheetsError | None = None
 
     async def upsert_sheet_config_and_worksheets(
@@ -51,6 +58,8 @@ class RecordingTeamRegisterManager:
         team_worksheet_titles: list[str],
         summary_worksheet_title: str,
     ) -> SimpleNamespace:
+        if self.upsert_error is not None:
+            raise self.upsert_error
         self.config_exists = True
         self.upsert_calls.append(
             {
@@ -65,6 +74,8 @@ class RecordingTeamRegisterManager:
         )
 
     async def get_sheet_config(self) -> SimpleNamespace:
+        if self.fresh_config_error is not None:
+            raise self.fresh_config_error
         if not self.config_exists:
             msg = "Sheet configuration not found."
             raise RuntimeError(msg)
@@ -74,11 +85,15 @@ class RecordingTeamRegisterManager:
         )
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace | None:
+        if self.fresh_config_error is not None:
+            raise self.fresh_config_error
         if not self.config_exists:
             return None
         return await self.get_sheet_config()
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        if self.refresh_error is not None:
+            raise self.refresh_error
         if self.metadata_error is not None:
             raise self.metadata_error
         return self.metadata
@@ -87,6 +102,8 @@ class RecordingTeamRegisterManager:
         self.encore_role_updates.append(roles)
 
     async def update_encore_role_ids_record(self, role_ids: list[int]) -> None:
+        if self.save_error is not None:
+            raise self.save_error
         self.encore_role_id_updates.append(role_ids)
         self.encore_role_ids = role_ids
 
@@ -112,6 +129,10 @@ class RecordingShiftRegisterManager:
             draft_worksheet=SimpleNamespace(title="Draft", id=102),
             final_schedule_worksheet=SimpleNamespace(title="Final", id=103),
         )
+        self.upsert_error: Exception | None = None
+        self.save_error: Exception | None = None
+        self.fresh_config_error: Exception | None = None
+        self.refresh_error: Exception | None = None
         self.metadata_error: GoogleSheetsError | None = None
 
     async def upsert_sheet_config_and_worksheets(
@@ -122,6 +143,8 @@ class RecordingShiftRegisterManager:
         draft_worksheet_title: str,
         final_schedule_worksheet_title: str,
     ) -> SimpleNamespace:
+        if self.upsert_error is not None:
+            raise self.upsert_error
         self.upsert_calls.append(
             {
                 "sheet_url": sheet_url,
@@ -137,6 +160,8 @@ class RecordingShiftRegisterManager:
         )
 
     async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
+        if self.save_error is not None:
+            raise self.save_error
         self.anchor_updates.append(anchor_cell)
 
     async def update_timeline(
@@ -148,6 +173,8 @@ class RecordingShiftRegisterManager:
         draft_shift_proposal_at: dt.datetime | None,
         final_shift_notice_at: dt.datetime | None,
     ) -> None:
+        if self.save_error is not None:
+            raise self.save_error
         self.timeline_updates.append(
             {
                 "day_number": day_number,
@@ -164,10 +191,14 @@ class RecordingShiftRegisterManager:
         self.final_shift_notice_at = final_shift_notice_at
 
     async def update_recruitment_time_ranges(self, ranges: object) -> None:
+        if self.save_error is not None:
+            raise self.save_error
         self.recruitment_range_updates.append(ranges)
         self.recruitment_time_ranges = ranges.to_json()
 
     async def get_sheet_config(self) -> SimpleNamespace:
+        if self.fresh_config_error is not None:
+            raise self.fresh_config_error
         if not self.config_exists:
             msg = "Sheet configuration not found."
             raise RuntimeError(msg)
@@ -187,11 +218,15 @@ class RecordingShiftRegisterManager:
         )
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace | None:
+        if self.fresh_config_error is not None:
+            raise self.fresh_config_error
         if not self.config_exists:
             return None
         return await self.get_sheet_config()
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        if self.refresh_error is not None:
+            raise self.refresh_error
         if self.metadata_error is not None:
             raise self.metadata_error
         return self.metadata
@@ -229,12 +264,45 @@ def assert_permission_denied(interaction: FakeInteraction) -> None:
     ]
 
 
+def assert_no_private_storage_terms(content: str) -> None:
+    assert "database" not in content.lower()
+    assert "service account" not in content.lower()
+    assert "credential" not in content.lower()
+
+
+def assert_safe_settings_storage_message(content: str) -> None:
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+
+
 class FakeMessage:
     def __init__(self) -> None:
         self.edits: list[tuple[tuple[object, ...], dict[str, object]]] = []
 
     async def edit(self, *args: object, **kwargs: object) -> None:
         self.edits.append((args, kwargs))
+
+
+class FirstSendTimeoutFollowup:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages: list[tuple[str | None, dict[str, object]]] = []
+        self.sent_message_objects: list[SimpleNamespace] = []
+
+    async def send(
+        self,
+        content: str | None = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        self.calls += 1
+        if self.calls == 1:
+            message = "discord delivery timeout"
+            raise TimeoutError(message)
+        self.messages.append((content, kwargs))
+        message = SimpleNamespace()
+        self.sent_message_objects.append(message)
+        return message
 
 
 def team_register_metadata() -> SimpleNamespace:
@@ -320,6 +388,43 @@ async def test_team_setup_button_with_existing_config_sends_current_panel() -> N
 
 
 @pytest.mark.asyncio
+async def test_team_setup_button_defer_timeout_is_not_storage_error() -> None:
+    async def raise_timeout(**_: object) -> None:
+        message = "discord delivery timeout"
+        raise TimeoutError(message)
+
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    interaction.response.defer = raise_timeout
+    button = TeamRegisterButton("Set Up Team Register", manager)
+
+    with pytest.raises(TimeoutError, match="discord delivery timeout"):
+        await button.callback(interaction)
+
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_team_setup_button_existing_config_storage_error_sends_safe_message() -> (
+    None
+):
+    manager = RecordingTeamRegisterManager()
+    manager.fresh_config_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    button = TeamRegisterButton("Set Up Team Register", manager)
+
+    await button.callback(interaction)
+
+    assert interaction.response.modals == []
+    assert interaction.followup.messages == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert_safe_settings_storage_message(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_team_edit_settings_button_uses_fresh_missing_settings_guard() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
@@ -339,6 +444,28 @@ async def test_team_edit_settings_button_uses_fresh_missing_settings_guard() -> 
         )
     ]
     assert interaction.response.modals == []
+
+
+@pytest.mark.asyncio
+async def test_team_edit_settings_button_storage_error_sends_safe_message() -> None:
+    manager = RecordingTeamRegisterManager()
+    manager.fresh_config_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+    )
+
+    await child_with_label(view, "Edit Team Register Settings").callback(interaction)
+
+    assert interaction.response.modals == []
+    assert interaction.response.edits == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert_safe_settings_storage_message(content)
+    assert kwargs == {"ephemeral": True}
 
 
 def test_team_existing_settings_view_buttons_use_secondary_style() -> None:
@@ -485,6 +612,26 @@ async def test_team_setup_modal_submit_can_create_missing_settings() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_setup_modal_panel_delivery_timeout_is_not_storage_error() -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    interaction.followup = FirstSendTimeoutFollowup()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    with pytest.raises(TimeoutError, match="discord delivery timeout"):
+        await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(manager.upsert_calls) == 1
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
 async def test_team_edit_modal_submit_uses_fresh_missing_settings_guard() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
@@ -510,7 +657,7 @@ async def test_team_edit_modal_submit_uses_fresh_missing_settings_guard() -> Non
 
 
 @pytest.mark.asyncio
-async def test_team_modal_submit_reports_google_sheets_error_safely() -> None:
+async def test_team_setup_modal_reports_partial_success_for_sheet_save_error() -> None:
     manager = FailingTeamRegisterManager()
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
@@ -523,14 +670,67 @@ async def test_team_modal_submit_reports_google_sheets_error_safely() -> None:
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
-    assert interaction.followup.messages == [
-        (
-            "Google Sheets could not complete this action. "
-            "Check the sheet sharing settings and service account access.",
-            {"ephemeral": True},
-        )
-    ]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
     assert "private.sheet.example" not in str(interaction.followup.messages)
+
+
+@pytest.mark.asyncio
+async def test_team_setup_modal_reports_partial_success_when_initial_save_fails() -> (
+    None
+):
+    manager = RecordingTeamRegisterManager()
+    manager.upsert_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_team_setup_modal_reports_partial_success_when_config_refresh_fails() -> (
+    None
+):
+    manager = RecordingTeamRegisterManager()
+    manager.fresh_config_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(manager.upsert_calls) == 1
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -862,7 +1062,7 @@ async def test_encore_role_confirm_reports_saved_when_metadata_refresh_fails() -
     manager = RecordingTeamRegisterManager()
     role = FakeRole(id=1, name="Encore", position=10)
     interaction = FakeInteraction(roles=[role])
-    manager.metadata_error = GoogleSheetsError(
+    manager.refresh_error = GoogleSheetsError(
         GoogleSheetsErrorKind.PERMISSION,
         "Check the sheet sharing settings and service account access.",
     )
@@ -877,14 +1077,67 @@ async def test_encore_role_confirm_reports_saved_when_metadata_refresh_fails() -
 
     assert manager.encore_role_id_updates == [[1]]
     assert view.is_finished()
-    assert interaction.response.edits == [
-        (
-            "Encore roles saved, but the settings view could not be refreshed. "
-            "Google Sheets could not complete this action. "
-            "Check the sheet sharing settings and service account access.",
-            {"embed": None, "view": None},
-        )
-    ]
+    assert len(interaction.response.edits) == 1
+    content, edit_kwargs = interaction.response.edits[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "settings view could not be refreshed" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert edit_kwargs == {"embed": None, "view": None}
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_refresh_failure_logs_storage_fields_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    manager.refresh_error = DBConnectionError("private database host")
+    caplog.set_level(logging.WARNING, logger="components.ui_team_register")
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+    )
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    content, _edit_kwargs = interaction.response.edits[0]
+    assert content is not None
+    assert content.count("Some changes may have been saved") == 1
+    assert "settings view could not be refreshed" in content
+    assert "Reference: `STG-" in content
+    assert "partial_success" in caplog.text
+    assert "private database host" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_reports_storage_error_when_save_fails() -> None:
+    manager = RecordingTeamRegisterManager()
+    manager.save_error = DBConnectionError("private database host")
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+    )
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    assert manager.encore_role_id_updates == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert "Some changes may have been saved" not in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1275,6 +1528,24 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
 
 
 @pytest.mark.asyncio
+async def test_shift_setup_button_storage_error_sends_safe_message() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.fresh_config_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    button = ShiftRegisterButton("Set Up Shift Register", manager)
+
+    await button.callback(interaction)
+
+    assert interaction.response.modals == []
+    assert interaction.followup.messages == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert_safe_settings_storage_message(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_shift_edit_settings_button_uses_fresh_missing_settings_guard() -> None:
     manager = RecordingShiftRegisterManager()
     manager.config_exists = False
@@ -1375,6 +1646,23 @@ async def test_shift_timeline_button_prefills_modal_from_fresh_config() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_timeline_button_storage_error_sends_safe_message() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.fresh_config_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    view = ShiftRegisterView(manager, has_existing_settings=True)
+
+    await child_with_label(view, "Edit Shift Timeline").callback(interaction)
+
+    assert interaction.response.modals == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert_safe_settings_storage_message(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_shift_recruitment_range_button_prefills_modal_from_fresh_config() -> (
     None
 ):
@@ -1467,7 +1755,7 @@ async def test_shift_edit_modal_submit_uses_fresh_missing_settings_guard() -> No
 
 
 @pytest.mark.asyncio
-async def test_shift_modal_submit_reports_google_sheets_error_safely() -> None:
+async def test_shift_setup_modal_reports_partial_success_for_sheet_save_error() -> None:
     manager = FailingShiftRegisterManager()
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
@@ -1483,14 +1771,73 @@ async def test_shift_modal_submit_reports_google_sheets_error_safely() -> None:
 
     assert interaction.response.deferred == [True]
     assert manager.anchor_updates == []
-    assert interaction.followup.messages == [
-        (
-            "Google Sheets could not complete this action. "
-            "Check the Google Sheet link and save the settings again.",
-            {"ephemeral": True},
-        )
-    ]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
     assert "private.sheet.example" not in str(interaction.followup.messages)
+
+
+@pytest.mark.asyncio
+async def test_shift_setup_modal_reports_partial_success_when_initial_save_fails() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    manager.upsert_error = IntegrityError("private constraint")
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.anchor_updates == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_shift_setup_modal_reports_partial_success_when_anchor_save_fails() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    manager.save_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(manager.upsert_calls) == 1
+    assert manager.anchor_updates == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1571,13 +1918,65 @@ async def test_shift_timeline_modal_submit_reports_google_sheets_error_safely() 
 
     assert interaction.response.deferred == [True]
     assert len(manager.timeline_updates) == 1
-    assert interaction.followup.messages == [
-        (
-            "Google Sheets could not complete this action. "
-            "Check the sheet sharing settings and service account access.",
-            {"ephemeral": True},
-        )
-    ]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Some changes may have been saved" in content
+    assert "settings view could not be refreshed" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_saved_panel_delivery_timeout_is_not_storage_error() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    interaction.followup = FirstSendTimeoutFollowup()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+    )
+
+    with pytest.raises(TimeoutError, match="discord delivery timeout"):
+        await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(manager.timeline_updates) == 1
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_modal_submit_reports_storage_save_error() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.save_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.timeline_updates == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1664,6 +2063,26 @@ async def test_shift_recruitment_range_modal_blank_resets_to_default() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_recruitment_range_modal_reports_storage_save_error() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.save_error = DBConnectionError("private database host")
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-8, 8-12")
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.recruitment_range_updates == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_shift_recruitment_range_modal_invalid_sends_edit_again_view() -> None:
     manager = RecordingShiftRegisterManager()
     interaction = FakeInteraction()
@@ -1684,6 +2103,35 @@ async def test_shift_recruitment_range_modal_invalid_sends_edit_again_view() -> 
     await child_with_label(edit_again_view, "Edit Again").callback(retry_interaction)
     assert isinstance(retry_interaction.response.modals[0], ShiftRecruitmentRangeModal)
     assert retry_interaction.response.modals[0].recruitment_time_range.default == "28-4"
+
+
+@pytest.mark.asyncio
+async def test_announcement_language_save_reports_storage_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_save_announcement_languages(*_: object) -> None:
+        message = "private database host"
+        raise DBConnectionError(message)
+
+    monkeypatch.setattr(
+        "components.ui_language_settings.save_announcement_languages",
+        fail_save_announcement_languages,
+    )
+    view = AnnouncementLanguageSettingsView(
+        guild_id=111,
+        language_codes=["ja", "en"],
+    )
+    interaction = FakeInteraction()
+
+    await child_with_label(view, "Save").callback(interaction)
+
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content is not None
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio

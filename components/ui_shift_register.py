@@ -1,22 +1,25 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from discord import ButtonStyle, Embed, Interaction, TextStyle
 from discord.ui import Button, Modal, TextInput
 
 from bot import config
-from components.ui_google_sheets_errors import send_google_sheets_error
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
+    SETTINGS_STORAGE_EXCEPTIONS,
     SettingsPanel,
     SettingsTimeoutView,
     send_current_panel_followup,
+    send_settings_partial_success,
+    send_settings_refresh_failure,
+    send_settings_storage_error,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
 )
-from utils.google_sheets_errors import GoogleSheetsError
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
@@ -49,6 +52,9 @@ SHIFT_REGISTER_SAVED_CONTROLS = SHIFT_REGISTER_CONTROLS
 SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE = (
     "Shift Register settings are no longer configured for this channel."
 )
+SHIFT_REGISTER_FEATURE_NAME = "shift_register"
+
+logger = logging.getLogger(__name__)
 
 
 async def send_shift_settings_missing(interaction: Interaction) -> None:
@@ -62,7 +68,17 @@ async def get_fresh_shift_register_config_or_respond(
     shift_register_manager: ShiftRegisterManager,
     interaction: Interaction,
 ) -> object | None:
-    shift_register = await shift_register_manager.get_fresh_sheet_config()
+    try:
+        shift_register = await shift_register_manager.get_fresh_sheet_config()
+    except SETTINGS_STORAGE_EXCEPTIONS as exc:
+        await send_settings_storage_error(
+            interaction,
+            exc,
+            operation="shift_register_settings_fetch_config",
+            feature_name=SHIFT_REGISTER_FEATURE_NAME,
+            log=logger,
+        )
+        return None
     if shift_register is None:
         await send_shift_settings_missing(interaction)
         return None
@@ -190,15 +206,21 @@ async def _send_saved_shift_register_panel(
     interaction: Interaction,
     shift_register_manager: ShiftRegisterManager,
 ) -> None:
-    shift_register = await shift_register_manager.get_sheet_config()
     try:
+        shift_register = await shift_register_manager.get_sheet_config()
         panel = await build_shift_register_settings_panel(
             shift_register_manager,
             shift_register,
             is_save_action=True,
         )
-    except GoogleSheetsError as exc:
-        await send_google_sheets_error(interaction, exc)
+    except SETTINGS_STORAGE_EXCEPTIONS as exc:
+        await send_settings_refresh_failure(
+            interaction,
+            exc,
+            operation="shift_register_settings_refresh",
+            feature_name=SHIFT_REGISTER_FEATURE_NAME,
+            log=logger,
+        )
         return
     await send_current_panel_followup(interaction, panel)
 
@@ -308,21 +330,46 @@ class ShiftRegisterSheetModal(Modal):
                     final_schedule_worksheet_title=final_schedule_worksheet_title,
                 )
             )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_partial_success(
+                interaction,
+                exc,
+                operation="shift_register_setup",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
             return
-        await self.shift_register_manager.update_final_schedule_anchor_cell(
-            final_schedule_anchor_cell
-        )
+        try:
+            await self.shift_register_manager.update_final_schedule_anchor_cell(
+                final_schedule_anchor_cell
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_partial_success(
+                interaction,
+                exc,
+                operation="shift_register_setup_anchor_save",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
 
-        shift_register = await self.shift_register_manager.get_sheet_config()
-        panel = await build_shift_register_settings_panel(
-            self.shift_register_manager,
-            shift_register,
-            is_save_action=True,
-            metadata=metadata,
-        )
-
+        try:
+            shift_register = await self.shift_register_manager.get_sheet_config()
+            panel = await build_shift_register_settings_panel(
+                self.shift_register_manager,
+                shift_register,
+                is_save_action=True,
+                metadata=metadata,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="shift_register_setup_refresh_panel",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         await send_current_panel_followup(interaction, panel)
 
 
@@ -415,13 +462,23 @@ class ShiftTimelineModal(Modal):
             return
 
         await interaction.response.defer(ephemeral=True)
-        await self.shift_register_manager.update_timeline(
-            day_number=values.day_number,
-            event_date=values.event_date,
-            submission_deadline_at=values.submission_deadline_at,
-            draft_shift_proposal_at=values.draft_shift_proposal_at,
-            final_shift_notice_at=values.final_shift_notice_at,
-        )
+        try:
+            await self.shift_register_manager.update_timeline(
+                day_number=values.day_number,
+                event_date=values.event_date,
+                submission_deadline_at=values.submission_deadline_at,
+                draft_shift_proposal_at=values.draft_shift_proposal_at,
+                final_shift_notice_at=values.final_shift_notice_at,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="shift_register_timeline_save",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
 
 
@@ -478,7 +535,17 @@ class ShiftRecruitmentRangeModal(Modal):
             return
 
         await interaction.response.defer(ephemeral=True)
-        await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+        try:
+            await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="shift_register_recruitment_range_save",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
 
 
@@ -520,8 +587,10 @@ class ShiftRegisterButton(Button):
             handled = await send_stale_setup_panel_if_configured(
                 interaction,
                 self.shift_register_manager,
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
                 feature_display_name=SHIFT_REGISTER_DISPLAY_NAME,
                 build_current_panel=build_current_panel,
+                log=logger,
             )
             if handled:
                 return

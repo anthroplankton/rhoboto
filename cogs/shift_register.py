@@ -24,6 +24,7 @@ from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
 from utils.shift_register_timeline import render_shift_info_announcement_messages
+from utils.storage_errors import partial_success_storage_error
 
 if TYPE_CHECKING:
     from discord import Interaction, Message
@@ -129,11 +130,18 @@ class ShiftRegister(
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 
-            metadata = await manager.ensure_worksheets_and_upsert_sheet_config(metadata)
-
-            await manager.upsert_or_delete_user_shift(
-                user_info, shift, metadata=metadata
-            )
+            try:
+                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
+                    metadata
+                )
+                await manager.upsert_or_delete_user_shift(
+                    user_info, shift, metadata=metadata
+                )
+            except Exception as exc:
+                error = partial_success_storage_error(exc)
+                if error is None:
+                    raise
+                raise error from error.__cause__
 
         if self.bot.user is not None:
             await remove_reaction_if_present(
@@ -177,40 +185,50 @@ class ShiftRegister(
             interaction,
             action="show shift info",
         )
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
-        )
-        if context is None:
-            await self._send_missing_config_followup(interaction)
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                getattr(context.feature_config, "recruitment_time_ranges", None)
+            )
+            announcements = await render_shift_info_announcement_messages(
+                self.info_template_key,
+                context.guild_id,
+                self.logger,
+                day_number=getattr(context.feature_config, "day_number", None),
+                event_date=getattr(context.feature_config, "event_date", None),
+                recruitment_time_range=recruitment_ranges.announcement_display(),
+                submission_deadline_at=getattr(
+                    context.feature_config,
+                    "submission_deadline_at",
+                    None,
+                ),
+                draft_shift_proposal_at=getattr(
+                    context.feature_config,
+                    "draft_shift_proposal_at",
+                    None,
+                ),
+                final_shift_notice_at=getattr(
+                    context.feature_config,
+                    "final_shift_notice_at",
+                    None,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_info",
+            )
             return
 
-        recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(context.feature_config, "recruitment_time_ranges", None)
-        )
-        announcements = await render_shift_info_announcement_messages(
-            self.info_template_key,
-            context.guild_id,
-            self.logger,
-            day_number=getattr(context.feature_config, "day_number", None),
-            event_date=getattr(context.feature_config, "event_date", None),
-            recruitment_time_range=recruitment_ranges.announcement_display(),
-            submission_deadline_at=getattr(
-                context.feature_config,
-                "submission_deadline_at",
-                None,
-            ),
-            draft_shift_proposal_at=getattr(
-                context.feature_config,
-                "draft_shift_proposal_at",
-                None,
-            ),
-            final_shift_notice_at=getattr(
-                context.feature_config,
-                "final_shift_notice_at",
-                None,
-            ),
-        )
         await _send_public_announcement_followups(interaction, announcements)
 
     @app_commands.command(

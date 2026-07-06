@@ -6,15 +6,16 @@ from typing import TYPE_CHECKING
 
 from discord import ButtonStyle, Embed, SelectOption
 from discord.ui import Button, Select
-from tortoise.exceptions import DBConnectionError, IntegrityError, OperationalError
 
 from bot import config
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
+    SETTINGS_STORAGE_EXCEPTIONS,
     SettingsPanel,
     SettingsTimeoutView,
     disable_view_items,
     prepare_replacement_settings_view,
+    send_settings_storage_error,
 )
 from utils.announcement_languages import (
     DEFAULT_ANNOUNCEMENT_LANGUAGES,
@@ -30,9 +31,7 @@ if TYPE_CHECKING:
 
 
 LANGUAGE_REQUIRED_MESSAGE = "At least one announcement language is required."
-LANGUAGE_SAVE_ERROR_MESSAGE = (
-    "Could not save announcement language settings. Try again later."
-)
+ANNOUNCEMENT_LANGUAGE_SETTINGS_FEATURE_NAME = "announcement_language_settings"
 
 logger = logging.getLogger(__name__)
 
@@ -239,14 +238,13 @@ class SaveAnnouncementLanguagesButton(Button):
                 self.parent_view.draft.language_codes,
                 logger,
             )
-        except (DBConnectionError, IntegrityError, OperationalError):
-            logger.exception(
-                "Failed to save announcement languages for guild `%s`.",
-                self.parent_view.guild_id,
-            )
-            await interaction.response.send_message(
-                LANGUAGE_SAVE_ERROR_MESSAGE,
-                ephemeral=True,
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="announcement_language_settings_save",
+                feature_name=ANNOUNCEMENT_LANGUAGE_SETTINGS_FEATURE_NAME,
+                log=logger,
             )
             return
         await self.parent_view.edit_interaction(interaction, is_save_action=True)

@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+# ruff: noqa: SLF001
+import asyncio
 import datetime as dt
+import logging
+import re
 from types import SimpleNamespace
 
 import pytest
 from discord import Embed
+from tortoise.exceptions import DBConnectionError
 
 from bot import config
 from cogs.base import feature_channel_base
@@ -13,6 +18,7 @@ from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     FeatureChannelUserBase,
     FeatureNotEnabled,
+    StorageCheckFailure,
 )
 from cogs.base.feature_channel_context import (
     ConfiguredFeatureChannelContext,
@@ -33,7 +39,12 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.shift_register_structs import Shift as RegisterShift
+from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
+from utils.team_register_structs import Team as RegisterTeam
+
+PRIVATE_DATABASE_ERROR = "private database"
 
 
 async def fake_feature_channel_get(
@@ -90,6 +101,29 @@ class NullLogger:
 
     def debug(self, *_: object, **__: object) -> None:
         pass
+
+    def exception(self, *_: object, **__: object) -> None:
+        pass
+
+
+def interaction_contents(interaction: FakeInteraction) -> list[str]:
+    return [
+        content
+        for content, _kwargs in (
+            interaction.response.messages + interaction.followup.messages
+        )
+        if content is not None
+    ]
+
+
+def assert_safe_storage_content(content: str) -> None:
+    assert "could not complete this action" in content
+    assert "Reference: `STG-" in content
+    assert "private database" not in content
+
+
+def private_database_error() -> DBConnectionError:
+    return DBConnectionError(PRIVATE_DATABASE_ERROR)
 
 
 class ConfiguredShiftInfoManager(ConfiguredManager):
@@ -177,6 +211,28 @@ class SummaryManager(ConfiguredManager):
         return self.summary_dataframe
 
 
+class SummaryGoogleSheetsErrorManager(SummaryManager):
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        raise GoogleSheetsError(
+            GoogleSheetsErrorKind.QUOTA,
+            "private sheet quota detail",
+        )
+
+
+class SummaryRefreshErrorManager(SummaryManager):
+    async def refresh_summary_worksheet(
+        self,
+        metadata: object,
+        *,
+        member_by_names: dict[str, object],
+    ) -> object:
+        await super().refresh_summary_worksheet(
+            metadata,
+            member_by_names=member_by_names,
+        )
+        raise private_database_error()
+
+
 class DeleteManager(ConfiguredManager):
     last_instance: DeleteManager | None = None
 
@@ -211,6 +267,137 @@ class MessageOrchestrationManager(ConfiguredManager):
         MessageOrchestrationManager.last_instance = self
 
 
+class OrderedTeamUpsertManager(ConfiguredManager):
+    def __init__(
+        self,
+        feature_channel: object,
+        service_account_path: str,
+        *,
+        ensure_error: Exception | None = None,
+        team_error: Exception | None = None,
+        summary_error: Exception | None = None,
+    ) -> None:
+        super().__init__(feature_channel, service_account_path)
+        self.events: list[str] = []
+        self.metadata = SimpleNamespace(name="metadata")
+        self.ensured_metadata = SimpleNamespace(name="ensured_metadata")
+        self.ensure_error = ensure_error
+        self.team_error = team_error
+        self.summary_error = summary_error
+
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        return SimpleNamespace(sheet_url="https://sheet.example")
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        self.events.append("fetch_metadata")
+        return self.metadata
+
+    def log_missing_worksheet_warnings(self, metadata: object) -> None:
+        assert metadata is self.metadata
+        self.events.append("log_missing")
+
+    async def ensure_worksheets_and_upsert_sheet_config(
+        self,
+        metadata: object,
+        *,
+        count: int | None = None,
+    ) -> SimpleNamespace:
+        assert metadata is self.metadata
+        assert count == 2
+        self.events.append("ensure")
+        if self.ensure_error is not None:
+            raise self.ensure_error
+        return self.ensured_metadata
+
+    async def upsert_user_teams(
+        self,
+        user_info: UserInfo,
+        main_team: RegisterTeam,
+        encore_team: RegisterTeam | None,
+        *backup_teams: RegisterTeam,
+        metadata: object,
+    ) -> None:
+        assert user_info.username == "alice"
+        assert main_team.username == "alice"
+        assert encore_team is None
+        assert backup_teams == ()
+        assert metadata is self.ensured_metadata
+        self.events.append("teams_start")
+        await asyncio.sleep(0)
+        if self.team_error is not None:
+            self.events.append("teams_error")
+            raise self.team_error
+        self.events.append("teams_done")
+
+    async def upsert_user_summary(
+        self,
+        user_info: UserInfo,
+        roles: list[object],
+        main_team: RegisterTeam,
+        encore_team: RegisterTeam | None,
+        *backup_teams: RegisterTeam,
+        metadata: object,
+    ) -> None:
+        assert user_info.username == "alice"
+        assert roles == []
+        assert main_team.username == "alice"
+        assert encore_team is None
+        assert backup_teams == ()
+        assert metadata is self.ensured_metadata
+        self.events.append("summary")
+        if self.summary_error is not None:
+            raise self.summary_error
+
+
+class OrderedShiftUpsertManager(ConfiguredManager):
+    def __init__(
+        self,
+        feature_channel: object,
+        service_account_path: str,
+        *,
+        ensure_error: Exception | None = None,
+        upsert_error: Exception | None = None,
+    ) -> None:
+        super().__init__(feature_channel, service_account_path)
+        self.events: list[str] = []
+        self.metadata = SimpleNamespace(name="metadata")
+        self.ensured_metadata = SimpleNamespace(name="ensured_metadata")
+        self.ensure_error = ensure_error
+        self.upsert_error = upsert_error
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        self.events.append("fetch_metadata")
+        return self.metadata
+
+    def log_missing_worksheet_warnings(self, metadata: object) -> None:
+        assert metadata is self.metadata
+        self.events.append("log_missing")
+
+    async def ensure_worksheets_and_upsert_sheet_config(
+        self,
+        metadata: object,
+    ) -> SimpleNamespace:
+        assert metadata is self.metadata
+        self.events.append("ensure")
+        if self.ensure_error is not None:
+            raise self.ensure_error
+        return self.ensured_metadata
+
+    async def upsert_or_delete_user_shift(
+        self,
+        user_info: UserInfo,
+        shift: RegisterShift | None,
+        *,
+        metadata: object,
+    ) -> None:
+        assert user_info.username == "alice"
+        assert shift is not None
+        assert metadata is self.ensured_metadata
+        self.events.append("upsert")
+        if self.upsert_error is not None:
+            raise self.upsert_error
+
+
 class MissingMessageConfigManager(MessageOrchestrationManager):
     async def get_sheet_config_or_none(self) -> None:
         return None
@@ -237,23 +424,22 @@ class RecordingMessageSubject(FeatureChannelContextMixin[MessageOrchestrationMan
         self,
         message: object,
     ) -> object | None:
-        get_context = (
-            FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
-        )
+        get_context = FeatureChannelBase._get_message_feature_channel_context_or_none
         return await get_context(self, message)
 
-    async def _process_upsert_from_message_with_outcome(
+    async def _process_feature_channel_message_with_outcome(
         self,
         message: object,
+        feature_channel_context: object,
     ) -> object:
-        process = FeatureChannelBase._process_upsert_from_message_with_outcome  # noqa: SLF001
-        return await process(self, message)
+        process = FeatureChannelBase._process_feature_channel_message_with_outcome
+        return await process(self, message, feature_channel_context)
 
     def _log_received_message(self, message: object) -> None:
-        FeatureChannelBase._log_received_message(self, message)  # noqa: SLF001
+        FeatureChannelBase._log_received_message(self, message)
 
     async def _add_invalid_registration_reactions(self, message: object) -> None:
-        add_reactions = FeatureChannelBase._add_invalid_registration_reactions  # noqa: SLF001
+        add_reactions = FeatureChannelBase._add_invalid_registration_reactions
         await add_reactions(self, message)
 
     async def _parse_message_submission(
@@ -280,6 +466,23 @@ def fake_bot() -> SimpleNamespace:
     )
 
 
+async def message_upsert_result(subject: object, message: object) -> object | None:
+    feature_channel_context = (
+        await subject._get_message_feature_channel_context_or_none(message)
+    )
+    if feature_channel_context is None:
+        return None
+    outcome = await subject._process_feature_channel_message_with_outcome(
+        message,
+        feature_channel_context,
+    )
+    return outcome.result
+
+
+async def fake_context_menu_feature_channel_context(_message: object) -> object:
+    return object()
+
+
 def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
     subject = SimpleNamespace(**attributes)
     for method_name in (
@@ -287,13 +490,79 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_get_configured_feature_channel_context",
         "_build_feature_channel_context",
         "_send_missing_config_followup",
+        "_interaction_storage_context",
+        "_send_interaction_storage_error_or_raise",
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, method.__get__(subject, type(subject)))
     return subject
 
 
+def ordered_team_upsert_context(
+    manager: OrderedTeamUpsertManager,
+) -> ConfiguredFeatureChannelContext[OrderedTeamUpsertManager]:
+    return ConfiguredFeatureChannelContext(
+        guild_id=111,
+        channel_id=222,
+        feature_channel=SimpleNamespace(
+            guild_id=111,
+            channel_id=222,
+            feature_name="team_register",
+        ),
+        manager=manager,
+        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+    )
+
+
+def ordered_shift_upsert_context(
+    manager: OrderedShiftUpsertManager,
+) -> ConfiguredFeatureChannelContext[OrderedShiftUpsertManager]:
+    return ConfiguredFeatureChannelContext(
+        guild_id=111,
+        channel_id=222,
+        feature_channel=SimpleNamespace(
+            guild_id=111,
+            channel_id=222,
+            feature_name="shift_register",
+        ),
+        manager=manager,
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        ),
+    )
+
+
+def team_register_submission() -> tuple[list[RegisterTeam], UserInfo]:
+    user_info = UserInfo(username="alice", display_name="Alice")
+    team = RegisterTeam(
+        username=user_info.username,
+        display_name=user_info.display_name,
+        leader_skill_value=150,
+        internal_skill_value=740,
+        team_power=33.0,
+        original_message="150/740/33",
+    )
+    return [team], user_info
+
+
+def shift_register_submission() -> tuple[RegisterShift, UserInfo]:
+    user_info = UserInfo(username="alice", display_name="Alice")
+    shift = RegisterShift(
+        username=user_info.username,
+        display_name=user_info.display_name,
+        original_message="4-8",
+        shifts=set(range(4, 8)),
+    )
+    return shift, user_info
+
+
 def test_feature_channel_context_helpers_are_not_module_level() -> None:
+    assert not hasattr(feature_channel_base, "_snowflake_id")
+    assert not hasattr(feature_channel_base, "_interaction_storage_context")
+    assert not hasattr(feature_channel_base, "_message_storage_context")
+    assert not hasattr(feature_channel_base, "_send_interaction_storage_error_or_raise")
+    assert hasattr(FeatureChannelBase, "_send_interaction_storage_error_or_raise")
     assert not hasattr(feature_channel_base, "_get_interaction_channel_context")
     assert not hasattr(FeatureChannelBase, "_get_interaction_channel_context")
     assert not hasattr(feature_channel_base, "_get_configured_feature_channel_context")
@@ -314,11 +583,9 @@ async def test_configured_feature_channel_context_exposes_feature_config(
         interaction,
         action="inspect feature context",
     )
-    get_context = FeatureChannelBase._get_feature_channel_context  # noqa: SLF001
+    get_context = FeatureChannelBase._get_feature_channel_context
     feature_channel_context = await get_context(subject, source)
-    get_configured_context = (
-        FeatureChannelBase._get_configured_feature_channel_context  # noqa: SLF001
-    )
+    get_configured_context = FeatureChannelBase._get_configured_feature_channel_context
     context = await get_configured_context(
         subject,
         feature_channel_context,
@@ -350,11 +617,9 @@ async def test_configured_feature_channel_context_missing_config_is_pure_lookup(
         interaction,
         action="inspect feature context",
     )
-    get_context = FeatureChannelBase._get_feature_channel_context  # noqa: SLF001
+    get_context = FeatureChannelBase._get_feature_channel_context
     feature_channel_context = await get_context(subject, source)
-    get_configured_context = (
-        FeatureChannelBase._get_configured_feature_channel_context  # noqa: SLF001
-    )
+    get_configured_context = FeatureChannelBase._get_configured_feature_channel_context
     context = await get_configured_context(
         subject,
         feature_channel_context,
@@ -427,6 +692,49 @@ async def test_app_command_predicate_uses_lookup_key_and_display_error(
 
 
 @pytest.mark.asyncio
+async def test_app_command_predicate_db_failure_sends_safe_check_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_lookup(
+        _cls: type[FeatureChannelBase],
+        _guild_id: int,
+        _channel_id: int,
+        _feature_name: str | None = None,
+    ) -> object | None:
+        raise private_database_error()
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(failing_lookup),
+    )
+    predicate = FeatureChannelBase.feature_enabled_app_command_predicate(
+        "team_register",
+        "Team Register",
+    )
+    interaction = FakeInteraction()
+
+    with pytest.raises(StorageCheckFailure) as exc_info:
+        await predicate(interaction)
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=NullLogger(),
+    )
+    await FeatureChannelBase.cog_app_command_error(
+        subject,
+        interaction,
+        exc_info.value,
+    )
+
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    assert interaction.response.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_prefix_command_predicate_uses_lookup_key_and_display_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -456,6 +764,97 @@ async def test_prefix_command_predicate_uses_lookup_key_and_display_error(
         await predicate(ctx)
 
     assert calls == [(111, 222, "team_register")]
+
+
+@pytest.mark.asyncio
+async def test_prefix_command_predicate_db_failure_replies_safe_check_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def failing_lookup(
+        _cls: type[FeatureChannelBase],
+        _guild_id: int,
+        _channel_id: int,
+        _feature_name: str | None = None,
+    ) -> object | None:
+        raise private_database_error()
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(failing_lookup),
+    )
+    predicate = FeatureChannelBase.feature_enabled_prefix_command_predicate(
+        "team_register",
+        "Team Register",
+    )
+    ctx = FakeContext()
+    replies: list[str] = []
+
+    async def reply(content: str) -> None:
+        replies.append(content)
+
+    ctx.reply = reply
+
+    with pytest.raises(StorageCheckFailure) as exc_info:
+        await predicate(ctx)
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=NullLogger(),
+    )
+    await FeatureChannelBase.cog_command_error(subject, ctx, exc_info.value)
+
+    assert len(replies) == 1
+    assert_safe_storage_content(replies[0])
+
+
+@pytest.mark.asyncio
+async def test_prefix_command_storage_failure_logs_safe_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def failing_lookup(
+        _cls: type[FeatureChannelBase],
+        _guild_id: int,
+        _channel_id: int,
+        _feature_name: str | None = None,
+    ) -> object | None:
+        raise private_database_error()
+
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_get_enabled_feature_channel_or_none",
+        classmethod(failing_lookup),
+    )
+    predicate = FeatureChannelBase.feature_enabled_prefix_command_predicate(
+        "team_register",
+        "Team Register",
+    )
+    ctx = FakeContext()
+    replies: list[str] = []
+
+    async def reply(content: str) -> None:
+        replies.append(content)
+
+    ctx.reply = reply
+    log = logging.getLogger("tests.feature_channel.storage")
+    caplog.set_level(logging.WARNING, logger=log.name)
+
+    with pytest.raises(StorageCheckFailure) as exc_info:
+        await predicate(ctx)
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=log,
+    )
+    await FeatureChannelBase.cog_command_error(subject, ctx, exc_info.value)
+
+    assert len(replies) == 1
+    assert "STG-" in caplog.text
+    assert "database_unavailable" in caplog.text
+    assert "private database" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -544,17 +943,38 @@ async def test_user_help_defers_before_followup(
 
 
 @pytest.mark.asyncio
+async def test_setup_after_enable_db_failure_sends_safe_storage_message() -> None:
+    async def failing_context(_source: object) -> object:
+        raise private_database_error()
+
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=NullLogger(),
+    )
+    subject._get_feature_channel_context = failing_context
+
+    await FeatureChannelBase.setup_after_enable(subject, interaction)
+
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    assert interaction.response.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_message_processing_helpers_build_context_and_user_info(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
     subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(content="150/740/33")
-    message_user_info = FeatureChannelBase._message_user_info  # noqa: SLF001
-    log_received_message = FeatureChannelBase._log_received_message  # noqa: SLF001
+    message_user_info = FeatureChannelBase._message_user_info
+    log_received_message = FeatureChannelBase._log_received_message
 
     get_message_context = (
-        FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
+        FeatureChannelBase._get_message_feature_channel_context_or_none
     )
     feature_channel_context = await get_message_context(subject, message)
     user_info = message_user_info(subject, message)
@@ -579,7 +999,7 @@ async def test_message_processing_helper_ignores_bot_messages(
     message = FakeRegisterMessage(author_bot=True)
 
     get_message_context = (
-        FeatureChannelBase._get_message_feature_channel_context_or_none  # noqa: SLF001
+        FeatureChannelBase._get_message_feature_channel_context_or_none
     )
     feature_channel_context = await get_message_context(subject, message)
 
@@ -594,7 +1014,7 @@ async def test_base_message_orchestration_ignored_skips_config_lookup(
     subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(content="公告")
 
-    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == []
@@ -610,7 +1030,7 @@ async def test_base_message_orchestration_invalid_configured_adds_warning_then_c
     subject = RecordingMessageSubject(MessageParseResult.invalid(user_info=user_info))
     message = FakeRegisterMessage(content="160//600/33")
 
-    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
@@ -627,7 +1047,7 @@ async def test_base_message_orchestration_invalid_missing_config_stays_silent(
     subject.ManagerType = MissingMessageConfigManager
     message = FakeRegisterMessage(content="160//600/33")
 
-    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == []
@@ -652,7 +1072,7 @@ async def test_base_message_orchestration_missing_config_debug_logs_and_stops(
     subject.logger = SimpleNamespace(debug=record_debug)
     message = FakeRegisterMessage(content="150/740/33")
 
-    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == []
@@ -677,7 +1097,7 @@ async def test_base_message_orchestration_configured_calls_hook(
     )
     message = FakeRegisterMessage(content="150/740/33")
 
-    result = await FeatureChannelBase.process_upsert_from_message(subject, message)
+    result = await message_upsert_result(subject, message)
 
     assert result == "processed"
     assert len(subject.configured_calls) == 1
@@ -701,7 +1121,7 @@ async def test_team_inherited_message_upsert_ignores_bot_messages(
     subject = TeamRegister(fake_bot())
     message = FakeRegisterMessage(author_bot=True)
 
-    result = await subject.process_upsert_from_message(message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == []
@@ -719,7 +1139,7 @@ async def test_shift_inherited_message_upsert_ignores_bot_messages(
     subject = ShiftRegister(fake_bot())
     message = FakeRegisterMessage(author_bot=True)
 
-    result = await subject.process_upsert_from_message(message)
+    result = await message_upsert_result(subject, message)
 
     assert result is None
     assert message.added_reactions == []
@@ -730,7 +1150,10 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     bot_user = object()
     message = FakeMessage()
 
-    async def raise_google_sheets_error(message: FakeMessage) -> None:
+    async def raise_google_sheets_error(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> None:
         await message.add_reaction("<:haruka_math:1402204882492063825>")
         raise GoogleSheetsError(
             GoogleSheetsErrorKind.QUOTA,
@@ -740,7 +1163,10 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
-        _process_upsert_from_message_with_outcome=raise_google_sheets_error,
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=raise_google_sheets_error,
         bot=SimpleNamespace(user=bot_user),
         logger=NullLogger(),
     )
@@ -752,13 +1178,12 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     )
 
     assert interaction.response.deferred == [True]
-    assert interaction.followup.messages == [
-        (
-            "Google Sheets could not complete this action. "
-            "Google Sheets is rate-limiting requests. Try again later.",
-            {"ephemeral": True},
-        )
-    ]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Google Sheets is rate-limiting requests. Try again later." in content
+    assert "Reference: `STG-" in content
+    assert kwargs == {"ephemeral": True}
     assert message.removed_reactions == [
         ("<:haruka_math:1402204882492063825>", bot_user)
     ]
@@ -770,19 +1195,75 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
 
 
 @pytest.mark.asyncio
+async def test_context_menu_db_failure_marks_message_and_sends_safe_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot_user = object()
+    message = FakeMessage()
+
+    async def raise_db_error(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        raise private_database_error()
+
+    interaction = FakeInteraction()
+    log = logging.getLogger("tests.feature_channel.context_menu_storage")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=raise_db_error,
+        bot=SimpleNamespace(user=bot_user),
+        logger=log,
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(
+        subject,
+        interaction,
+        message,
+    )
+
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    message_reference = re.search(r"Reference: `(STG-[0-9a-f]{8})`", contents[0])
+    assert message_reference is not None
+    logged_references = re.findall(r"reference=(STG-[0-9a-f]{8})", caplog.text)
+    assert logged_references == [message_reference.group(1), message_reference.group(1)]
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🛠️",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     message = FakeMessage()
 
-    async def process_invalid_attempt(message: FakeMessage) -> object:
+    async def process_invalid_attempt(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> object:
         await message.add_reaction(config.WARNING_EMOJI)
         await message.add_reaction(config.CONFUSED_EMOJI)
-        return feature_channel_base._MessageUpsertOutcome.invalid()  # noqa: SLF001
+        return feature_channel_base._MessageUpsertOutcome.invalid()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        _process_upsert_from_message_with_outcome=process_invalid_attempt,
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=process_invalid_attempt,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
@@ -800,14 +1281,20 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
 async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> None:
     message = FakeMessage()
 
-    async def process_ordinary_text(_message: FakeMessage) -> object:
-        return feature_channel_base._MessageUpsertOutcome.ignored()  # noqa: SLF001
+    async def process_ordinary_text(
+        _message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> object:
+        return feature_channel_base._MessageUpsertOutcome.ignored()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        _process_upsert_from_message_with_outcome=process_ordinary_text,
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=process_ordinary_text,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
@@ -825,16 +1312,20 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
 async def test_context_menu_success_followup_uses_feature_display_name() -> None:
     message = FakeMessage()
 
-    async def process_valid_text(_message: FakeMessage) -> object:
-        return feature_channel_base._MessageUpsertOutcome.processed(  # noqa: SLF001
-            "{'ok': true}"
-        )
+    async def process_valid_text(
+        _message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> object:
+        return feature_channel_base._MessageUpsertOutcome.processed("{'ok': true}")
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        _process_upsert_from_message_with_outcome=process_valid_text,
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=process_valid_text,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
@@ -854,14 +1345,20 @@ async def test_context_menu_success_followup_uses_feature_display_name() -> None
 async def test_context_menu_missing_config_reports_private_clear_message() -> None:
     message = FakeMessage()
 
-    async def process_missing_config(_message: FakeMessage) -> object:
-        return feature_channel_base._MessageUpsertOutcome.missing_config()  # noqa: SLF001
+    async def process_missing_config(
+        _message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> object:
+        return feature_channel_base._MessageUpsertOutcome.missing_config()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        _process_upsert_from_message_with_outcome=process_missing_config,
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=process_missing_config,
         bot=SimpleNamespace(user=object()),
         logger=NullLogger(),
     )
@@ -877,9 +1374,29 @@ async def test_context_menu_missing_config_reports_private_clear_message() -> No
 @pytest.mark.asyncio
 async def test_message_listener_marks_google_sheets_error() -> None:
     bot_user = object()
-    message = FakeMessage()
+    message = FakeRegisterMessage()
 
-    async def raise_google_sheets_error(message: FakeMessage) -> None:
+    async def get_context(
+        *,
+        guild_id: int,
+        channel_id: int,
+        require_enabled: bool,
+    ) -> object:
+        assert (guild_id, channel_id, require_enabled) == (111, 222, True)
+        return object()
+
+    async def get_message_context(message_arg: FakeMessage) -> object:
+        assert message_arg is message
+        return await get_context(
+            guild_id=message_arg.guild.id,
+            channel_id=message_arg.channel.id,
+            require_enabled=True,
+        )
+
+    async def raise_google_sheets_error(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> None:
         await message.add_reaction("<:haruka_math:1402204882492063825>")
         raise GoogleSheetsError(
             GoogleSheetsErrorKind.TRANSIENT,
@@ -887,7 +1404,9 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         )
 
     subject = SimpleNamespace(
-        process_upsert_from_message=raise_google_sheets_error,
+        _get_message_feature_channel_context_or_none=get_message_context,
+        _process_feature_channel_message_with_outcome=raise_google_sheets_error,
+        feature_name="team_register",
         bot=SimpleNamespace(user=bot_user),
         logger=NullLogger(),
     )
@@ -902,6 +1421,28 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         "⚠️",
         "🛠️",
     ]
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_db_failure_sends_safe_storage_error() -> None:
+    async def failing_context(_source: object) -> object:
+        raise private_database_error()
+
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=NullLogger(),
+    )
+    subject._get_feature_channel_context = failing_context
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -986,7 +1527,7 @@ async def test_public_register_help_sends_announcement_languages_in_order(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+    await FeatureChannelBase._help_callback(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
@@ -1011,7 +1552,7 @@ async def test_public_register_help_reports_missing_config(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+    await FeatureChannelBase._help_callback(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
@@ -1048,7 +1589,7 @@ async def test_public_register_help_reports_render_failure(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)  # noqa: SLF001
+    await FeatureChannelBase._help_callback(subject, interaction)
 
     assert interaction.followup.messages == [
         (
@@ -1115,6 +1656,69 @@ async def test_shift_info_defers_before_public_followup(
 
 
 @pytest.mark.asyncio
+async def test_shift_info_config_lookup_db_failure_sends_safe_storage_followup() -> (
+    None
+):
+    async def failing_context(_source: object) -> object:
+        raise private_database_error()
+
+    interaction = FakeInteraction(locale="ja")
+    subject = feature_channel_context_subject(
+        feature_name="shift_register",
+        feature_display_name="Shift Register",
+        logger=NullLogger(),
+    )
+    subject._get_feature_channel_context = failing_context
+
+    await ShiftRegister.info.callback(subject, interaction)
+
+    assert interaction.response.deferred == [False]
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_shift_info_delivery_timeout_is_not_classified_as_storage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+
+    async def fake_render_shift_info_announcement_messages(
+        *_: object,
+        **__: object,
+    ) -> list[RenderedAnnouncement]:
+        return [RenderedAnnouncement(language="en", content="en info")]
+
+    async def fail_delivery(*_: object, **__: object) -> bool:
+        message = "discord delivery timeout"
+        raise TimeoutError(message)
+
+    monkeypatch.setattr(
+        "cogs.shift_register.render_shift_info_announcement_messages",
+        fake_render_shift_info_announcement_messages,
+    )
+    monkeypatch.setattr(
+        "cogs.shift_register._send_public_announcement_followups",
+        fail_delivery,
+    )
+    interaction = FakeInteraction(locale="ja")
+    subject = feature_channel_context_subject(
+        feature_name="shift_register",
+        ManagerType=ConfiguredShiftInfoManager,
+        info_template_key="shift.info",
+        logger=NullLogger(),
+    )
+
+    with pytest.raises(TimeoutError, match="discord delivery timeout"):
+        await ShiftRegister.info.callback(subject, interaction)
+
+    assert interaction.response.deferred == [False]
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
 async def test_team_summary_reports_default_missing_config_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1142,6 +1746,82 @@ async def test_team_summary_reports_default_missing_config_message(
         )
     ]
     assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_team_summary_config_lookup_db_failure_sends_safe_storage_followup() -> (
+    None
+):
+    async def failing_context(_source: object) -> object:
+        raise private_database_error()
+
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        lock=RecordingLock(),
+        logger=NullLogger(),
+    )
+    subject._get_feature_channel_context = failing_context
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert_safe_storage_content(contents[0])
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_team_summary_google_sheets_failure_sends_safe_storage_followup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        ManagerType=SummaryGoogleSheetsErrorManager,
+        lock=RecordingLock(),
+        logger=NullLogger(),
+    )
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert "Reference: `STG-" in contents[0]
+    assert "private sheet quota detail" not in contents[0]
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_team_summary_refresh_failure_reports_partial_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    lock = RecordingLock()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        ManagerType=SummaryRefreshErrorManager,
+        lock=lock,
+        logger=NullLogger(),
+    )
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    manager = SummaryRefreshErrorManager.last_instance
+    assert manager is not None
+    assert manager.ensure_count == 0
+    assert manager.refresh_metadata is manager.ensured_metadata
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert "Some changes may have been saved" in contents[0]
+    assert "Reference: `STG-" in contents[0]
+    assert "private database" not in contents[0]
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1385,12 +2065,180 @@ def test_register_context_menu_names_use_feature_display_name() -> None:
 
 
 def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
+    assert not hasattr(FeatureChannelBase, "process_upsert_from_message")
+    assert not hasattr(FeatureChannelBase, "_process_upsert_from_message_with_outcome")
+    assert hasattr(FeatureChannelBase, "_process_feature_channel_message_with_outcome")
     assert "process_upsert_from_message" not in TeamRegister.__dict__
     assert "process_upsert_from_message" not in ShiftRegister.__dict__
+    assert "_process_upsert_from_message_with_outcome" not in TeamRegister.__dict__
+    assert "_process_upsert_from_message_with_outcome" not in ShiftRegister.__dict__
     assert "_parse_message_submission" in TeamRegister.__dict__
     assert "_parse_message_submission" in ShiftRegister.__dict__
     assert "_process_configured_message_submission" in TeamRegister.__dict__
     assert "_process_configured_message_submission" in ShiftRegister.__dict__
+
+
+@pytest.mark.asyncio
+async def test_team_register_message_upsert_writes_summary_after_team_source() -> None:
+    subject = TeamRegister(fake_bot())
+    manager = OrderedTeamUpsertManager(object(), "service.json")
+    context = ordered_team_upsert_context(manager)
+    submission, user_info = team_register_submission()
+    message = FakeRegisterMessage(content="150/740/33")
+
+    await subject._process_configured_message_submission(
+        message,
+        context,
+        submission,
+        user_info,
+    )
+
+    assert manager.events.index("teams_done") < manager.events.index("summary")
+
+
+@pytest.mark.asyncio
+async def test_team_register_message_upsert_marks_ensure_failure_partial_success() -> (
+    None
+):
+    subject = TeamRegister(fake_bot())
+    manager = OrderedTeamUpsertManager(
+        object(),
+        "service.json",
+        ensure_error=private_database_error(),
+    )
+    context = ordered_team_upsert_context(manager)
+    submission, user_info = team_register_submission()
+    message = FakeRegisterMessage(content="150/740/33")
+
+    with pytest.raises(StorageError) as exc_info:
+        await subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+
+    error = exc_info.value
+    assert manager.events == ["fetch_metadata", "log_missing", "ensure"]
+    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert isinstance(error.__cause__, StorageError)
+    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_team_register_message_upsert_marks_team_failure_partial_success() -> (
+    None
+):
+    error = StorageError(
+        StorageErrorKind.GOOGLE_SHEETS_TRANSIENT,
+    )
+    subject = TeamRegister(fake_bot())
+    manager = OrderedTeamUpsertManager(object(), "service.json", team_error=error)
+    context = ordered_team_upsert_context(manager)
+    submission, user_info = team_register_submission()
+    message = FakeRegisterMessage(content="150/740/33")
+
+    with pytest.raises(StorageError) as exc_info:
+        await subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+
+    raised_error = exc_info.value
+    assert "summary" not in manager.events
+    assert raised_error.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert isinstance(raised_error.__cause__, StorageError)
+    assert raised_error.__cause__.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+
+
+@pytest.mark.asyncio
+async def test_team_register_message_upsert_marks_summary_failure_partial_success() -> (
+    None
+):
+    subject = TeamRegister(fake_bot())
+    manager = OrderedTeamUpsertManager(
+        object(),
+        "service.json",
+        summary_error=private_database_error(),
+    )
+    context = ordered_team_upsert_context(manager)
+    submission, user_info = team_register_submission()
+    message = FakeRegisterMessage(content="150/740/33")
+
+    with pytest.raises(StorageError) as exc_info:
+        await subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+
+    error = exc_info.value
+    assert manager.events.index("teams_done") < manager.events.index("summary")
+    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert isinstance(error.__cause__, StorageError)
+    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_shift_register_message_upsert_marks_ensure_failure_partial_success() -> (
+    None
+):
+    subject = ShiftRegister(fake_bot())
+    manager = OrderedShiftUpsertManager(
+        object(),
+        "service.json",
+        ensure_error=private_database_error(),
+    )
+    context = ordered_shift_upsert_context(manager)
+    submission, user_info = shift_register_submission()
+    message = FakeRegisterMessage(content="4-8")
+
+    with pytest.raises(StorageError) as exc_info:
+        await subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+
+    error = exc_info.value
+    assert manager.events == ["fetch_metadata", "log_missing", "ensure"]
+    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert isinstance(error.__cause__, StorageError)
+    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_shift_register_message_upsert_marks_entry_failure_partial_success() -> (
+    None
+):
+    raw_error = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
+    subject = ShiftRegister(fake_bot())
+    manager = OrderedShiftUpsertManager(
+        object(),
+        "service.json",
+        upsert_error=raw_error,
+    )
+    context = ordered_shift_upsert_context(manager)
+    submission, user_info = shift_register_submission()
+    message = FakeRegisterMessage(content="4-8")
+
+    with pytest.raises(StorageError) as exc_info:
+        await subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+
+    error = exc_info.value
+    assert manager.events == ["fetch_metadata", "log_missing", "ensure", "upsert"]
+    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert isinstance(error.__cause__, StorageError)
+    assert error.__cause__.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
 
 
 @pytest.mark.asyncio
@@ -1592,32 +2440,23 @@ async def test_setup_after_enable_routes_panel_google_sheets_error_from_base(
         GoogleSheetsErrorKind.TRANSIENT,
         "Google Sheets is temporarily unavailable. Try again later.",
     )
-    routed: list[tuple[object, GoogleSheetsError]] = []
 
     async def raise_google_sheets_error(*_: object, **__: object) -> SettingsPanel:
         raise error
 
-    async def fake_send_google_sheets_error(
-        interaction: object,
-        exc: GoogleSheetsError,
-    ) -> None:
-        routed.append((interaction, exc))
-
     monkeypatch.setattr(
         "cogs.team_register.build_team_register_settings_panel",
         raise_google_sheets_error,
-    )
-    monkeypatch.setattr(
-        "cogs.base.feature_channel_base.send_google_sheets_error",
-        fake_send_google_sheets_error,
     )
     interaction = FakeInteraction()
     subject = TeamRegister(fake_bot())
 
     await subject.setup_after_enable(interaction)
 
-    assert routed == [(interaction, error)]
-    assert interaction.followup.messages == []
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert "Google Sheets is temporarily unavailable. Try again later." in contents[0]
+    assert "Reference: `STG-" in contents[0]
 
 
 @pytest.mark.asyncio

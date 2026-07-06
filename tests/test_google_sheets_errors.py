@@ -11,12 +11,6 @@ from gspread.exceptions import (
 )
 from requests.exceptions import ConnectionError as RequestsConnectionError
 
-from components.ui_google_sheets_errors import (
-    GOOGLE_SHEETS_FAILURE_REACTION,
-    mark_google_sheets_message_failure,
-    send_google_sheets_error,
-)
-from tests.fakes import FakeInteraction
 from utils.google_sheets import (
     AsyncioGspreadWorksheet,
     GoogleSheet,
@@ -63,25 +57,6 @@ class RaisingWorksheet:
 
     async def update(self, _: list[list[object]], **__: object) -> None:
         raise self.exc
-
-
-class FakeMessage:
-    id = 123
-
-    def __init__(self) -> None:
-        self.added_reactions: list[str] = []
-        self.removed_reactions: list[tuple[str, object]] = []
-
-    async def add_reaction(self, emoji: str) -> None:
-        self.added_reactions.append(emoji)
-
-    async def remove_reaction(self, emoji: str, user: object) -> None:
-        self.removed_reactions.append((emoji, user))
-
-
-class NullLogger:
-    def warning(self, *_: object, **__: object) -> None:
-        pass
 
 
 def api_error(
@@ -168,39 +143,3 @@ async def test_worksheet_read_write_raise_domain_errors_without_raw_details() ->
     assert write_error.value.kind is GoogleSheetsErrorKind.PERMISSION
     assert "secret spreadsheet url" not in read_error.value.user_message
     assert "secret spreadsheet url" not in write_error.value.user_message
-
-
-@pytest.mark.asyncio
-async def test_send_google_sheets_error_uses_followup_after_defer() -> None:
-    interaction = FakeInteraction()
-    await interaction.response.defer(ephemeral=True)
-    error = GoogleSheetsError(
-        GoogleSheetsErrorKind.PERMISSION,
-        "Check the sheet sharing settings and service account access.",
-    )
-
-    await send_google_sheets_error(interaction, error)
-
-    assert interaction.response.messages == []
-    assert interaction.followup.messages == [
-        (
-            "Google Sheets could not complete this action. "
-            "Check the sheet sharing settings and service account access.",
-            {"ephemeral": True},
-        )
-    ]
-
-
-@pytest.mark.asyncio
-async def test_mark_google_sheets_message_failure_cleans_processing_reaction() -> None:
-    message = FakeMessage()
-    user = object()
-    error = GoogleSheetsError(
-        GoogleSheetsErrorKind.TRANSIENT,
-        "Google Sheets is temporarily unavailable. Try again later.",
-    )
-
-    await mark_google_sheets_message_failure(message, user, error, NullLogger())
-
-    assert message.removed_reactions == [("<:haruka_math:1402204882492063825>", user)]
-    assert message.added_reactions == [GOOGLE_SHEETS_FAILURE_REACTION, "🛠️"]

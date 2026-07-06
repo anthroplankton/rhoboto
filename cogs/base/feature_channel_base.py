@@ -19,24 +19,30 @@ from cogs.base.feature_channel_context import (
     MessageParseStatus,
 )
 from components.ui_feature_channel import DisableAndClearConfirmView
-from components.ui_google_sheets_errors import (
-    mark_google_sheets_message_failure,
-    send_google_sheets_error,
-)
 from components.ui_settings_flow import (
     initial_setup_content,
     send_current_panel_followup,
     send_settings_view_followup,
+)
+from components.ui_storage_errors import (
+    mark_storage_message_failure,
+    send_storage_error,
 )
 from models.feature_channel import FeatureChannel
 from utils.announcement_languages import (
     ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
     render_announcement_messages,
 )
-from utils.google_sheets_errors import GoogleSheetsError
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
 from utils.reactions import add_reaction_if_possible
+from utils.storage_errors import (
+    StorageError,
+    StorageOperationContext,
+    classify_storage_exception,
+    generate_error_reference,
+    storage_error_content,
+)
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
 
 if TYPE_CHECKING:
@@ -45,6 +51,7 @@ if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
+    from cogs.base.discord_context import GuildChannelSource
     from components.ui_settings_flow import SettingsPanel
     from utils.announcement_languages import RenderedAnnouncement
     from utils.key_async_lock import KeyAsyncLock
@@ -125,10 +132,83 @@ class FeatureNotEnabled(commands.CheckFailure, app_commands.CheckFailure):
         super().__init__(msg)
 
 
+class StorageCheckFailure(commands.CheckFailure, app_commands.CheckFailure):
+    """Exception raised when a feature-enabled check cannot read storage safely."""
+
+    def __init__(
+        self,
+        error: StorageError,
+        context: StorageOperationContext,
+    ) -> None:
+        super().__init__("Feature storage check failed.")
+        self.error = error
+        self.context = context
+
+
+def _storage_check_failure(error: Exception) -> StorageCheckFailure | None:
+    if isinstance(error, StorageCheckFailure):
+        return error
+    original = getattr(error, "original", None)
+    if isinstance(original, StorageCheckFailure):
+        return original
+    return None
+
+
 class FeatureChannelErrorHandler:
+    def _interaction_storage_context(
+        self,
+        source: GuildChannelSource,
+        operation: str,
+    ) -> StorageOperationContext:
+        return StorageOperationContext(
+            operation=operation,
+            feature_name=self.feature_name,
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
+        )
+
+    async def _send_interaction_storage_error_or_raise(
+        self,
+        interaction: Interaction,
+        exc: Exception,
+        *,
+        source: GuildChannelSource,
+        operation: str,
+    ) -> None:
+        error = classify_storage_exception(exc)
+        if error is None:
+            raise exc
+
+        await send_storage_error(
+            interaction,
+            error,
+            context=self._interaction_storage_context(source, operation),
+            log=self.logger,
+        )
+
     async def cog_command_error(self, ctx: commands.Context, error: Exception) -> None:
         """Handle command errors for this cog."""
-        if isinstance(error, FeatureNotEnabled):
+        storage_failure = _storage_check_failure(error)
+        if storage_failure is not None:
+            reference = generate_error_reference()
+            logger = getattr(self, "logger", logging.getLogger(__name__))
+            logger.warning(
+                (
+                    "Storage check failed. reference=%s operation=%s feature=%s "
+                    "guild=%s channel=%s kind=%s hint=%s"
+                ),
+                reference,
+                storage_failure.context.operation,
+                storage_failure.context.feature_name,
+                storage_failure.context.guild_id,
+                storage_failure.context.channel_id,
+                storage_failure.error.kind.value,
+                storage_failure.error.log_hint,
+            )
+            await ctx.reply(
+                storage_error_content(storage_failure.error, reference_id=reference)
+            )
+        elif isinstance(error, FeatureNotEnabled):
             await ctx.reply(str(error))
         elif isinstance(error, commands.MissingPermissions):
             await ctx.reply("You do not have permission to use this command.")
@@ -139,7 +219,15 @@ class FeatureChannelErrorHandler:
         self, interaction: Interaction, error: app_commands.AppCommandError
     ) -> None:
         """Handle slash command errors for this cog."""
-        if isinstance(error, FeatureNotEnabled):
+        storage_failure = _storage_check_failure(error)
+        if storage_failure is not None:
+            await send_storage_error(
+                interaction,
+                storage_failure.error,
+                context=storage_failure.context,
+                log=getattr(self, "logger", None),
+            )
+        elif isinstance(error, FeatureNotEnabled):
             await interaction.response.send_message(str(error), ephemeral=True)
         elif isinstance(error, app_commands.MissingPermissions):
             await interaction.response.send_message(
@@ -192,27 +280,11 @@ class FeatureChannelBase(
         self.context_menu.error(self.cog_app_command_error)
         bot.tree.add_command(self.context_menu)
 
-    async def process_upsert_from_message(
-        self, message: Message
-    ) -> TUpsertResult | None:
-        """Process the message to upsert registration data for this feature.
-
-        Args:
-            message (Message): The Discord message to process.
-        """
-        outcome = await self._process_upsert_from_message_with_outcome(message)
-        return outcome.result
-
-    async def _process_upsert_from_message_with_outcome(
+    async def _process_feature_channel_message_with_outcome(
         self,
         message: Message,
+        feature_channel_context: FeatureChannelContext[TManager],
     ) -> _MessageUpsertOutcome[TUpsertResult]:
-        feature_channel_context = (
-            await self._get_message_feature_channel_context_or_none(message)
-        )
-        if feature_channel_context is None:
-            return _MessageUpsertOutcome.ignored()
-
         self._log_received_message(message)
 
         parse_result = await self._parse_message_submission(message)
@@ -315,7 +387,7 @@ class FeatureChannelBase(
         """
         Upsert registration data for this feature from a message (context menu).
         """
-        require_guild_channel_source(
+        source = require_guild_channel_source(
             interaction,
             action="upsert feature data from context menu",
         )
@@ -323,17 +395,46 @@ class FeatureChannelBase(
         await interaction.response.defer(ephemeral=True)
 
         try:
-            outcome = await self._process_upsert_from_message_with_outcome(message)
-        except GoogleSheetsError as exc:
-            logger = getattr(self, "logger", None)
+            feature_channel_context = (
+                await self._get_message_feature_channel_context_or_none(message)
+            )
+            if feature_channel_context is None:
+                outcome = _MessageUpsertOutcome.ignored()
+            else:
+                outcome = await self._process_feature_channel_message_with_outcome(
+                    message,
+                    feature_channel_context,
+                )
+        except Exception as exc:
+            error = classify_storage_exception(exc)
+            if error is None:
+                raise
             bot_user = getattr(getattr(self, "bot", None), "user", None)
-            await mark_google_sheets_message_failure(
+            reference = generate_error_reference()
+            await mark_storage_message_failure(
                 message,
                 bot_user,
-                exc,
-                logger,
+                error,
+                context=StorageOperationContext(
+                    operation="context_menu_upsert",
+                    feature_name=self.feature_name,
+                    guild_id=source.guild.id,
+                    channel_id=source.channel.id,
+                    message_id=message.id,
+                ),
+                reference_id=reference,
+                log=getattr(self, "logger", None),
             )
-            await send_google_sheets_error(interaction, exc)
+            await send_storage_error(
+                interaction,
+                error,
+                context=self._interaction_storage_context(
+                    source,
+                    "context_menu_upsert",
+                ),
+                reference_id=reference,
+                log=getattr(self, "logger", None),
+            )
             return
 
         if outcome.status is _MessageUpsertStatus.MISSING_CONFIG:
@@ -356,14 +457,58 @@ class FeatureChannelBase(
         Listen for messages to provide a button for team register setup/edit.
         This is used in channels where the feature is enabled.
         """
+        if message.author.bot or message.guild is None or message.channel is None:
+            return
+
         try:
-            await self.process_upsert_from_message(message)
-        except GoogleSheetsError as exc:
-            await mark_google_sheets_message_failure(
+            feature_channel_context = (
+                await self._get_message_feature_channel_context_or_none(message)
+            )
+        except Exception as exc:
+            error = classify_storage_exception(exc)
+            if error is None:
+                raise
+            reference = generate_error_reference()
+            self.logger.warning(
+                (
+                    "Message listener storage lookup failed before filtering. "
+                    "reference=%s operation=%s feature=%s guild=%s channel=%s "
+                    "message=%s kind=%s hint=%s"
+                ),
+                reference,
+                "message_lookup",
+                self.feature_name,
+                message.guild.id,
+                message.channel.id,
+                message.id,
+                error.kind.value,
+                error.log_hint,
+            )
+            return
+        if feature_channel_context is None:
+            return
+
+        try:
+            await self._process_feature_channel_message_with_outcome(
+                message,
+                feature_channel_context,
+            )
+        except Exception as exc:
+            error = classify_storage_exception(exc)
+            if error is None:
+                raise
+            await mark_storage_message_failure(
                 message,
                 self.bot.user,
-                exc,
-                self.logger,
+                error,
+                context=StorageOperationContext(
+                    operation="message_upsert",
+                    feature_name=self.feature_name,
+                    guild_id=message.guild.id,
+                    channel_id=message.channel.id,
+                    message_id=message.id,
+                ),
+                log=self.logger,
             )
 
     async def setup_after_enable(self, interaction: Interaction) -> None:
@@ -372,29 +517,42 @@ class FeatureChannelBase(
             interaction,
             action="set up feature settings",
         )
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
-        )
-        if context is None:
-            view = self._build_initial_setup_view(feature_channel_context.manager)
+        initial_setup_view = None
+        panel = None
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                initial_setup_view = self._build_initial_setup_view(
+                    feature_channel_context.manager
+                )
+            else:
+                panel = await self._build_settings_panel(
+                    interaction,
+                    context.manager,
+                    context.feature_config,
+                )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="setup_after_enable",
+            )
+            return
+
+        if initial_setup_view is not None:
             await send_settings_view_followup(
                 interaction,
                 content=initial_setup_content(self.feature_display_name),
-                view=view,
+                view=initial_setup_view,
             )
             return
 
-        try:
-            panel = await self._build_settings_panel(
-                interaction,
-                context.manager,
-                context.feature_config,
-            )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
+        if panel is None:
             return
-
         await send_current_panel_followup(interaction, panel)
 
     @abstractmethod
@@ -423,7 +581,17 @@ class FeatureChannelBase(
             interaction,
             action="proceed with enable command",
         )
-        await self._enable_channel(source.guild.id, source.channel.id)
+        try:
+            await self._enable_channel(source.guild.id, source.channel.id)
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="enable",
+            )
+            return
+
         await interaction.response.send_message(
             f"Feature {self.feature_display_name} enabled in this channel.",
             ephemeral=True,
@@ -440,11 +608,23 @@ class FeatureChannelBase(
             interaction,
             action="proceed with disable command",
         )
-        result = await self._disable_channel(source.guild.id, source.channel.id)
+        try:
+            result = await self._disable_channel(source.guild.id, source.channel.id)
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="disable",
+            )
+            return
+
         msg = (
             f"Feature {self.feature_display_name} disabled in this channel."
             if result
-            else f"Feature {self.feature_display_name} is not enabled in this channel."
+            else (
+                f"Feature {self.feature_display_name} is not enabled in this channel."
+            )
         )
         await interaction.response.send_message(msg, ephemeral=True)
 
@@ -474,7 +654,16 @@ class FeatureChannelBase(
         # Wait for user interaction
         await view.wait()
         if view.value:
-            await self._clear_feature_settings(source.guild.id, source.channel.id)
+            try:
+                await self._clear_feature_settings(source.guild.id, source.channel.id)
+            except Exception as exc:  # noqa: BLE001
+                await self._send_interaction_storage_error_or_raise(
+                    interaction,
+                    exc,
+                    source=source,
+                    operation="disable_and_clear",
+                )
+                return
             await interaction.followup.send(
                 f"Feature {self.feature_display_name} has been disabled and all bot "
                 f"settings for this feature in this channel have been permanently "
@@ -498,27 +687,37 @@ class FeatureChannelBase(
         feature-specific help text.
         """
         await interaction.response.defer(ephemeral=False)
-
         source = require_guild_channel_source(
             interaction,
             action="show feature help",
         )
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
-        )
-        if context is None:
-            await self._send_missing_config_followup(interaction)
+
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+
+            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+            announcements = await render_announcement_messages(
+                self.help_template_key,
+                context.guild_id,
+                self.logger,
+                bot=bot_mention,
+                sheet_url=context.feature_config.sheet_url,
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="help",
+            )
             return
 
-        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
-        announcements = await render_announcement_messages(
-            self.help_template_key,
-            context.guild_id,
-            self.logger,
-            bot=bot_mention,
-            sheet_url=context.feature_config.sheet_url,
-        )
         await _send_public_announcement_followups(interaction, announcements)
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
@@ -648,11 +847,26 @@ class FeatureChannelBase(
                 ctx,
                 action=f"check feature status for feature: {feature_name}",
             )
-            if not await FeatureChannelBase.is_enabled(
-                source.guild.id,
-                source.channel.id,
-                feature_name,
-            ):
+            try:
+                enabled = await FeatureChannelBase.is_enabled(
+                    source.guild.id,
+                    source.channel.id,
+                    feature_name,
+                )
+            except Exception as exc:
+                error = classify_storage_exception(exc)
+                if error is None:
+                    raise
+                raise StorageCheckFailure(
+                    error,
+                    StorageOperationContext(
+                        operation="feature_check",
+                        feature_name=feature_name,
+                        guild_id=source.guild.id,
+                        channel_id=source.channel.id,
+                    ),
+                ) from exc
+            if not enabled:
                 raise FeatureNotEnabled(feature_display_name)
             return True
 
@@ -679,11 +893,26 @@ class FeatureChannelBase(
                 interaction,
                 action=f"check feature status for feature: {feature_name}",
             )
-            if not await FeatureChannelBase.is_enabled(
-                source.guild.id,
-                source.channel.id,
-                feature_name,
-            ):
+            try:
+                enabled = await FeatureChannelBase.is_enabled(
+                    source.guild.id,
+                    source.channel.id,
+                    feature_name,
+                )
+            except Exception as exc:
+                error = classify_storage_exception(exc)
+                if error is None:
+                    raise
+                raise StorageCheckFailure(
+                    error,
+                    StorageOperationContext(
+                        operation="feature_check",
+                        feature_name=feature_name,
+                        guild_id=source.guild.id,
+                        channel_id=source.channel.id,
+                    ),
+                ) from exc
+            if not enabled:
                 raise FeatureNotEnabled(feature_display_name)
             return True
 
@@ -740,28 +969,25 @@ class FeatureChannelUserBase(
 
         await interaction.response.defer(ephemeral=True)
 
-        user_info = UserInfo(
-            username=interaction.user.name,
-            display_name=interaction.user.display_name,
-        )
+        try:
+            user_info = UserInfo(
+                username=interaction.user.name,
+                display_name=interaction.user.display_name,
+            )
 
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
-        )
-        if context is None:
-            await self._send_missing_config_followup(interaction)
-            return
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
 
-        manager = context.manager
+            manager = context.manager
 
-        async with self.FeatureChannelType.lock(context.channel_id):
-            try:
+            async with self.FeatureChannelType.lock(context.channel_id):
                 metadata = await manager.fetch_google_sheets_metadata()
                 await self._delete_user_data(manager, user_info, metadata)
-            except GoogleSheetsError as exc:
-                await send_google_sheets_error(interaction, exc)
-                return
 
             locale = interaction.locale.value
 
@@ -776,6 +1002,14 @@ class FeatureChannelUserBase(
                     f"✅ Your data for {self.feature_display_name} has been "
                     f"deleted successfully."
                 )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="delete_user_data",
+            )
+            return
 
         await interaction.followup.send(content=content, ephemeral=True)
 
@@ -789,27 +1023,35 @@ class FeatureChannelUserBase(
         """
 
         await interaction.response.defer(ephemeral=True)
-
         source = require_guild_channel_source(
             interaction,
             action="send feature help message",
         )
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
-        )
-        if context is None:
-            await self._send_missing_config_followup(interaction)
-            return
 
-        locale = locale_to_template_code(interaction.locale.value)
-        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
-        await interaction.followup.send(
-            render_message_template(
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+
+            locale = locale_to_template_code(interaction.locale.value)
+            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+            content = render_message_template(
                 template_key,
                 locale,
                 bot=bot_mention,
                 sheet_url=context.feature_config.sheet_url,
-            ),
-            ephemeral=True,
-        )
+            )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="send_help_message",
+            )
+            return
+
+        await interaction.followup.send(content, ephemeral=True)

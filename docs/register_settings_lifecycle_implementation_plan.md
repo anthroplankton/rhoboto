@@ -236,7 +236,7 @@ from dataclasses import dataclass
 from discord import Embed, Interaction
 from discord.ui import View
 
-from components.ui_google_sheets_errors import send_google_sheets_error
+# Current code routes classified storage failures through storage-error helpers.
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.manager_base import ManagerBase
 
@@ -301,8 +301,8 @@ async def send_stale_setup_panel_if_configured(
     await interaction.response.defer(ephemeral=True)
     try:
         panel = await build_current_panel(sheet_config)
-    except GoogleSheetsError as exc:
-        await send_google_sheets_error(interaction, exc)
+    except GoogleSheetsError:
+        # Current code routes classified storage failures through storage-error helpers.
         return True
 
     await send_current_panel_followup(
@@ -1015,8 +1015,8 @@ Simplify configured branch in `setup_after_enable()`:
                 interaction,
                 team_register_config,
             )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
+        except GoogleSheetsError:
+            # Current code routes classified storage failures through storage-error helpers.
             return
 
         await send_current_panel_followup(interaction, panel)
@@ -1052,8 +1052,8 @@ Simplify configured branch in `setup_after_enable()`:
                 manager,
                 shift_register_config,
             )
-        except GoogleSheetsError as exc:
-            await send_google_sheets_error(interaction, exc)
+        except GoogleSheetsError:
+            # Current code routes classified storage failures through storage-error helpers.
             return
 
         await send_current_panel_followup(interaction, panel)

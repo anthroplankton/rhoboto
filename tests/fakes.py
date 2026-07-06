@@ -32,6 +32,9 @@ class FakeDiscordResponse:
     ) -> None:
         self.edits.append((content, kwargs))
 
+    def is_done(self) -> bool:
+        return bool(self.deferred or self.messages or self.modals or self.edits)
+
 
 class FakeDiscordFollowup:
     def __init__(self) -> None:

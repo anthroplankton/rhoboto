@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
-from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -16,6 +15,7 @@ from utils.shift_register_structs import (
     ShiftParser,
     ShiftRegisterGoogleSheetsMetadata,
 )
+from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import TeamParser
@@ -188,11 +188,10 @@ async def test_shift_manager_rejects_old_entry_header_before_update() -> None:
     shift = ShiftParser.parse_lines(user, ["4-8"]).shift
     assert shift is not None
 
-    with pytest.raises(GoogleSheetsError) as exc_info:
+    with pytest.raises(StorageError) as exc_info:
         await manager.upsert_or_delete_user_shift(user, shift, metadata)
 
-    assert exc_info.value.kind is GoogleSheetsErrorKind.UNKNOWN
-    assert exc_info.value.operation == "validate_shift_entry_header"
+    assert exc_info.value.kind is StorageErrorKind.MALFORMED_SHEET
     assert isinstance(exc_info.value.__cause__, ValueError)
     assert "Shift Entry worksheet header" in str(exc_info.value.__cause__)
     assert worksheet.updated_frames == []

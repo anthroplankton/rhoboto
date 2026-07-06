@@ -62,10 +62,27 @@ sheet links or service account details into notes.
 
 | Scenario | Steps | Pass Criteria | Result | Notes |
 | --- | --- | --- | --- | --- |
-| Invalid Sheet link | Submit Team or Shift settings with a malformed or inaccessible Sheet URL. | The bot returns a safe ephemeral Google Sheets error and does not show a success settings embed. |  |  |
-| Missing sharing permission | Submit settings for a disposable spreadsheet that is not shared with the service account. | The bot asks to check sharing or service account access and does not expose credential paths, service account JSON, raw traceback, or private Sheet details. |  |  |
-| Missing worksheet | Configure settings, delete or rename one configured worksheet in the disposable spreadsheet, then run the feature settings or summary/delete command. | The bot reports a safe Google Sheets error or shows the worksheet as not found without exposing raw Google API details. |  |  |
+| Invalid Sheet link | Submit Team or Shift settings with a malformed or inaccessible Sheet URL. | The bot returns safe ephemeral Sheet access/link guidance and does not show a success settings embed. |  |  |
+| Missing sharing permission | Submit settings for a disposable spreadsheet that is not shared with the configured Google identity. | The bot asks to check sheet sharing, sheet settings, or the saved Sheet link and does not expose credential paths, credential contents, raw traceback, or private Sheet details. |  |  |
+| Missing worksheet | Configure settings, delete or rename one configured worksheet in the disposable spreadsheet, then run the feature settings or summary/delete command. | The bot reports safe worksheet/storage guidance or shows the worksheet as not found without exposing raw Google API details. |  |  |
 | Message write failure | With an invalid or inaccessible configured sheet, send a Team or Shift registration message. | The processing reaction is removed when present, both `⚠️` and `🛠️` appear, and no raw Google error is posted to the channel. |  |  |
+
+## Storage Error Handling
+
+Run these checks in a development guild with a disposable Google spreadsheet.
+Do not use production Discord channels, production sheets, or real user data.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Google Sheets access denied | Remove sharing from the disposable spreadsheet, then run Team or Shift settings, summary, or delete flow that reads the configured sheet. | The bot returns safe access guidance that asks the user to check sheet sharing, sheet settings, or the saved Sheet link. The response does not mention credential internals. |  |  |
+| Invalid saved Sheet URL | In the development guild, use the settings modal to save a clearly invalid disposable Sheet URL for a Team or Shift feature. If the UI blocks malformed input, use an approved development-only failure injection instead, then run a settings or command flow that reloads the sheet. | The bot gives invalid link guidance and does not show a success settings embed or raw Google API error. |  |  |
+| Missing configured worksheet | Remove or rename a configured worksheet in the disposable spreadsheet, then run a feature command that uses it. | The bot reports missing worksheet guidance that is actionable without exposing worksheet internals beyond configured display metadata. |  |  |
+| Malformed worksheet | Change disposable worksheet headers or required columns so the sheet no longer matches the expected Team or Shift layout, then trigger a read or write. | The bot returns a safe malformed-sheet response and does not post a raw traceback, credential path, or private Sheet data. |  |  |
+| Database unavailable | Temporarily run the bot with an invalid local database path or inject a database failure in a development-only run, then submit a settings modal or command that reads or writes feature state. | The interaction returns a visible safe failure response instead of going silent or timing out without explanation. |  |  |
+| Listener storage failure | While storage is failing, submit Team and Shift listener messages that would normally write to storage. | Any processing reaction is cleaned up. Failure and repair reactions appear as defined by the feature, and no raw storage exception is posted publicly. |  |  |
+| Team summary partial success | In a development guild with a disposable spreadsheet, first confirm Team source worksheet writes succeed. Before summary refresh, remove or rename the summary worksheet, or use approved development-only failure injection if a non-sheet mutation is needed, then submit a Team registration or run a Team summary refresh flow. | The bot reports partial success behavior: the source write is acknowledged, the summary refresh failure is visible, and the response includes repair guidance. |  |  |
+| Reference IDs | Trigger at least one Google Sheets storage failure and one database storage failure through interaction flows, then compare the Discord UI with the bot logs. For listener-only failures, compare the reactions with the bot logs. | Interaction responses and logs include matching reference IDs. Listener-only failures log reference IDs and use only the defined reactions publicly. Logs include enough operation context to locate the failure without exposing private data. |  |  |
+| Sensitive data guard | Review the Discord responses and relevant logs from the storage failure checks. | UI and logs do not expose credential contents, credential file contents, private Sheet cell data, raw tokens, or private identifiers. |  |  |
 
 ## Team Register
 
@@ -74,17 +91,19 @@ Use the team test channel.
 | Scenario | Steps | Pass Criteria | Result | Notes |
 | --- | --- | --- | --- | --- |
 | Enable feature | Run `/team_register enable`. | Feature is enabled and setup prompt appears. |  |  |
+| Pre-setup Team listener attempt | Before creating settings, send `150/740/33.4 main` and `160//600/33`. | The bot does not add reactions, post a reply, or write worksheet data. |  |  |
+| Pre-setup Team context menu upsert | Before creating settings, use the `team_register upsert` context menu on `150/740/33.4 main`. | The context menu response is ephemeral and says Team Register is not configured for this channel. No public message is posted. |  |  |
 | Create settings | Open settings, enter test sheet URL, team worksheet titles, and summary worksheet title. | Bot saves settings and creates or finds worksheets. |  |  |
 | Settings embed | Run `/team_register settings`. | Embed shows worksheet titles together with worksheet IDs and the Google Sheet link. |  |  |
 | Settings callback guard | Remove permissions from the admin test user after opening the Team Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
 | Encore role callback guard | As the non-admin user, use an existing encore role select menu. | The bot returns an ephemeral permission error and does not update encore roles. |  |  |
 | Help text | Run `/team help` and `/team_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
-| Team submission | Send lines in order: `150/740/33.4 main`, `150/700/39 encore`, and `140/680/35.3 backup`. | Processing reaction is removed, check reaction is added, and Main, Encore, and Backup worksheets update in message order. |  |  |
+| Team submission | Send lines in order: `150/740/33.4 main`, `150/700/39 encore`, and `140/680/35.3 backup`. | Processing reaction is removed, the `✅` reaction is added, and Main, Encore, and Backup worksheets update in message order. |  |  |
 | Team overwrite update | After registering three teams, send only `150/740/33.4 updated main` as a new message. | The Main worksheet updates and the user's old Encore and Backup rows are cleared. |  |  |
-| Full-width Team submission | Send `150／740／33.4 main`. | Processing reaction is removed, check reaction is added, and team worksheets update. |  |  |
-| Invalid Team attempt | Send `160//600/33`, `160,600,33`, or `160 600 33`. | No worksheet write occurs and the confused reaction appears. |  |  |
+| Full-width Team submission | Send `150／740／33.4 main`. | Processing reaction is removed, the `✅` reaction is added, and team worksheets update. |  |  |
+| Invalid Team attempt | Send `160//600/33`, `160,600,33`, or `160 600 33`. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
 | Team ordinary text | Send ordinary announcement text with no team-like numbers. | No worksheet write occurs and no reaction appears. |  |  |
-| Team context menu invalid attempt | Use the `team_register upsert` context menu on `160//600/33`. | Confused reaction appears on the selected message and the context menu returns the existing failed-upsert follow-up. |  |  |
+| Team context menu invalid attempt | Use the `team_register upsert` context menu on `160//600/33`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
 | Summary refresh | Run `/team_register summary`. | Summary worksheet and summary embed match the submitted teams and encore roles. |  |  |
 | Delete own data | Run `/team delete`. | The current user's team rows and summary row are removed or blanked as expected. |  |  |
 
@@ -95,6 +114,8 @@ Use the shift test channel.
 | Scenario | Steps | Pass Criteria | Result | Notes |
 | --- | --- | --- | --- | --- |
 | Enable feature | Run `/shift_register enable`. | Feature is enabled and setup prompt appears. |  |  |
+| Pre-setup Shift listener attempt | Before creating settings, send `4-8` and `18:00-20:00`. | The bot does not add reactions, post a reply, or write worksheet data. |  |  |
+| Pre-setup Shift context menu upsert | Before creating settings, use the `shift_register upsert` context menu on `4-8`. | The context menu response is ephemeral and says Shift Register is not configured for this channel. No public message is posted. |  |  |
 | Create settings | Open settings, enter test sheet URL, entry/draft/final worksheet titles, and final schedule anchor cell. | Bot saves settings and creates or finds all worksheets. |  |  |
 | Timeline settings | In the Shift Register settings panel, click `Edit Shift Timeline`; enter day number, event date, submission deadline, draft shift proposal, and final shift notice. | Bot saves the timeline and the refreshed settings embed shows the saved values in JST. |  |  |
 | Recruitment range settings | In the Shift Register settings panel, click `Edit Recruitment Time Range`; enter `4-12, 20-28`. Then reopen the modal. | Bot saves the normalized recruitment range and the modal is prefilled from the saved DB value. |  |  |
@@ -105,12 +126,12 @@ Use the shift test channel.
 | Info message | Run `/shift_register info` with no parameters after saving timeline and recruitment range. | Public info message is posted in the configured announcement languages. It includes the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
 | Help text | Run `/shift help` and `/shift_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Shift Entry header | Confirm the entry worksheet header is `username`, `display_name`, `0-1` through `29-30`, then `original_message`. | Valid shift writes use the `0-30` columns. Old `4-5` through `27-28` headers are not silently accepted. |  |  |
-| Shift submission | With recruitment range `4-12, 20-28`, send `4-8` or `20-28`. | Processing reaction is removed, check reaction is added, and entry worksheet updates. |  |  |
-| Out-of-range shift | With recruitment range `4-12, 20-28`, send `12-20` or `0-30`. | No worksheet write occurs and the confused reaction appears. |  |  |
-| Invalid shift | Send a message with a range-like invalid attempt. | No worksheet write occurs and the confused reaction appears. |  |  |
-| Invalid Shift time attempt | Send `18:00-20:00`, `18點到20點`, `18點到`, or `到20點`. | No worksheet write occurs and the confused reaction appears. |  |  |
+| Shift submission | With recruitment range `4-12, 20-28`, send `4-8` or `20-28`. | Processing reaction is removed, the `✅` reaction is added, and entry worksheet updates. |  |  |
+| Out-of-range shift | With recruitment range `4-12, 20-28`, send `12-20` or `0-30`. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
+| Invalid shift | Send a message with a range-like invalid attempt. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
+| Invalid Shift time attempt | Send `18:00-20:00`, `18點到20點`, `18點到`, or `到20點`. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
 | Shift ordinary text | Send `20:00` or `20點前`. | No worksheet write occurs and no reaction appears. |  |  |
-| Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | Confused reaction appears on the selected message and the context menu returns the existing failed-upsert follow-up. |  |  |
+| Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
 | Delete own data | Run `/shift delete`. | The current user's entry row is removed or blanked as expected. |  |  |
 
 ## Announcement Languages

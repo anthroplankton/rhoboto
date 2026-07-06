@@ -57,7 +57,7 @@ async def test_feature_channel_context_uses_manager_type(
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_channel_context_returns_feature_config_without_followup(
+async def test_configured_context_returns_feature_config_without_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -85,7 +85,7 @@ async def test_configured_feature_channel_context_returns_feature_config_without
 
 
 @pytest.mark.asyncio
-async def test_configured_feature_channel_context_missing_config_returns_none_without_followup(
+async def test_configured_context_missing_config_returns_none_without_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class MissingConfigSubject(FeatureChannelContextMixin[MissingConfigManager]):

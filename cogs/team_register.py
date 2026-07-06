@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, override
 
 from discord import Interaction, Member, Message, app_commands
@@ -12,16 +11,20 @@ from cogs.base.feature_channel_context import (
     ConfiguredFeatureChannelContext,
     MessageParseResult,
 )
-from components.ui_google_sheets_errors import send_google_sheets_error
+from components.ui_storage_errors import send_storage_error
 from components.ui_team_register import (
     TEAM_REGISTER_DISPLAY_NAME,
     TeamRegisterView,
     build_summary_embed,
     build_team_register_settings_panel,
 )
-from utils.google_sheets_errors import GoogleSheetsError
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.storage_errors import (
+    StorageOperationContext,
+    classify_storage_exception,
+    partial_success_storage_error,
+)
 from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
@@ -113,19 +116,26 @@ class TeamRegister(
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 
-            metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                metadata, count=len(team_tuple)
-            )
-
-            await asyncio.gather(
-                manager.upsert_user_teams(user_info, *team_tuple, metadata=metadata),
-                manager.upsert_user_summary(
+            try:
+                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
+                    metadata, count=len(team_tuple)
+                )
+                await manager.upsert_user_teams(
+                    user_info,
+                    *team_tuple,
+                    metadata=metadata,
+                )
+                await manager.upsert_user_summary(
                     user_info,
                     message.author.roles if isinstance(message.author, Member) else [],
                     *team_tuple,
                     metadata=metadata,
-                ),
-            )
+                )
+            except Exception as exc:
+                error = partial_success_storage_error(exc)
+                if error is None:
+                    raise
+                raise error from error.__cause__
 
         if self.bot.user is not None:
             await remove_reaction_if_present(
@@ -159,34 +169,73 @@ class TeamRegister(
         member_by_names = {member.name: member for member in source.guild.members}
 
         await interaction.response.defer(ephemeral=True)
-
-        feature_channel_context = await self._get_feature_channel_context(source)
-        context = await self._get_configured_feature_channel_context(
-            feature_channel_context
+        operation_context = StorageOperationContext(
+            operation="team_register_summary",
+            feature_name=self.feature_name,
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
         )
+
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+        except Exception as exc:
+            storage_error = classify_storage_exception(exc)
+            if storage_error is None:
+                raise
+            await send_storage_error(
+                interaction,
+                storage_error,
+                context=operation_context,
+                log=self.logger,
+            )
+            return
+
         if context is None:
             await self._send_missing_config_followup(interaction)
             return
 
-        async with self.lock(context.channel_id):
-            try:
+        try:
+            async with self.lock(context.channel_id):
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
 
-                metadata = (
-                    await context.manager.ensure_worksheets_and_upsert_sheet_config(
-                        metadata,
-                        count=0,  # No teams to process, just refresh summary
+                try:
+                    metadata = (
+                        await context.manager.ensure_worksheets_and_upsert_sheet_config(
+                            metadata,
+                            count=0,  # No teams to process, just refresh summary
+                        )
                     )
-                )
 
-                summary_df = await context.manager.refresh_summary_worksheet(
-                    metadata,
-                    member_by_names=member_by_names,
-                )
-            except GoogleSheetsError as exc:
-                await send_google_sheets_error(interaction, exc)
-                return
+                    summary_df = await context.manager.refresh_summary_worksheet(
+                        metadata,
+                        member_by_names=member_by_names,
+                    )
+                except Exception as exc:
+                    storage_error = partial_success_storage_error(exc)
+                    if storage_error is None:
+                        raise
+                    await send_storage_error(
+                        interaction,
+                        storage_error,
+                        context=operation_context,
+                        log=self.logger,
+                    )
+                    return
+        except Exception as exc:
+            storage_error = classify_storage_exception(exc)
+            if storage_error is None:
+                raise
+            await send_storage_error(
+                interaction,
+                storage_error,
+                context=operation_context,
+                log=self.logger,
+            )
+            return
 
         if summary_df is None:
             await interaction.followup.send(

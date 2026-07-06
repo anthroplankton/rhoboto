@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
-from utils.google_sheets_errors import classify_google_sheets_exception
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
     EntryWorksheetContent,
@@ -18,6 +17,7 @@ from utils.shift_register_structs import (
     Shift,
     ShiftRegisterGoogleSheetsMetadata,
 )
+from utils.storage_errors import StorageError, StorageErrorKind
 
 
 class ShiftRegisterManager(
@@ -145,10 +145,9 @@ class ShiftRegisterManager(
         try:
             EntryWorksheetContent.validate_core_header(df)
         except ValueError as exc:
-            raise classify_google_sheets_exception(
-                exc,
-                operation="validate_shift_entry_header",
-            ) from exc
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
         shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(df)
         content = EntryWorksheetContent(shift_df, plain_df)
 
