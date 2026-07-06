@@ -121,36 +121,27 @@ operation.
 ## Managed Codex Sandbox Commands
 
 In managed Codex sandboxes, keep the general validation commands in
-`docs/project_setup.md` as the project contract, but run uv and Black through
-repo-local caches to avoid host cache permission or lock failures. Bare
-`uv run ...` commands must not be used in managed Codex sandboxes because the
-host uv cache may be unwritable. For Black, the only managed-sandbox entrypoint
-is `scripts/check_black_sandbox.py` through the command below. Select the
-commands that match the change scope:
+`docs/project_setup.md` as the project contract, but run uv through repo-local
+caches to avoid host cache permission or lock failures. Bare `uv run ...`
+commands must not be used in managed Codex sandboxes because the host uv cache
+may be unwritable. Select the commands that match the change scope:
 
 ```shell
 env UV_CACHE_DIR=.cache/uv uv lock --check
 env UV_CACHE_DIR=.cache/uv uv sync --locked
 env UV_CACHE_DIR=.cache/uv uv run ruff check --no-fix .
 env UV_CACHE_DIR=.cache/uv uv run ruff format --check .
-env UV_CACHE_DIR=.cache/uv BLACK_CACHE_DIR=.cache/black uv run python scripts/check_black_sandbox.py
 env UV_CACHE_DIR=.cache/uv uv run pytest --cov=bot --cov=cogs --cov=components --cov=models --cov=utils --cov-report=term-missing --cov-fail-under=35
 env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q main.py bot cogs components models utils
 ```
 
-For Black, use the process exit code rather than the last output line: exit `0`
-is clean, `1` means files would reformat, `123` is an internal error, and
-timeout exit `124` is inconclusive even if the output includes `All done`.
-After the Black 25.9.0 update, the cache-prefixed wide check with `--workers 1`
-has validated cleanly in the managed sandbox, but the no-workers wide Black
-command can still print a clean multi-file summary and then timeout with exit
-`124`. Do not run `uv run black --check main.py bot cogs components models
-utils` without `--workers 1` in managed Codex sandboxes.
+When intentionally repairing Ruff lint or format failures, use the same
+repo-local uv cache prefix with commands that may modify files:
 
-The wrapper keeps the native Black behavior inside one stable interface: it
-runs the primary wide `--workers 1` check first, and only falls back to
-per-file Black checks if the primary check is inconclusive. Do not copy the
-fallback loop into prompts, docs, or skills.
+```shell
+env UV_CACHE_DIR=.cache/uv uv run ruff check --fix .
+env UV_CACHE_DIR=.cache/uv uv run ruff format .
+```
 
 If a validation command fails because of sandbox cache permissions, report that
 as an environment issue separate from repository failures. Do not replace the
@@ -164,8 +155,6 @@ diagnostic fallback.
   sandbox command contract.
 - Do not use bare `uv run ...` commands in managed Codex sandboxes; use the
   repo-local cache-prefixed commands above.
-- Do not treat Black stdout as proof of success in the managed sandbox. Trust
-  the exit code, and treat timeout `124` as inconclusive.
 - Do not assume a local agent memory path is ignored just because it is intended
   to be local. Check `.gitignore` and `git status --short` before handoff.
 - Do not promote `.planning/`, `.superpowers/`, `docs/superpowers/`, subagent

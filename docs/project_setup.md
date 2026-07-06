@@ -35,11 +35,10 @@ matches the decision.
   locked dependency state.
 - The project is not packaged as an installable wheel; `[tool.uv]` sets
   `package = false`.
-- Formatting and linting use both Black and Ruff. Black is the compatibility
-  formatter of record for pre-commit, while Ruff remains the linter, import
-  sorter, and format checker configured in `pyproject.toml`.
-- The documented Black check uses `--workers 1` for deterministic local and CI
-  behavior.
+- Formatting, linting, and import sorting use Ruff, configured in
+  `pyproject.toml`.
+- Ruff owns the 88-character line length and Python 3.13 target-version
+  settings.
 
 ## Validation Contract
 
@@ -52,35 +51,27 @@ uv lock --check
 uv sync --locked
 uv run ruff check --no-fix .
 uv run ruff format --check .
-uv run black --check --workers 1 main.py bot cogs components models utils
 uv run pytest --cov=bot --cov=cogs --cov=components --cov=models --cov=utils --cov-report=term-missing --cov-fail-under=35
 uv run python -m compileall -q main.py bot cogs components models utils
 ```
 
 Use `git diff --check` before handing off changes. `pre-commit run --all-files`
 is useful before committing, but it is not a read-only validation command:
-Black formats code and Ruff is configured with `--fix`.
+Ruff lint is configured with `--fix`, and Ruff format writes formatting changes.
 
-### Managed Codex Sandbox Black Validation
+### Managed Codex Sandbox Validation
 
 The validation commands above are Local/CI forms. In managed Codex sandboxes,
 bare `uv run ...` commands may fail before project code runs because uv can try
 to write the host cache. Always use the repo-local cache-prefixed commands in
 `docs/agent_harness.md`.
 
-Black also needs the managed-sandbox wrapper, not a copied command variant. The
-wide no-workers Black check can print `All done` and still exit `124` after a
-timeout, so stdout is not proof of success. Treat exit `124` as inconclusive,
-not as a formatting pass. `scripts/check_black_sandbox.py` keeps the validated
-wide `--workers 1` check as the primary path and preserves the per-file
-fallback inside the script for timeout cases.
-
 CI in `.github/workflows/ci.yml` mirrors this contract with locked dependency
-installation, Ruff lint, Ruff format, Black format, pytest coverage, and
-`compileall`. Deployment verification in `.github/workflows/deploy.yml` also
-checks the lockfile, installs locked dependencies, compiles Python modules,
-checks runtime imports, and then syncs without default dependency groups before
-deploying to Heroku.
+installation, Ruff lint, Ruff format, pytest coverage, and `compileall`.
+Deployment verification in `.github/workflows/deploy.yml` also checks the
+lockfile, installs locked dependencies, compiles Python modules, checks runtime
+imports, and then syncs without default dependency groups before deploying to
+Heroku.
 
 In managed Codex sandboxes, use the repo-local cache-prefixed command variants
 in `docs/agent_harness.md` instead of the bare commands above.

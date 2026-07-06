@@ -118,7 +118,6 @@ Run automated checks before manual validation:
 uv run pytest
 uv run ruff check --no-fix .
 uv run ruff format --check .
-uv run black --check --workers 1 main.py bot cogs components models utils
 ```
 
 Manual checks are listed in `docs/manual_integration_validation.md`.

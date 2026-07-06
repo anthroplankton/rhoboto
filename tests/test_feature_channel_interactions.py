@@ -1478,7 +1478,7 @@ async def test_user_help_missing_channel_raises_after_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match=(
+        match=re.escape(
             "Interaction guild or channel is None. Cannot send feature help message."
         ),
     ):
@@ -1885,7 +1885,9 @@ async def test_team_summary_missing_guild_raises_before_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match="Interaction guild or channel is None. Cannot refresh team summary.",
+        match=re.escape(
+            "Interaction guild or channel is None. Cannot refresh team summary."
+        ),
     ):
         await TeamRegister.summary.callback(subject, interaction)
 
@@ -2038,7 +2040,7 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
 
     with pytest.raises(
         ValueError,
-        match=(
+        match=re.escape(
             "Interaction guild or channel is None. Cannot delete feature user data."
         ),
     ):
@@ -2469,7 +2471,9 @@ async def test_setup_after_enable_missing_guild_raises_shared_interaction_error(
 
     with pytest.raises(
         ValueError,
-        match=("Interaction guild or channel is None. Cannot set up feature settings."),
+        match=re.escape(
+            "Interaction guild or channel is None. Cannot set up feature settings."
+        ),
     ):
         await subject.setup_after_enable(interaction)
 

@@ -106,7 +106,7 @@ def test_google_sheet_uses_bounded_client_manager() -> None:
 
 @pytest.mark.asyncio
 async def test_gspread_client_manager_does_not_retry_quota_errors_forever() -> None:
-    manager = RhobotoGspreadClientManager(lambda: object(), gspread_delay=0)
+    manager = RhobotoGspreadClientManager(object, gspread_delay=0)
 
     raw_error = api_error(429, "RESOURCE_EXHAUSTED")
 
@@ -118,7 +118,7 @@ async def test_gspread_client_manager_does_not_retry_quota_errors_forever() -> N
 
 @pytest.mark.asyncio
 async def test_gspread_client_manager_does_not_retry_transport_errors_forever() -> None:
-    manager = RhobotoGspreadClientManager(lambda: object(), gspread_delay=0)
+    manager = RhobotoGspreadClientManager(object, gspread_delay=0)
 
     raw_error = RequestsConnectionError("private transport detail")
 

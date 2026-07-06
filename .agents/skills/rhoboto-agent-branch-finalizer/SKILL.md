@@ -129,8 +129,7 @@ without explicit approval.
 
 Do not duplicate validation commands in this skill. Use `docs/project_setup.md`
 for the general validation contract and `docs/agent_harness.md` for managed
-Codex sandbox command variants, Black timeout/cache handling, and Superpowers
-execution rules.
+Codex sandbox command variants and Superpowers execution rules.
 
 List validation already run on the source branch. If validation is missing,
 recommend the narrowest validation that proves the change. Do not run validation

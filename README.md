@@ -33,15 +33,13 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 - Discord Modal/View settings interaction
 
 ## Code Style
-- [Black](https://github.com/psf/black) (line length 88, Python 3.13)
-- [Ruff](https://github.com/astral-sh/ruff) (all rules except D, COM812, UP046)
+- [Ruff](https://github.com/astral-sh/ruff) for linting, import sorting, and formatting (line length 88, Python 3.13; all lint rules except D, COM812, UP046)
 - Google Python style docstrings
 
 Run local checks with:
 ```shell
 uv run ruff check --no-fix .
 uv run ruff format --check .
-uv run black --check --workers 1 main.py bot cogs components models utils
 uv run pytest
 ```
 

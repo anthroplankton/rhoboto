@@ -6,7 +6,7 @@
 
 **Architecture:** Add a thin shared settings flow helper for settings panel copy and response routing, plus `ManagerBase.get_fresh_sheet_config()` for cache-safe state checks. Keep Team/Shift modal parsing, embed fields, view construction, and feature-specific persistence in their existing modules.
 
-**Tech Stack:** Python 3.13, discord.py UI views/modals/buttons, Tortoise ORM models through existing managers, pytest with repo fakes, Ruff, Black.
+**Tech Stack:** Python 3.13, discord.py UI views/modals/buttons, Tortoise ORM models through existing managers, pytest with repo fakes, Ruff.
 
 ## Global Constraints
 
@@ -19,7 +19,7 @@
 - Do not change Google Sheets worksheet layout or columns.
 - Do not change existing Google Sheets error wording.
 - All settings-changing callbacks must continue to require both `administrator` and `manage_channels`.
-- Use repo-local cache-prefixed validation commands in managed Codex sandboxes: `env UV_CACHE_DIR=.cache/uv ...` and `BLACK_CACHE_DIR=.cache/black ...`.
+- Use repo-local cache-prefixed validation commands in managed Codex sandboxes: `env UV_CACHE_DIR=.cache/uv ...`.
 
 ---
 
@@ -1688,14 +1688,6 @@ Run:
 
 ```bash
 env UV_CACHE_DIR=.cache/uv uv run ruff format --check .
-```
-
-Expected: exit code 0.
-
-Run:
-
-```bash
-BLACK_CACHE_DIR=.cache/black env UV_CACHE_DIR=.cache/uv uv run black --check --workers 1 main.py bot cogs components models utils
 ```
 
 Expected: exit code 0.

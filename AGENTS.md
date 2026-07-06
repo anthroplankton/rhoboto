@@ -85,20 +85,19 @@ Read `docs/project_setup.md` before changing project setup, dependencies, genera
 - `uv sync`: install runtime and developer dependencies from `pyproject.toml` and `uv.lock`.
 - `uv lock --check`: verify that `uv.lock` is consistent with `pyproject.toml`.
 - `uv run python main.py`: run the bot locally after setting required environment variables.
-- `pre-commit install`: enable Black and Ruff hooks for commits.
-- `pre-commit run --all-files`: run all configured hooks; this may modify files because Black formats code and Ruff is configured with `--fix`.
+- `pre-commit install`: enable Ruff hooks for commits.
+- `pre-commit run --all-files`: run all configured hooks; this may modify files because Ruff lint is configured with `--fix` and Ruff format writes formatting changes.
 - `uv run ruff check --no-fix .`: lint with Ruff without modifying files.
 - `uv run ruff format --check .`: check Ruff formatting.
-- `uv run black --check --workers 1 main.py bot cogs components models utils`: Local/CI-only Black check outside managed Codex sandboxes.
 - `uv run pytest`: run the automated test suite.
 
-CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, Black format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
+CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
 
-For Black in managed Codex sandboxes, use only the repo-local wrapper `scripts/check_black_sandbox.py` through the cache-prefixed command documented in `docs/agent_harness.md`. Never use `uv run black --check ...` or `pre-commit run --all-files` as the Black validation path in managed Codex sandboxes; bare `uv run ...` can use an unwritable host uv cache, and pre-commit may rewrite files.
+In managed Codex sandboxes, use the repo-local cache-prefixed command variants documented in `docs/agent_harness.md`; bare `uv run ...` can use an unwritable host uv cache, `pre-commit run --all-files` may rewrite files, and Ruff repair commands that intentionally modify files should use the managed-sandbox forms in `docs/agent_harness.md`.
 
 ## Coding Style & Naming Conventions
 
-Use Black formatting with 88-character lines and Ruff settings from `pyproject.toml`. Ruff enables all lint rule families except `D`, `COM812`, and `UP046`; keep imports sorted by Ruff/isort. Use Google-style docstrings for new public modules, classes, and functions where they clarify behavior. Name cogs and feature modules in snake_case, for example `team_register.py`, and keep matching managers and structs in `utils/*_manager.py` and `utils/*_structs.py`. Prefer async APIs for Discord, database, and Google Sheets work.
+Use Ruff formatting with 88-character lines and Ruff settings from `pyproject.toml`. Ruff enables all lint rule families except `D`, `COM812`, and `UP046`; keep imports sorted by Ruff/isort. Use Google-style docstrings for new public modules, classes, and functions where they clarify behavior. Name cogs and feature modules in snake_case, for example `team_register.py`, and keep matching managers and structs in `utils/*_manager.py` and `utils/*_structs.py`. Prefer async APIs for Discord, database, and Google Sheets work.
 
 ## Testing Guidelines
 

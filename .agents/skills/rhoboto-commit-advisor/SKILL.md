@@ -55,8 +55,8 @@ finalization to `$rhoboto-agent-branch-finalizer` or `docs/agent_harness.md`.
    - Use `docs/project_setup.md` when validation advice or validation
      execution needs the project validation contract.
    - Use `docs/agent_harness.md` when validation or the diff involves managed
-     Codex sandbox behavior, Black sandbox timeout/cache handling, `.codex/`,
-     `.agents/`, Superpowers/SDD, agent worktrees, or handoff guidance.
+     Codex sandbox behavior, `.codex/`, `.agents/`, Superpowers/SDD, agent
+     worktrees, or handoff guidance.
 
 3. Protect repository rules.
    - Do not push.
@@ -86,13 +86,10 @@ finalization to `$rhoboto-agent-branch-finalizer` or `docs/agent_harness.md`.
    - For docs-only changes, `git diff --check` is usually the narrowest useful
      pre-commit validation.
    - Use `docs/project_setup.md` for general validation guidance.
-   - Use `docs/agent_harness.md` for managed Codex sandbox command variants,
-     Black timeout/cache handling, and diagnostic fallbacks.
-   - Do not duplicate Black, Ruff, pytest, lockfile, or sandbox command details
-     in this skill.
-   - Do not start overlapping or repeated Black processes.
-   - Do not treat success-like Black stdout as success; follow the documented
-     command result and timeout guidance.
+   - Use `docs/agent_harness.md` for managed Codex sandbox command variants
+     and diagnostic fallbacks.
+   - Do not duplicate Ruff, pytest, lockfile, or sandbox command details in this
+     skill.
    - If a command fails because of the sandbox or cache permissions, report
      that separately from project failures and suggest the closest useful next
      command.

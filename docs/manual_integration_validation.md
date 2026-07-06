@@ -31,7 +31,6 @@ Record the result for each command before starting manual Discord checks.
 | Tests | `uv run pytest` |  |  |
 | Ruff lint | `uv run ruff check --no-fix .` |  |  |
 | Ruff format | `uv run ruff format --check .` |  |  |
-| Black format | `uv run black --check --workers 1 main.py bot cogs components models utils` |  |  |
 | Compile | `uv run python -m compileall -q main.py bot cogs components models utils` |  |  |
 
 Start the bot locally:

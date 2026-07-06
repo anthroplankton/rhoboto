@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -26,7 +27,9 @@ def test_require_guild_source_raises_action_specific_interaction_error() -> None
 
     with pytest.raises(
         ValueError,
-        match=("Interaction guild is None. Cannot configure language settings."),
+        match=re.escape(
+            "Interaction guild is None. Cannot configure language settings."
+        ),
     ):
         require_guild_source(interaction, action="configure language settings")
 
@@ -50,7 +53,7 @@ def test_require_guild_channel_source_raises_interaction_error() -> None:
 
     with pytest.raises(
         ValueError,
-        match=(
+        match=re.escape(
             "Interaction guild or channel is None. Cannot proceed with enable command."
         ),
     ):
@@ -78,7 +81,7 @@ def test_require_guild_channel_source_raises_context_error() -> None:
 
     with pytest.raises(
         ValueError,
-        match=(
+        match=re.escape(
             "Context guild or channel is None. "
             "Cannot check feature status for feature: team_register."
         ),
@@ -96,7 +99,7 @@ def test_require_guild_channel_source_falls_back_to_class_name() -> None:
 
     with pytest.raises(
         ValueError,
-        match=(
+        match=re.escape(
             "UnknownSource guild or channel is None. Cannot inspect unknown source."
         ),
     ):
