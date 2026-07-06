@@ -4,7 +4,7 @@
 
 Rhoboto is a Python 3.13 Discord bot built on `discord.py`. `main.py` initializes logging, validates runtime config, discovers public cog modules under `cogs/`, and starts `Rhoboto`. Core bot setup, configuration, startup/shutdown, and command translation live in `bot/`. Feature cogs live in `cogs/`, with shared channel-scoped feature lifecycle behavior in `cogs/base/feature_channel_base.py`. Discord UI views, modals, buttons, selects, and shared settings-panel helpers live in `components/`. Tortoise ORM models live in `models/`, with shared model helpers in `models/base/`.
 
-Reusable services and domain logic live in `utils/`, including Google Sheets access, managers, parsers, message-template rendering, reactions, logging, locks, and database setup. Localized public announcement/help templates live under `resources/messages/`. Tests live in `tests/` and use pytest plus repo fakes. Durable project documentation lives in `docs/`; `docs/project_setup.md` owns setup, validation, deployment, and agent harness details. Secrets belong under `secrets/`, while runtime databases, logs, and generated runtime artifacts belong under `data/`. Agent support files live in `.agents/` and `.codex/`.
+Reusable services and domain logic live in `utils/`, including Google Sheets access, managers, parsers, message-template rendering, reactions, logging, locks, and database setup. Localized public announcement/help templates live under `resources/messages/`. Tests live in `tests/` and use pytest plus repo fakes. Durable project documentation lives in `docs/`; `docs/project_setup.md` owns general setup, validation, local configuration, and deployment, while `docs/agent_harness.md` owns Codex, agent harness, and managed sandbox details. Secrets belong under `secrets/`, while runtime databases, logs, and generated runtime artifacts belong under `data/`. Agent support files live in `.agents/` and `.codex/`.
 
 ## Safety, Privacy, and Change Boundaries
 
@@ -16,7 +16,10 @@ Reusable services and domain logic live in `utils/`, including Google Sheets acc
 
 ### Git Operations
 
-- Do not stage, commit, or push unless the user explicitly asks for that exact git operation. A request to implement, edit, fix, or review is not a request to stage, commit, or push.
+- Do not stage, commit, push, merge, rebase, cherry-pick into a target branch, delete branches, or remove worktrees unless the user explicitly asks for that exact git operation or an approved plan grants that exact operation.
+- A request to implement, edit, fix, review, use Superpowers, or use Subagent-Driven Development is not by itself permission to modify final project history.
+- Local checkpoint commits are allowed only when the user or an approved plan explicitly selects isolated agent-branch SDD mode, and only on disposable `agent/*` branches in an isolated worktree.
+- Never push, open a pull request, merge, rebase, cherry-pick into the target branch, force-push, delete branches, or remove worktrees without separate explicit approval.
 
 ### Secrets and Private Data
 
@@ -36,7 +39,8 @@ The repo intentionally tracks `.codex/config.toml` for project-local Codex defau
 When an agent artifact contains durable decisions, rewrite only the reusable, neutral content into the tracked documentation surface that matches its audience and scope:
 
 - `AGENTS.md` for agent operating rules and repository-wide coding guidance.
-- `docs/project_setup.md` for setup, validation, deployment, and agent harness contracts.
+- `docs/project_setup.md` for general setup, validation, local configuration, and deployment contracts.
+- `docs/agent_harness.md` for Codex, agent harness, managed sandbox commands, and detailed Superpowers/SDD execution contracts.
 - Feature design docs or implementation plans for feature behavior, compatibility, rollout, and migration decisions.
 - `docs/manual_integration_validation.md` for reusable Discord, Google Sheets, and deployment validation checks.
 
@@ -50,13 +54,13 @@ Use `$discord-bot-feature-plan` before adding or changing Discord features, cogs
 
 Use `$safe-discord-refactor` for behavior-preserving refactors of cogs, managers, parsers, Tortoise access, Google Sheets access, or Discord UI.
 
-Use Superpowers brainstorming for unclear or broad design work: new workflows, architecture changes, UX-heavy behavior, rollout-sensitive changes, or requests with multiple viable approaches. Repository rules still apply when using Superpowers: do not commit unless explicitly asked, and do not create new long-lived docs paths unless the user approves the spec location.
+Use Superpowers brainstorming for unclear or broad design work: new workflows, architecture changes, UX-heavy behavior, rollout-sensitive changes, or requests with multiple viable approaches. Repository rules still apply when using Superpowers: follow the Rhoboto execution mode selection rules in `docs/agent_harness.md`, and do not create new long-lived docs paths unless the user approves the spec location.
 
 Use `$grill-me` to stress-test an existing proposal, plan, or design after the main direction is clear. It is a review aid, not a replacement for Superpowers brainstorming, feature planning, or refactor planning.
 
-Use `$planning-with-files` for multi-step investigations, architecture plans, or work likely to span many tool calls or context resets. It is persistent working memory, not a replacement for Superpowers design or implementation workflows.
+Use `$planning-with-files` for multi-step investigations, architecture plans, or work likely to span many tool calls or context resets. In Rhoboto, keep planning files in ignored local working memory, preferably under `.planning/`. It is persistent working memory, not a replacement for Superpowers design or implementation workflows.
 
-Subagent-Driven Development is an optional execution strategy, not a default requirement for every plan. Use it only when the user, an approved plan, or the task shape calls for independent task-level agent work. In this repository, SDD is report/diff-based rather than commit-based: implementer subagents edit only assigned files in the canonical checkout or provide patches, and reviewers work from task briefs, implementation reports, and scoped git diffs. Repository rules override generic SDD prompts: subagents must not stage, commit, or push unless the user explicitly asks for that exact git operation. Treat the current repository checkout as canonical by default. Temporary worktrees are optional isolation tools, not the default SDD mode; use one only with explicit user approval or an approved plan, then sync completed changes back to the canonical checkout at each checkpoint and verify the canonical `git status --short`.
+Before substantial Superpowers or SDD execution, follow `docs/agent_harness.md` for Rhoboto execution modes, worktree rules, review checkpoints, and final handoff gates. Keep this file as the short routing surface; do not duplicate the detailed runbook here.
 
 ## Project Conventions
 
@@ -76,7 +80,7 @@ When an approved migration plan changes command names, feature names, privileged
 
 ## Build, Test, and Development Commands
 
-Read `docs/project_setup.md` before changing project setup, dependencies, validation commands, CI, deployment, `.codex/`, `.agents/`, or agent harness behavior. That document owns the detailed setup, validation, deployment, and sandbox command contract. The commands below are the normal local and CI command forms; in managed Codex sandboxes, use the repo-local cache-prefixed variants in `docs/project_setup.md` instead of these bare forms.
+Read `docs/project_setup.md` before changing project setup, dependencies, general validation commands, CI, deployment, or local configuration. Read `docs/agent_harness.md` before changing `.codex/`, `.agents/`, managed Codex sandbox commands, or agent harness behavior. The commands below are the normal local and CI command forms; in managed Codex sandboxes, use the repo-local cache-prefixed variants in `docs/agent_harness.md` instead of these bare forms.
 
 - `uv sync`: install runtime and developer dependencies from `pyproject.toml` and `uv.lock`.
 - `uv lock --check`: verify that `uv.lock` is consistent with `pyproject.toml`.
@@ -90,7 +94,7 @@ Read `docs/project_setup.md` before changing project setup, dependencies, valida
 
 CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, Black format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
 
-For Black in managed Codex sandboxes, follow the guarded command in `docs/project_setup.md`; do not treat success-like Black stdout as proof of success without a clean exit code.
+For Black in managed Codex sandboxes, follow the guarded command in `docs/agent_harness.md`; do not treat success-like Black stdout as proof of success without a clean exit code.
 
 ## Coding Style & Naming Conventions
 

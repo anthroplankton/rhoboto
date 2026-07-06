@@ -63,7 +63,8 @@ uv run pytest --cov=bot --cov=cogs --cov=components --cov=models --cov=utils --c
 - Add new features by creating a cog and inheriting from `FeatureChannelBase`
 - All database changes are logged
 - Debug using Discord UI and log files
-- See `docs/project_setup.md` for the project setup, validation, deployment, and agent harness contract
+- See `docs/project_setup.md` for project setup, general validation, local configuration, and deployment
+- See `docs/agent_harness.md` for Codex, agent harness, and managed sandbox command guidance
 - Use `docs/manual_integration_validation.md` for manual Discord and Google Sheets validation
 - See `docs/runtime_architecture_review.md` for current runtime architecture risks and priorities
 - Agent/developer guidance is centralized in `AGENTS.md`; `.github/copilot-instructions.md` is only a compatibility pointer, and `.codex/config.toml` stores repo-local Codex defaults.

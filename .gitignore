@@ -174,3 +174,7 @@ data/
 /.planning/
 /.superpowers/
 /docs/superpowers/
+
+# Agent isolated worktrees
+/.worktrees/
+/worktrees/
