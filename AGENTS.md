@@ -80,7 +80,7 @@ When an approved migration plan changes command names, feature names, privileged
 
 ## Build, Test, and Development Commands
 
-Read `docs/project_setup.md` before changing project setup, dependencies, general validation commands, CI, deployment, or local configuration. Read `docs/agent_harness.md` before changing `.codex/`, `.agents/`, managed Codex sandbox commands, or agent harness behavior. The commands below are the normal local and CI command forms; in managed Codex sandboxes, use the repo-local cache-prefixed variants in `docs/agent_harness.md` instead of these bare forms.
+Read `docs/project_setup.md` before changing project setup, dependencies, general validation commands, CI, deployment, or local configuration. Read `docs/agent_harness.md` before changing `.codex/`, `.agents/`, managed Codex sandbox commands, or agent harness behavior. The commands below are Local/CI command forms; in managed Codex sandboxes, use the repo-local cache-prefixed commands in `docs/agent_harness.md` instead of these bare forms.
 
 - `uv sync`: install runtime and developer dependencies from `pyproject.toml` and `uv.lock`.
 - `uv lock --check`: verify that `uv.lock` is consistent with `pyproject.toml`.
@@ -89,12 +89,12 @@ Read `docs/project_setup.md` before changing project setup, dependencies, genera
 - `pre-commit run --all-files`: run all configured hooks; this may modify files because Black formats code and Ruff is configured with `--fix`.
 - `uv run ruff check --no-fix .`: lint with Ruff without modifying files.
 - `uv run ruff format --check .`: check Ruff formatting.
-- `uv run black --check --workers 1 main.py bot cogs components models utils`: check Black formatting outside managed Codex sandboxes.
+- `uv run black --check --workers 1 main.py bot cogs components models utils`: Local/CI-only Black check outside managed Codex sandboxes.
 - `uv run pytest`: run the automated test suite.
 
 CI is configured in `.github/workflows/ci.yml` and runs `uv lock --check`, `uv sync --locked`, Ruff lint with `--no-fix`, Ruff format check, Black format check, pytest with coverage over `bot`, `cogs`, `components`, `models`, and `utils`, and `compileall`. Deployment is configured by `.github/workflows/deploy.yml`, `.profile`, and `Procfile` for Heroku (`worker: python main.py`).
 
-For Black in managed Codex sandboxes, follow the guarded command in `docs/agent_harness.md`; do not treat success-like Black stdout as proof of success without a clean exit code.
+For Black in managed Codex sandboxes, use only the repo-local wrapper `scripts/check_black_sandbox.py` through the cache-prefixed command documented in `docs/agent_harness.md`. Never use `uv run black --check ...` or `pre-commit run --all-files` as the Black validation path in managed Codex sandboxes; bare `uv run ...` can use an unwritable host uv cache, and pre-commit may rewrite files.
 
 ## Coding Style & Naming Conventions
 

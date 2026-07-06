@@ -61,6 +61,20 @@ Use `git diff --check` before handing off changes. `pre-commit run --all-files`
 is useful before committing, but it is not a read-only validation command:
 Black formats code and Ruff is configured with `--fix`.
 
+### Managed Codex Sandbox Black Validation
+
+The validation commands above are Local/CI forms. In managed Codex sandboxes,
+bare `uv run ...` commands may fail before project code runs because uv can try
+to write the host cache. Always use the repo-local cache-prefixed commands in
+`docs/agent_harness.md`.
+
+Black also needs the managed-sandbox wrapper, not a copied command variant. The
+wide no-workers Black check can print `All done` and still exit `124` after a
+timeout, so stdout is not proof of success. Treat exit `124` as inconclusive,
+not as a formatting pass. `scripts/check_black_sandbox.py` keeps the validated
+wide `--workers 1` check as the primary path and preserves the per-file
+fallback inside the script for timeout cases.
+
 CI in `.github/workflows/ci.yml` mirrors this contract with locked dependency
 installation, Ruff lint, Ruff format, Black format, pytest coverage, and
 `compileall`. Deployment verification in `.github/workflows/deploy.yml` also
