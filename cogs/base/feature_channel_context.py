@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from bot import config
 from models.feature_channel import FeatureChannel
@@ -16,12 +16,8 @@ if TYPE_CHECKING:
     from utils.structs_base import UserInfo
 
 
-TManager = TypeVar("TManager", bound=ManagerBase)
-TSubmission = TypeVar("TSubmission")
-
-
 @dataclass(frozen=True)
-class FeatureChannelContext(Generic[TManager]):
+class FeatureChannelContext[TManager: ManagerBase]:
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -29,7 +25,7 @@ class FeatureChannelContext(Generic[TManager]):
 
 
 @dataclass(frozen=True)
-class ConfiguredFeatureChannelContext(Generic[TManager]):
+class ConfiguredFeatureChannelContext[TManager: ManagerBase]:
     guild_id: int
     channel_id: int
     feature_channel: FeatureChannel
@@ -44,7 +40,7 @@ class MessageParseStatus(Enum):
 
 
 @dataclass(frozen=True)
-class MessageParseResult(Generic[TSubmission]):
+class MessageParseResult[TSubmission]:
     status: MessageParseStatus
     submission: TSubmission | None
     user_info: UserInfo | None
@@ -79,7 +75,7 @@ class MessageParseResult(Generic[TSubmission]):
         )
 
 
-class FeatureChannelContextMixin(Generic[TManager]):
+class FeatureChannelContextMixin[TManager: ManagerBase]:
     feature_name: str
     feature_display_name: str
     ManagerType: type[TManager]

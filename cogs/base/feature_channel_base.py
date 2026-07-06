@@ -4,7 +4,7 @@ import logging
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from discord import Interaction, Message, app_commands
 from discord.ext import commands
@@ -57,13 +57,6 @@ if TYPE_CHECKING:
     from utils.key_async_lock import KeyAsyncLock
 
 
-TFeatureChannel = TypeVar("TFeatureChannel", bound="FeatureChannelBase")
-TManager = TypeVar("TManager", bound=ManagerBase)
-TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
-TSubmission = TypeVar("TSubmission")
-TUpsertResult = TypeVar("TUpsertResult")
-
-
 class _MessageUpsertStatus(Enum):
     IGNORED = auto()
     INVALID = auto()
@@ -72,7 +65,7 @@ class _MessageUpsertStatus(Enum):
 
 
 @dataclass(frozen=True)
-class _MessageUpsertOutcome(Generic[TUpsertResult]):
+class _MessageUpsertOutcome[TUpsertResult]:
     status: _MessageUpsertStatus
     result: TUpsertResult | None = None
 
@@ -239,11 +232,10 @@ class FeatureChannelErrorHandler:
 
 @app_commands.guild_only()
 @app_commands.default_permissions(administrator=True, manage_channels=True)
-class FeatureChannelBase(
+class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
     FeatureChannelContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
-    Generic[TManager, TSubmission, TUpsertResult],
     metaclass=CogABCMeta,
 ):
     """
@@ -920,11 +912,14 @@ class FeatureChannelBase(
 
 
 @app_commands.guild_only()
-class FeatureChannelUserBase(
+class FeatureChannelUserBase[
+    TFeatureChannel: FeatureChannelBase,
+    TManager: ManagerBase,
+    TGoogleSheetsMetadata: GoogleSheetsMetadata,
+](
     FeatureChannelContextMixin[TManager],
     FeatureChannelErrorHandler,
     commands.GroupCog,
-    Generic[TFeatureChannel, TManager, TGoogleSheetsMetadata],
     metaclass=CogABCMeta,
 ):
     """

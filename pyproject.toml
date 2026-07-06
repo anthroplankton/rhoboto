@@ -39,7 +39,7 @@ fix = true
 
 [tool.ruff.lint]
 select = ["ALL"]
-ignore = ["D", "COM812", "UP046"]
+ignore = ["D", "COM812"]
 
 [tool.ruff.lint.per-file-ignores]
 "cogs/shift_register.py" = ["PLR0913"]

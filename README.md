@@ -33,7 +33,7 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 - Discord Modal/View settings interaction
 
 ## Code Style
-- [Ruff](https://github.com/astral-sh/ruff) for linting, import sorting, and formatting (line length 88, Python 3.13; all lint rules except D, COM812, UP046)
+- [Ruff](https://github.com/astral-sh/ruff) for linting, import sorting, and formatting (line length 88, Python 3.13; all lint rules except D and COM812)
 - Google Python style docstrings
 
 Run local checks with:

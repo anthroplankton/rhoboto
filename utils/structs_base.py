@@ -5,7 +5,7 @@ import re
 from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -352,10 +352,7 @@ class GoogleSheetsMetadata:
         return cls.from_subtyped_worksheets(metadata.sheet_url, new_worksheets)
 
 
-TEntry = TypeVar("TEntry")
-
-
-class WorksheetContentBase(ABC, Generic[TEntry]):
+class WorksheetContentBase[TEntry](ABC):
     INDEX_NAME: ClassVar[str]
     COLUMNS: ClassVar[list[str]]
     DTYPES: ClassVar[dict[str, str]]

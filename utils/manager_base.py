@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from models.base.sheet_config_base import SheetConfigBase
 from utils.google_sheets import GoogleSheet
@@ -10,9 +10,6 @@ from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
     from models.feature_channel import FeatureChannel
-
-TSheetConfig = TypeVar("TSheetConfig", bound=SheetConfigBase)
-TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
 
 
 class SheetConfigNotFoundError(Exception):
@@ -28,7 +25,10 @@ class SheetConfigNotFoundError(Exception):
         super().__init__(msg)
 
 
-class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
+class ManagerBase[
+    TSheetConfig: SheetConfigBase,
+    TGoogleSheetsMetadata: GoogleSheetsMetadata,
+](ABC):
     SheetConfigType: type[TSheetConfig]
     GoogleSheetsMetadataType: type[TGoogleSheetsMetadata]
 

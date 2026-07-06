@@ -97,7 +97,7 @@ In managed Codex sandboxes, use the repo-local cache-prefixed command variants d
 
 ## Coding Style & Naming Conventions
 
-Use Ruff formatting with 88-character lines and Ruff settings from `pyproject.toml`. Ruff enables all lint rule families except `D`, `COM812`, and `UP046`; keep imports sorted by Ruff/isort. Use Google-style docstrings for new public modules, classes, and functions where they clarify behavior. Name cogs and feature modules in snake_case, for example `team_register.py`, and keep matching managers and structs in `utils/*_manager.py` and `utils/*_structs.py`. Prefer async APIs for Discord, database, and Google Sheets work.
+Use Ruff formatting with 88-character lines and Ruff settings from `pyproject.toml`. Ruff enables all lint rule families except `D` and `COM812`; keep imports sorted by Ruff/isort. Use Google-style docstrings for new public modules, classes, and functions where they clarify behavior. Name cogs and feature modules in snake_case, for example `team_register.py`, and keep matching managers and structs in `utils/*_manager.py` and `utils/*_structs.py`. Prefer async APIs for Discord, database, and Google Sheets work.
 
 ## Testing Guidelines
 
