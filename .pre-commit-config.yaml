@@ -14,4 +14,4 @@ repos:
       # Run the formatter.
       - id: ruff-format
 
-default_stages: [commit]
+default_stages: [pre-commit]
