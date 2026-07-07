@@ -21,7 +21,7 @@ whole-worksheet reads and writes.
 - `bot/bot.py` owns startup, shutdown, cog loading, database lifecycle,
   translation setup, and slash command sync.
 - `cogs/base/feature_channel_base.py` centralizes channel-scoped enable,
-  disable, clear, permission, guard, delete, and help behavior.
+  disable, clear, permission, guard, delete, and guide behavior.
 - `cogs/team_register.py` and `cogs/shift_register.py` implement feature-specific
   parsing, setup views, Google Sheets manager usage, and upsert flows.
 - `models/` stores feature state and per-feature Google Sheets settings through
@@ -62,13 +62,13 @@ whole-worksheet reads and writes.
 
 ## Unfinished Functionality
 
-- Shift Register supports entry worksheet updates, settings, help, and info
+- Shift Register supports entry worksheet updates, settings, guide, and timeline
   messages, but draft worksheet and final schedule worksheet generation are not
   complete manager workflows.
 - Manual Discord and Google Sheets validation has a runbook, but concrete
   validation results still need to be recorded for a development guild and
   disposable spreadsheet.
-- Internationalization is partial. Help and info templates exist, but many
+- Internationalization is partial. Guide and timeline templates exist, but many
   setup, success, and error messages remain hard-coded in English.
 - Settings validation should better cover sheet URL format, spreadsheet access,
   duplicate worksheet titles, empty worksheet titles, and Discord modal limits.

@@ -31,7 +31,7 @@ class Team(
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
 
     @override
-    def _help_worksheet_id(
+    def _guide_worksheet_id(
         self,
         feature_config: TeamRegisterConfig,
     ) -> int:
@@ -66,7 +66,7 @@ class Team(
         await self.delete_callback(interaction)
 
     @app_commands.command(
-        name=locale_str("help"),
+        name=locale_str("guide"),
         description=locale_str("Show how to register your teams."),
     )
     @app_commands.check(
@@ -75,15 +75,11 @@ class Team(
             feature_display_name,
         )
     )
-    async def help(self, interaction: Interaction) -> None:
-        """Show how to register your teams.
-
-        Args:
-            interaction (Interaction): The Discord interaction.
-        """
-        await self.send_help_message(
+    async def guide(self, interaction: Interaction) -> None:
+        """Show how to register your teams."""
+        await self.send_guide_message(
             interaction,
-            TeamRegister.help_template_key,
+            TeamRegister.guide_template_key,
         )
 
 

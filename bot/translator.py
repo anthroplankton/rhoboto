@@ -23,17 +23,17 @@ class Translator(app_commands.Translator):
                 "ja": "削除",
                 "zh-TW": "刪除",
             },
-            "help": {
-                "ja": "ヘルプ",
-                "zh-TW": "幫助",
+            "guide": {
+                "ja": "使い方",
+                "zh-TW": "說明",
             },
             "Show how to register your teams.": {
-                "ja": "編成の登録方法を表示します。",
-                "zh-TW": "如何登記隊伍編成的說明。",
+                "ja": "編成登録の使い方を表示します。",
+                "zh-TW": "顯示隊伍編成登記說明。",
             },
             "Show how to register your shifts.": {
-                "ja": "シフトの登録方法を表示します。",
-                "zh-TW": "如何登記班表的說明。",
+                "ja": "シフト登録の使い方を表示します。",
+                "zh-TW": "顯示班表登記說明。",
             },
             "Delete your team registration in this channel.": {
                 "ja": "このチャンネルの編成登録を削除します。",

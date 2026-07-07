@@ -49,7 +49,7 @@ class ShiftTimelineValues:
 
 
 @dataclass(frozen=True)
-class ShiftInfoEventDateParts:
+class ShiftTimelineEventDateParts:
     month: int
     day: int
     weekday: str
@@ -57,7 +57,7 @@ class ShiftInfoEventDateParts:
 
 
 @dataclass(frozen=True)
-class ShiftInfoMilestoneParts:
+class ShiftTimelineMilestoneParts:
     day: int
     weekday: str
     hour: int
@@ -251,10 +251,10 @@ def _weekday_token(language: str, weekday_index: int) -> str:
 def _build_event_date_parts(
     language: str,
     value: date | None,
-) -> ShiftInfoEventDateParts | None:
+) -> ShiftTimelineEventDateParts | None:
     if value is None:
         return None
-    return ShiftInfoEventDateParts(
+    return ShiftTimelineEventDateParts(
         month=value.month,
         day=value.day,
         weekday=_weekday_token(language, value.weekday()),
@@ -265,18 +265,18 @@ def _build_event_date_parts(
 def _build_milestone_parts(
     language: str,
     value: datetime | None,
-) -> ShiftInfoMilestoneParts | None:
+) -> ShiftTimelineMilestoneParts | None:
     if value is None:
         return None
     local_value = as_jst(value)
-    return ShiftInfoMilestoneParts(
+    return ShiftTimelineMilestoneParts(
         day=local_value.day,
         weekday=_weekday_token(language, local_value.date().weekday()),
         hour=local_value.hour,
     )
 
 
-def build_shift_info_template_values(  # noqa: PLR0913
+def build_shift_timeline_template_values(  # noqa: PLR0913
     language: str,
     *,
     day_number: int | None,
@@ -286,7 +286,7 @@ def build_shift_info_template_values(  # noqa: PLR0913
     draft_shift_proposal_at: datetime | None,
     final_shift_notice_at: datetime | None,
 ) -> dict[str, object]:
-    """Build locale-specific values for Shift Register info templates."""
+    """Build locale-specific values for Shift Register timeline templates."""
     return {
         "day_number": day_number,
         "event_date": _build_event_date_parts(language, event_date),
@@ -306,18 +306,18 @@ def build_shift_info_template_values(  # noqa: PLR0913
     }
 
 
-async def render_shift_info_announcement_messages(
+async def render_shift_timeline_announcement_messages(
     template_key: str,
     guild_id: int,
     logger: logging.Logger | None = None,
     **values: object,
 ) -> list[RenderedAnnouncement]:
-    """Render Shift Register info announcements with locale-specific values."""
+    """Render Shift Register timeline announcements with locale-specific values."""
     languages = await get_announcement_languages(guild_id, logger)
     rendered: list[RenderedAnnouncement] = []
     for language in languages:
         try:
-            template_values = build_shift_info_template_values(
+            template_values = build_shift_timeline_template_values(
                 language,
                 day_number=_optional_int(values.get("day_number")),
                 event_date=_optional_date(values.get("event_date")),
@@ -336,7 +336,7 @@ async def render_shift_info_announcement_messages(
         except MessageTemplateNotFoundError:
             if logger is not None:
                 logger.warning(
-                    "Missing Shift Register info template `%s` for language `%s`.",
+                    "Missing Shift Register timeline template `%s` for language `%s`.",
                     template_key,
                     language,
                 )
@@ -344,7 +344,7 @@ async def render_shift_info_announcement_messages(
         rendered.append(
             RenderedAnnouncement(
                 language=language,
-                content=_compact_shift_info_message(content),
+                content=_compact_shift_timeline_message(content),
             )
         )
     return rendered
@@ -362,7 +362,7 @@ def _optional_datetime(value: object) -> datetime | None:
     return value if value.__class__ is datetime else None
 
 
-def _compact_shift_info_message(content: str) -> str:
+def _compact_shift_timeline_message(content: str) -> str:
     lines = [line.rstrip() for line in content.splitlines()]
     while lines and not lines[0].strip():
         lines.pop(0)

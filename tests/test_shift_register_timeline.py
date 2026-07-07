@@ -7,10 +7,10 @@ import pytest
 from utils.shift_register_timeline import (
     ShiftTimelineInput,
     ShiftTimelineParseError,
-    build_shift_info_template_values,
+    build_shift_timeline_template_values,
     format_iso_hour,
     parse_shift_timeline_input,
-    render_shift_info_announcement_messages,
+    render_shift_timeline_announcement_messages,
 )
 
 
@@ -197,8 +197,8 @@ def test_timeline_iso_formatter_renders_jst_for_settings_ui() -> None:
     assert format_iso_hour(value) == "2026-08-12 21:00 JST"
 
 
-def test_build_shift_info_template_values_formats_ja_structured_values() -> None:
-    values = build_shift_info_template_values(
+def test_build_shift_timeline_template_values_formats_ja_structured_values() -> None:
+    values = build_shift_timeline_template_values(
         "ja",
         day_number=2,
         event_date=date(2026, 8, 12),
@@ -226,8 +226,8 @@ def test_build_shift_info_template_values_formats_ja_structured_values() -> None
     assert "deadline_processing_note" not in values
 
 
-def test_build_shift_info_template_values_formats_zh_tw_structured_values() -> None:
-    values = build_shift_info_template_values(
+def test_build_shift_timeline_template_values_formats_zh_tw_structured_values() -> None:
+    values = build_shift_timeline_template_values(
         "zh_tw",
         day_number=1,
         event_date=date(2026, 7, 4),
@@ -247,8 +247,8 @@ def test_build_shift_info_template_values_formats_zh_tw_structured_values() -> N
     assert values["final_shift_notice"] is None
 
 
-def test_build_shift_info_template_values_formats_en_structured_values() -> None:
-    values = build_shift_info_template_values(
+def test_build_shift_timeline_template_values_formats_en_structured_values() -> None:
+    values = build_shift_timeline_template_values(
         "en",
         day_number=None,
         event_date=date(2026, 8, 12),
@@ -269,8 +269,10 @@ def test_build_shift_info_template_values_formats_en_structured_values() -> None
     assert values["final_shift_notice"].hour == 18
 
 
-def test_build_shift_info_template_values_uses_jst_date_for_milestone_weekday() -> None:
-    values = build_shift_info_template_values(
+def test_build_shift_timeline_template_values_uses_jst_date_for_milestone_weekday() -> (
+    None
+):
+    values = build_shift_timeline_template_values(
         "ja",
         day_number=None,
         event_date=None,
@@ -287,7 +289,7 @@ def test_build_shift_info_template_values_uses_jst_date_for_milestone_weekday() 
 
 
 @pytest.mark.asyncio
-async def test_render_shift_info_announcement_messages_uses_language_specific_values(
+async def test_render_shift_timeline_messages_uses_language_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, dict[str, object]] = {}
@@ -316,8 +318,8 @@ async def test_render_shift_info_announcement_messages_uses_language_specific_va
         fake_render_message_template,
     )
 
-    rendered = await render_shift_info_announcement_messages(
-        "shift.info",
+    rendered = await render_shift_timeline_announcement_messages(
+        "shift.timeline",
         111,
         None,
         day_number=2,
@@ -329,7 +331,7 @@ async def test_render_shift_info_announcement_messages_uses_language_specific_va
     )
 
     assert [item.language for item in rendered] == ["ja", "en"]
-    assert rendered[0].content == "shift.info:ja\n\nbody"
+    assert rendered[0].content == "shift.timeline:ja\n\nbody"
     assert captured["ja"]["event_date"].weekday == "水"
     assert captured["ja"]["submission_deadline"].weekday == "水"
     assert captured["ja"]["submission_deadline"].hour == 21

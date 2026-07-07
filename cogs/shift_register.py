@@ -23,7 +23,7 @@ from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
-from utils.shift_register_timeline import render_shift_info_announcement_messages
+from utils.shift_register_timeline import render_shift_timeline_announcement_messages
 from utils.storage_errors import partial_success_storage_error
 
 if TYPE_CHECKING:
@@ -42,14 +42,14 @@ class ShiftRegister(
 ):
     feature_name = "shift_register"
     feature_display_name = SHIFT_REGISTER_DISPLAY_NAME
-    help_template_key = "shift.help"
-    info_template_key = "shift.info"
+    guide_template_key = "shift.guide"
+    timeline_template_key = "shift.timeline"
     lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
 
     @override
-    def _help_worksheet_id(
+    def _guide_worksheet_id(
         self,
         feature_config: ShiftRegisterConfig,
     ) -> int:
@@ -178,7 +178,11 @@ class ShiftRegister(
         await self.setup_after_enable(interaction)
 
     @app_commands.command(
-        name="info",
+        name="announce_timeline",
+        description=(
+            "Post the shift registration timeline using configured announcement "
+            "languages."
+        ),
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
@@ -186,12 +190,12 @@ class ShiftRegister(
             feature_display_name,
         )
     )
-    async def info(self, interaction: Interaction) -> None:
+    async def announce_timeline(self, interaction: Interaction) -> None:
         await interaction.response.defer(ephemeral=False)
 
         source = require_guild_channel_source(
             interaction,
-            action="show shift info",
+            action="post shift registration timeline announcement",
         )
         try:
             feature_channel_context = await self._get_feature_channel_context(source)
@@ -205,8 +209,8 @@ class ShiftRegister(
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 getattr(context.feature_config, "recruitment_time_ranges", None)
             )
-            announcements = await render_shift_info_announcement_messages(
-                self.info_template_key,
+            announcements = await render_shift_timeline_announcement_messages(
+                self.timeline_template_key,
                 context.guild_id,
                 self.logger,
                 day_number=getattr(context.feature_config, "day_number", None),
@@ -233,15 +237,17 @@ class ShiftRegister(
                 interaction,
                 exc,
                 source=source,
-                operation="shift_register_info",
+                operation="shift_register_announce_timeline",
             )
             return
 
         await _send_public_announcement_followups(interaction, announcements)
 
     @app_commands.command(
-        name="help",
-        description="Show the all language how to register your data for this feature.",
+        name="announce_guide",
+        description=(
+            "Post the shift registration guide using configured announcement languages."
+        ),
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
@@ -249,8 +255,8 @@ class ShiftRegister(
             feature_display_name,
         )
     )
-    async def help(self, interaction: Interaction) -> None:
-        await self._help_callback(interaction)
+    async def announce_guide(self, interaction: Interaction) -> None:
+        await self.send_guide_message(interaction)
 
 
 async def setup(bot: Rhoboto) -> None:

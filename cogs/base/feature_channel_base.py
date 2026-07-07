@@ -672,33 +672,31 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                 "No response received. Operation timed out.", ephemeral=True
             )
 
-    help_template_key: str
+    guide_template_key: str
 
-    def _help_worksheet_id(
+    def _guide_worksheet_id(
         self,
         _feature_config: SheetConfigBase,
     ) -> int | None:
         return None
 
-    def _help_sheet_url(
+    def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._help_worksheet_id(feature_config),
+            self._guide_worksheet_id(feature_config),
         )
 
-    async def _help_callback(self, interaction: Interaction) -> None:
+    async def send_guide_message(self, interaction: Interaction) -> None:
         """
-        Show help for this feature.
-        This method should be implemented by subclasses to provide
-        feature-specific help text.
+        Post guide announcements for this feature.
         """
         await interaction.response.defer(ephemeral=False)
         source = require_guild_channel_source(
             interaction,
-            action="show feature help",
+            action=f"post {self.feature_display_name} guide announcement",
         )
 
         try:
@@ -712,18 +710,18 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
 
             bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
             announcements = await render_announcement_messages(
-                self.help_template_key,
+                self.guide_template_key,
                 context.guild_id,
                 self.logger,
                 bot=bot_mention,
-                sheet_url=self._help_sheet_url(context.feature_config),
+                sheet_url=self._guide_sheet_url(context.feature_config),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
                 interaction,
                 exc,
                 source=source,
-                operation="help",
+                operation="send_guide_announcement",
             )
             return
 
@@ -970,19 +968,19 @@ class FeatureChannelUserBase[
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
-    def _help_worksheet_id(
+    def _guide_worksheet_id(
         self,
         _feature_config: SheetConfigBase,
     ) -> int | None:
         return None
 
-    def _help_sheet_url(
+    def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._help_worksheet_id(feature_config),
+            self._guide_worksheet_id(feature_config),
         )
 
     async def delete_callback(self, interaction: Interaction) -> None:
@@ -1040,19 +1038,19 @@ class FeatureChannelUserBase[
 
         await interaction.followup.send(content=content, ephemeral=True)
 
-    async def send_help_message(
+    async def send_guide_message(
         self,
         interaction: Interaction,
         template_key: str,
     ) -> None:
         """
-        Show help for team registration.
+        Send an ephemeral guide message for this feature.
         """
 
         await interaction.response.defer(ephemeral=True)
         source = require_guild_channel_source(
             interaction,
-            action="send feature help message",
+            action=f"send {self.feature_display_name} guide message",
         )
 
         try:
@@ -1070,14 +1068,14 @@ class FeatureChannelUserBase[
                 template_key,
                 locale,
                 bot=bot_mention,
-                sheet_url=self._help_sheet_url(context.feature_config),
+                sheet_url=self._guide_sheet_url(context.feature_config),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
                 interaction,
                 exc,
                 source=source,
-                operation="send_help_message",
+                operation="send_guide_message",
             )
             return
 

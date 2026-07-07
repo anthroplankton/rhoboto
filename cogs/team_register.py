@@ -43,13 +43,13 @@ class TeamRegister(
 ):
     feature_name = "team_register"
     feature_display_name = TEAM_REGISTER_DISPLAY_NAME
-    help_template_key = "team.help"
+    guide_template_key = "team.guide"
     lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
 
     @override
-    def _help_worksheet_id(
+    def _guide_worksheet_id(
         self,
         feature_config: TeamRegisterConfig,
     ) -> int:
@@ -270,8 +270,10 @@ class TeamRegister(
         await self.setup_after_enable(interaction)
 
     @app_commands.command(
-        name="help",
-        description="Show the all language how to register your data for this feature.",
+        name="announce_guide",
+        description=(
+            "Post the team registration guide using configured announcement languages."
+        ),
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
@@ -279,8 +281,8 @@ class TeamRegister(
             feature_display_name,
         )
     )
-    async def help(self, interaction: Interaction) -> None:
-        await self._help_callback(interaction)
+    async def announce_guide(self, interaction: Interaction) -> None:
+        await self.send_guide_message(interaction)
 
 
 async def setup(bot: Rhoboto) -> None:

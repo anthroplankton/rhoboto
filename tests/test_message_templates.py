@@ -44,15 +44,15 @@ def test_locale_to_template_code(locale: str, expected: str) -> None:
 
 
 def test_get_message_template_name_and_path_use_key_segments() -> None:
-    assert get_message_template_name("shift.info", "en") == "shift/info.en.md"
-    assert get_message_template_path("team.help", "zh_tw") == (
-        message_templates.TEMPLATE_ROOT / "team" / "help.zh_tw.md"
+    assert get_message_template_name("shift.timeline", "en") == ("shift/timeline.en.md")
+    assert get_message_template_path("team.guide", "zh_tw") == (
+        message_templates.TEMPLATE_ROOT / "team" / "guide.zh_tw.md"
     )
 
 
 def test_render_message_template_injects_values() -> None:
     content = render_message_template(
-        "shift.info",
+        "shift.timeline",
         "en",
         day_number=2,
         event_date=SimpleNamespace(month=8, month_name="August", day=12, weekday="Wed"),
@@ -158,7 +158,7 @@ def test_render_message_template_does_not_autoescape_markdown(
         ),
     ],
 )
-def test_shift_info_templates_render_announcement_values(
+def test_shift_timeline_templates_render_announcement_values(
     locale: str,
     expected_title: str,
     expected_deadline: str,
@@ -175,7 +175,7 @@ def test_shift_info_templates_render_announcement_values(
         hour=21,
     )
     content = render_message_template(
-        "shift.info",
+        "shift.timeline",
         locale,
         day_number=1,
         event_date=event_date,
@@ -194,9 +194,9 @@ def test_shift_info_templates_render_announcement_values(
     assert "{%" not in content
 
 
-@pytest.mark.parametrize("key", ["shift.help", "team.help"])
+@pytest.mark.parametrize("key", ["shift.guide", "team.guide"])
 @pytest.mark.parametrize("locale", ["ja", "zh_tw", "en"])
-def test_help_templates_render_jinja_values(key: str, locale: str) -> None:
+def test_guide_templates_render_jinja_values(key: str, locale: str) -> None:
     content = render_message_template(
         key,
         locale,
@@ -241,12 +241,12 @@ def test_help_templates_render_jinja_values(key: str, locale: str) -> None:
         ),
     ],
 )
-def test_team_help_describes_registration_reactions(
+def test_team_guide_describes_registration_reactions(
     locale: str,
     expected: str,
 ) -> None:
     content = render_message_template(
-        "team.help",
+        "team.guide",
         locale,
         bot="@Rhoboto",
         sheet_url="https://docs.google.com/spreadsheets/d/example",

@@ -23,9 +23,9 @@ Discord's per-user locale handling.
 
 This feature currently applies only to public announcement messages from:
 
-- `/team_register help`
-- `/shift_register help`
-- `/shift_register info`
+- `/team_register announce_guide`
+- `/shift_register announce_guide`
+- `/shift_register announce_timeline`
 
 It does not affect management UI text, ephemeral setup or status responses,
 delete success messages, Google Sheets errors, command names, or command

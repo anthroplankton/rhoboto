@@ -41,7 +41,7 @@ guild, channel, message ID when available, and safe maintainer hints.
 Storage `try` blocks should cover the smallest workflow segment that can raise
 an expected storage failure and has the same user-facing recovery message. They
 should not cover unrelated Discord delivery, such as normal success messages,
-public announcement followups, or help followups. If Discord delivery itself
+public announcement followups, or guide followups. If Discord delivery itself
 fails, that failure should bubble as a Discord/runtime failure instead of being
 classified as database or Google Sheets storage failure.
 
@@ -107,5 +107,5 @@ instead of introducing a second error taxonomy.
 - database migrations
 - Google Sheets worksheet layout changes
 - rollback or cleanup of Google Sheets changes
-- public announcement/help template changes
+- public announcement/guide template changes
 - full localization of administrator-only storage errors

@@ -14,7 +14,7 @@ This migration includes:
 - Persisting `recruitment_time_ranges`, defaulting to `4-28`.
 - Reserving `deadline_automation_enabled`, defaulting to `false`.
 - Moving Shift Entry worksheets to fixed hour columns `0-1` through `29-30`.
-- Making `/shift_register info` read saved settings instead of command
+- Making `/shift_register announce_timeline` read saved settings instead of command
   parameters.
 
 This migration does not include:
@@ -24,7 +24,7 @@ This migration does not include:
 - Automatic draft shift generation.
 - Reminder channels.
 - Role assignment from final shifts.
-- `/shift_register info` removal.
+- `/shift_register announce_timeline` removal.
 
 ## Database Migration
 
@@ -104,7 +104,7 @@ After database and sheet migration:
    - Recruitment Time Range.
 3. Use `Edit Shift Timeline` to save day number, event date, and milestones.
 4. Use `Edit Recruitment Time Range` to confirm or change the range.
-5. Run `/shift_register info` with no parameters and confirm the public
+5. Run `/shift_register announce_timeline` with no parameters and confirm the public
    announcement uses the saved values.
 
 Blank timeline fields are valid. Blank recruitment range input resets to

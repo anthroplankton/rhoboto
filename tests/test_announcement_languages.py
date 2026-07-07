@@ -73,7 +73,7 @@ async def test_save_and_get_announcement_languages_preserves_order() -> None:
 
 def test_render_announcement_messages_for_languages_preserves_order() -> None:
     messages = render_announcement_messages_for_languages(
-        "team.help",
+        "team.guide",
         ["ja", "zh_tw", "en"],
         bot="@Rhoboto",
         sheet_url="https://sheet.example",
@@ -102,7 +102,7 @@ def test_render_announcement_messages_for_languages_skips_missing_template(
     )
 
     messages = render_announcement_messages_for_languages(
-        "team.help",
+        "team.guide",
         ["ja", "zh_tw", "en"],
         bot="@Rhoboto",
         sheet_url="https://sheet.example",
@@ -131,7 +131,7 @@ def test_render_announcement_messages_for_languages_returns_empty_when_all_missi
 
     assert (
         render_announcement_messages_for_languages(
-            "team.help",
+            "team.guide",
             ["ja", "en"],
             bot="@Rhoboto",
             sheet_url="https://sheet.example",
@@ -146,7 +146,7 @@ def test_render_announcement_messages_for_languages_does_not_fallback(
 ) -> None:
     assert (
         render_announcement_messages_for_languages(
-            "team.help",
+            "team.guide",
             languages,
             bot="@Rhoboto",
             sheet_url="https://sheet.example",

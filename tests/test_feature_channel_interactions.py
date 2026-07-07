@@ -503,8 +503,8 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_send_missing_config_followup",
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
-        "_help_worksheet_id",
-        "_help_sheet_url",
+        "_guide_worksheet_id",
+        "_guide_sheet_url",
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, method.__get__(subject, type(subject)))
@@ -935,18 +935,19 @@ async def test_disable_response_uses_feature_display_name_when_not_enabled() -> 
 
 
 @pytest.mark.asyncio
-async def test_user_help_defers_before_followup(
+async def test_user_guide_defers_before_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction(locale="zh-TW")
     subject = feature_channel_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
     )
 
-    await FeatureChannelUserBase.send_help_message(subject, interaction, "team.help")
+    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
 
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
@@ -1459,7 +1460,7 @@ async def test_delete_callback_db_failure_sends_safe_storage_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_user_help_uses_followup_for_missing_config(
+async def test_user_guide_uses_followup_for_missing_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1471,7 +1472,7 @@ async def test_user_help_uses_followup_for_missing_config(
         bot=SimpleNamespace(user=None),
     )
 
-    await FeatureChannelUserBase.send_help_message(subject, interaction, "team.help")
+    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
 
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
@@ -1480,11 +1481,12 @@ async def test_user_help_uses_followup_for_missing_config(
 
 
 @pytest.mark.asyncio
-async def test_user_help_missing_channel_raises_after_defer() -> None:
+async def test_user_guide_missing_channel_raises_after_defer() -> None:
     interaction = FakeInteraction()
     interaction.channel = None
     subject = feature_channel_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=None),
     )
@@ -1492,20 +1494,21 @@ async def test_user_help_missing_channel_raises_after_defer() -> None:
     with pytest.raises(
         ValueError,
         match=re.escape(
-            "Interaction guild or channel is None. Cannot send feature help message."
+            "Interaction guild or channel is None. Cannot send Team Register guide "
+            "message."
         ),
     ):
-        await FeatureChannelUserBase.send_help_message(
+        await FeatureChannelUserBase.send_guide_message(
             subject,
             interaction,
-            "team.help",
+            "team.guide",
         )
 
     assert interaction.response.deferred == [True]
 
 
 @pytest.mark.asyncio
-async def test_team_public_help_uses_summary_worksheet_gid(
+async def test_team_public_guide_uses_summary_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1518,10 +1521,10 @@ async def test_team_public_help_uses_summary_worksheet_gid(
         _logger: object = None,
         **values: object,
     ) -> list[RenderedAnnouncement]:
-        assert template_key == "team.help"
+        assert template_key == "team.guide"
         assert guild_id == 111
         captured_sheet_urls.append(values["sheet_url"])
-        return [RenderedAnnouncement(language="en", content="en help")]
+        return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
         "cogs.base.feature_channel_base.render_announcement_messages",
@@ -1532,16 +1535,16 @@ async def test_team_public_help_uses_summary_worksheet_gid(
     subject.bot.user = SimpleNamespace(mention="@Rhoboto")
     interaction = FakeInteraction(locale="en-US")
 
-    await subject._help_callback(interaction)
+    await subject.send_guide_message(interaction)
 
     assert captured_sheet_urls == [
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
     ]
-    assert interaction.followup.messages == [("en help", {"ephemeral": False})]
+    assert interaction.followup.messages == [("en guide", {"ephemeral": False})]
 
 
 @pytest.mark.asyncio
-async def test_shift_public_help_uses_entry_worksheet_gid(
+async def test_shift_public_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1554,10 +1557,10 @@ async def test_shift_public_help_uses_entry_worksheet_gid(
         _logger: object = None,
         **values: object,
     ) -> list[RenderedAnnouncement]:
-        assert template_key == "shift.help"
+        assert template_key == "shift.guide"
         assert guild_id == 111
         captured_sheet_urls.append(values["sheet_url"])
-        return [RenderedAnnouncement(language="en", content="en help")]
+        return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
         "cogs.base.feature_channel_base.render_announcement_messages",
@@ -1568,16 +1571,16 @@ async def test_shift_public_help_uses_entry_worksheet_gid(
     subject.bot.user = SimpleNamespace(mention="@Rhoboto")
     interaction = FakeInteraction(locale="en-US")
 
-    await subject._help_callback(interaction)
+    await subject.send_guide_message(interaction)
 
     assert captured_sheet_urls == [
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
     ]
-    assert interaction.followup.messages == [("en help", {"ephemeral": False})]
+    assert interaction.followup.messages == [("en guide", {"ephemeral": False})]
 
 
 @pytest.mark.asyncio
-async def test_team_user_help_uses_summary_worksheet_gid(
+async def test_team_user_guide_uses_summary_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1589,10 +1592,10 @@ async def test_team_user_help_uses_summary_worksheet_gid(
         locale: str,
         **values: object,
     ) -> str:
-        assert template_key == "team.help"
+        assert template_key == "team.guide"
         assert locale == "en"
         captured_values.update(values)
-        return "rendered team help"
+        return "rendered team guide"
 
     monkeypatch.setattr(
         "cogs.base.feature_channel_base.render_message_template",
@@ -1603,18 +1606,18 @@ async def test_team_user_help_uses_summary_worksheet_gid(
     subject.bot.user = SimpleNamespace(mention="@Rhoboto")
     interaction = FakeInteraction(locale="en-US")
 
-    await subject.send_help_message(interaction, TeamRegister.help_template_key)
+    await subject.send_guide_message(interaction, TeamRegister.guide_template_key)
 
     assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
     )
     assert interaction.followup.messages == [
-        ("rendered team help", {"ephemeral": True})
+        ("rendered team guide", {"ephemeral": True})
     ]
 
 
 @pytest.mark.asyncio
-async def test_shift_user_help_uses_entry_worksheet_gid(
+async def test_shift_user_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1626,10 +1629,10 @@ async def test_shift_user_help_uses_entry_worksheet_gid(
         locale: str,
         **values: object,
     ) -> str:
-        assert template_key == "shift.help"
+        assert template_key == "shift.guide"
         assert locale == "en"
         captured_values.update(values)
-        return "rendered shift help"
+        return "rendered shift guide"
 
     monkeypatch.setattr(
         "cogs.base.feature_channel_base.render_message_template",
@@ -1640,18 +1643,18 @@ async def test_shift_user_help_uses_entry_worksheet_gid(
     subject.bot.user = SimpleNamespace(mention="@Rhoboto")
     interaction = FakeInteraction(locale="en-US")
 
-    await subject.send_help_message(interaction, ShiftRegister.help_template_key)
+    await subject.send_guide_message(interaction, ShiftRegister.guide_template_key)
 
     assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
     )
     assert interaction.followup.messages == [
-        ("rendered shift help", {"ephemeral": True})
+        ("rendered shift guide", {"ephemeral": True})
     ]
 
 
 @pytest.mark.asyncio
-async def test_public_register_help_sends_announcement_languages_in_order(
+async def test_public_register_guide_sends_announcement_languages_in_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1662,14 +1665,14 @@ async def test_public_register_help_sends_announcement_languages_in_order(
         _logger: object = None,
         **values: object,
     ) -> list[RenderedAnnouncement]:
-        assert template_key == "team.help"
+        assert template_key == "team.guide"
         assert guild_id == 111
         assert values["bot"] == "@Rhoboto"
         assert values["sheet_url"] == "https://sheet.example"
         return [
-            RenderedAnnouncement(language="ja", content="ja help"),
-            RenderedAnnouncement(language="zh_tw", content="zh help"),
-            RenderedAnnouncement(language="en", content="en help"),
+            RenderedAnnouncement(language="ja", content="ja guide"),
+            RenderedAnnouncement(language="zh_tw", content="zh guide"),
+            RenderedAnnouncement(language="en", content="en guide"),
         ]
 
     monkeypatch.setattr(
@@ -1680,24 +1683,25 @@ async def test_public_register_help_sends_announcement_languages_in_order(
     interaction = FakeInteraction(locale="en-US")
     subject = feature_channel_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
-        help_template_key="team.help",
+        guide_template_key="team.guide",
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)
+    await FeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
-        ("ja help", {"ephemeral": False}),
-        ("zh help", {"ephemeral": False}),
-        ("en help", {"ephemeral": False}),
+        ("ja guide", {"ephemeral": False}),
+        ("zh guide", {"ephemeral": False}),
+        ("en guide", {"ephemeral": False}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_public_register_help_reports_missing_config(
+async def test_public_register_guide_reports_missing_config(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1707,11 +1711,11 @@ async def test_public_register_help_reports_missing_config(
         feature_display_name="Team Register",
         ManagerType=MissingConfigManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
-        help_template_key="team.help",
+        guide_template_key="team.guide",
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)
+    await FeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
@@ -1723,7 +1727,7 @@ async def test_public_register_help_reports_missing_config(
 
 
 @pytest.mark.asyncio
-async def test_public_register_help_reports_render_failure(
+async def test_public_register_guide_reports_render_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -1742,13 +1746,14 @@ async def test_public_register_help_reports_render_failure(
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
+        feature_display_name="Team Register",
         ManagerType=ConfiguredManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
-        help_template_key="team.help",
+        guide_template_key="team.guide",
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase._help_callback(subject, interaction)
+    await FeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.followup.messages == [
         (
@@ -1759,18 +1764,18 @@ async def test_public_register_help_reports_render_failure(
 
 
 @pytest.mark.asyncio
-async def test_shift_info_defers_before_public_followup(
+async def test_shift_timeline_defers_before_public_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
 
-    async def fake_render_shift_info_announcement_messages(
+    async def fake_render_shift_timeline_announcement_messages(
         template_key: str,
         guild_id: int,
         _logger: object = None,
         **values: object,
     ) -> list[RenderedAnnouncement]:
-        assert template_key == "shift.info"
+        assert template_key == "shift.timeline"
         assert guild_id == 111
         assert "bot" not in values
         assert values["day_number"] == 2
@@ -1784,13 +1789,13 @@ async def test_shift_info_defers_before_public_followup(
             tzinfo=dt.UTC,
         )
         return [
-            RenderedAnnouncement(language="ja", content="ja info"),
-            RenderedAnnouncement(language="en", content="en info"),
+            RenderedAnnouncement(language="ja", content="ja timeline"),
+            RenderedAnnouncement(language="en", content="en timeline"),
         ]
 
     monkeypatch.setattr(
-        "cogs.shift_register.render_shift_info_announcement_messages",
-        fake_render_shift_info_announcement_messages,
+        "cogs.shift_register.render_shift_timeline_announcement_messages",
+        fake_render_shift_timeline_announcement_messages,
     )
 
     interaction = FakeInteraction(locale="ja")
@@ -1798,26 +1803,24 @@ async def test_shift_info_defers_before_public_followup(
         feature_name="shift_register",
         ManagerType=ConfiguredMultiRangeShiftInfoManager,
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
-        info_template_key="shift.info",
+        timeline_template_key="shift.timeline",
         logger=NullLogger(),
     )
 
-    await ShiftRegister.info.callback(
+    await ShiftRegister.announce_timeline.callback(
         subject,
         interaction,
     )
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
-        ("ja info", {"ephemeral": False}),
-        ("en info", {"ephemeral": False}),
+        ("ja timeline", {"ephemeral": False}),
+        ("en timeline", {"ephemeral": False}),
     ]
 
 
 @pytest.mark.asyncio
-async def test_shift_info_config_lookup_db_failure_sends_safe_storage_followup() -> (
-    None
-):
+async def test_shift_timeline_db_failure_sends_storage_followup() -> None:
     async def failing_context(_source: object) -> object:
         raise private_database_error()
 
@@ -1829,7 +1832,7 @@ async def test_shift_info_config_lookup_db_failure_sends_safe_storage_followup()
     )
     subject._get_feature_channel_context = failing_context
 
-    await ShiftRegister.info.callback(subject, interaction)
+    await ShiftRegister.announce_timeline.callback(subject, interaction)
 
     assert interaction.response.deferred == [False]
     contents = interaction_contents(interaction)
@@ -1839,24 +1842,24 @@ async def test_shift_info_config_lookup_db_failure_sends_safe_storage_followup()
 
 
 @pytest.mark.asyncio
-async def test_shift_info_delivery_timeout_is_not_classified_as_storage(
+async def test_shift_timeline_delivery_timeout_is_not_classified_as_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
 
-    async def fake_render_shift_info_announcement_messages(
+    async def fake_render_shift_timeline_announcement_messages(
         *_: object,
         **__: object,
     ) -> list[RenderedAnnouncement]:
-        return [RenderedAnnouncement(language="en", content="en info")]
+        return [RenderedAnnouncement(language="en", content="en timeline")]
 
     async def fail_delivery(*_: object, **__: object) -> bool:
         message = "discord delivery timeout"
         raise TimeoutError(message)
 
     monkeypatch.setattr(
-        "cogs.shift_register.render_shift_info_announcement_messages",
-        fake_render_shift_info_announcement_messages,
+        "cogs.shift_register.render_shift_timeline_announcement_messages",
+        fake_render_shift_timeline_announcement_messages,
     )
     monkeypatch.setattr(
         "cogs.shift_register._send_public_announcement_followups",
@@ -1866,12 +1869,12 @@ async def test_shift_info_delivery_timeout_is_not_classified_as_storage(
     subject = feature_channel_context_subject(
         feature_name="shift_register",
         ManagerType=ConfiguredShiftInfoManager,
-        info_template_key="shift.info",
+        timeline_template_key="shift.timeline",
         logger=NullLogger(),
     )
 
     with pytest.raises(TimeoutError, match="discord delivery timeout"):
-        await ShiftRegister.info.callback(subject, interaction)
+        await ShiftRegister.announce_timeline.callback(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == []

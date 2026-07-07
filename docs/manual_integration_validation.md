@@ -96,7 +96,7 @@ Use the team test channel.
 | Settings embed | Run `/team_register settings`. | Embed shows worksheet titles together with worksheet IDs and the Google Sheet link. |  |  |
 | Settings callback guard | Remove permissions from the admin test user after opening the Team Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
 | Encore role callback guard | As the non-admin user, use an existing encore role select menu. | The bot returns an ephemeral permission error and does not update encore roles. |  |  |
-| Help text | Run `/team help` and `/team_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
+| Guide text | Run `/team guide` and `/team_register announce_guide`. | Guide content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Team submission | Send lines in order: `150/740/33.4 main`, `150/700/39 encore`, and `140/680/35.3 backup`. | Processing reaction is removed, the `✅` reaction is added, and Main, Encore, and Backup worksheets update in message order. |  |  |
 | Team overwrite update | After registering three teams, send only `150/740/33.4 updated main` as a new message. | The Main worksheet updates and the user's old Encore and Backup rows are cleared. |  |  |
 | Full-width Team submission | Send `150／740／33.4 main`. | Processing reaction is removed, the `✅` reaction is added, and team worksheets update. |  |  |
@@ -122,8 +122,8 @@ Use the shift test channel.
 | Settings callback guard | Remove permissions from the admin test user after opening the Shift Register settings modal, then submit it. | The bot returns an ephemeral permission error and does not save settings. |  |  |
 | Timeline validation error | Open `Edit Shift Timeline`, enter `0` for day number or `8/12 24` for a milestone, and submit. | Bot sends an ephemeral validation error with `Edit Again`; clicking it reopens the modal with the submitted values. |  |  |
 | Recruitment range validation error | Open `Edit Recruitment Time Range`, enter `28-4`, and submit. | Bot sends an ephemeral validation error with `Edit Again`; no setting is saved. |  |  |
-| Info message | Run `/shift_register info` with no parameters after saving timeline and recruitment range. | Public info message is posted in the configured announcement languages. It includes the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
-| Help text | Run `/shift help` and `/shift_register help`. | Help content renders from templates and includes the bot mention and Sheet link. |  |  |
+| Timeline announcement | Run `/shift_register announce_timeline` with no parameters after saving timeline and recruitment range. | Public timeline announcement is posted in the configured announcement languages. It includes the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
+| Guide text | Run `/shift guide` and `/shift_register announce_guide`. | Guide content renders from templates and includes the bot mention and Sheet link. |  |  |
 | Shift Entry header | Confirm the entry worksheet header is `username`, `display_name`, `0-1` through `29-30`, then `original_message`. | Valid shift writes use the `0-30` columns. Old `4-5` through `27-28` headers are not silently accepted. |  |  |
 | Shift submission | With recruitment range `4-12, 20-28`, send `4-8` or `20-28`. | Processing reaction is removed, the `✅` reaction is added, and entry worksheet updates. |  |  |
 | Out-of-range shift | With recruitment range `4-12, 20-28`, send `12-20` or `0-30`. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
@@ -147,9 +147,9 @@ development guild.
 | Reopen saved order | Run `/language settings announcement` again. | The panel shows the same saved language order. |  |  |
 | Cancel discards draft | Add or remove a language, then press Cancel without saving. Reopen the panel. | The saved language order is unchanged. |  |  |
 | Timeout discards draft | Add or remove a language, wait for the panel to time out, then reopen the panel. | The saved language order is unchanged and the timed-out panel is disabled. |  |  |
-| Team help announcements | Run `/team_register help`. | The channel receives one public help message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
-| Shift help announcements | Run `/shift_register help`. | The channel receives one public help message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
-| Shift info announcements | Run `/shift_register info` after saving Shift Timeline and Recruitment Time Range settings. | The channel receives one public info message per saved language, in saved order. The messages include the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
+| Team guide announcements | Run `/team_register announce_guide`. | The channel receives one public guide message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
+| Shift guide announcements | Run `/shift_register announce_guide`. | The channel receives one public guide message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
+| Shift timeline announcements | Run `/shift_register announce_timeline` after saving Shift Timeline and Recruitment Time Range settings. | The channel receives one public timeline message per saved language, in saved order. The messages include the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
 
 ## Feature Lifecycle
 
