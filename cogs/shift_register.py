@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
     from bot import Rhoboto
     from components.ui_settings_flow import SettingsPanel
+    from models.shift_register import ShiftRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -46,6 +47,13 @@ class ShiftRegister(
     lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
+
+    @override
+    def _help_worksheet_id(
+        self,
+        feature_config: ShiftRegisterConfig,
+    ) -> int:
+        return feature_config.entry_worksheet_id
 
     @override
     def _build_initial_setup_view(self, manager: ShiftRegisterManager) -> View:

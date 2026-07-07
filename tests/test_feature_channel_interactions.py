@@ -149,6 +149,17 @@ class ConfiguredMultiRangeShiftInfoManager(ConfiguredShiftInfoManager):
         return config
 
 
+class ConfiguredHelpUrlManager(ConfiguredManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            sheet_url=(
+                "https://docs.google.com/spreadsheets/d/abc/edit?usp=sharing#gid=999"
+            ),
+            summary_worksheet_id=333,
+            entry_worksheet_id=444,
+        )
+
+
 class RecordingLock:
     def __init__(self) -> None:
         self.keys: list[int] = []
@@ -492,6 +503,8 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_send_missing_config_followup",
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
+        "_help_worksheet_id",
+        "_help_sheet_url",
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, method.__get__(subject, type(subject)))
@@ -1489,6 +1502,152 @@ async def test_user_help_missing_channel_raises_after_defer() -> None:
         )
 
     assert interaction.response.deferred == [True]
+
+
+@pytest.mark.asyncio
+async def test_team_public_help_uses_summary_worksheet_gid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(TeamRegister, "ManagerType", ConfiguredHelpUrlManager)
+    captured_sheet_urls: list[object] = []
+
+    async def fake_render_announcement_messages(
+        template_key: str,
+        guild_id: int,
+        _logger: object = None,
+        **values: object,
+    ) -> list[RenderedAnnouncement]:
+        assert template_key == "team.help"
+        assert guild_id == 111
+        captured_sheet_urls.append(values["sheet_url"])
+        return [RenderedAnnouncement(language="en", content="en help")]
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_announcement_messages",
+        fake_render_announcement_messages,
+    )
+
+    subject = TeamRegister(fake_bot())
+    subject.bot.user = SimpleNamespace(mention="@Rhoboto")
+    interaction = FakeInteraction(locale="en-US")
+
+    await subject._help_callback(interaction)
+
+    assert captured_sheet_urls == [
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
+    ]
+    assert interaction.followup.messages == [("en help", {"ephemeral": False})]
+
+
+@pytest.mark.asyncio
+async def test_shift_public_help_uses_entry_worksheet_gid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredHelpUrlManager)
+    captured_sheet_urls: list[object] = []
+
+    async def fake_render_announcement_messages(
+        template_key: str,
+        guild_id: int,
+        _logger: object = None,
+        **values: object,
+    ) -> list[RenderedAnnouncement]:
+        assert template_key == "shift.help"
+        assert guild_id == 111
+        captured_sheet_urls.append(values["sheet_url"])
+        return [RenderedAnnouncement(language="en", content="en help")]
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_announcement_messages",
+        fake_render_announcement_messages,
+    )
+
+    subject = ShiftRegister(fake_bot())
+    subject.bot.user = SimpleNamespace(mention="@Rhoboto")
+    interaction = FakeInteraction(locale="en-US")
+
+    await subject._help_callback(interaction)
+
+    assert captured_sheet_urls == [
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
+    ]
+    assert interaction.followup.messages == [("en help", {"ephemeral": False})]
+
+
+@pytest.mark.asyncio
+async def test_team_user_help_uses_summary_worksheet_gid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(Team, "ManagerType", ConfiguredHelpUrlManager)
+    captured_values: dict[str, object] = {}
+
+    def fake_render_message_template(
+        template_key: str,
+        locale: str,
+        **values: object,
+    ) -> str:
+        assert template_key == "team.help"
+        assert locale == "en"
+        captured_values.update(values)
+        return "rendered team help"
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_message_template",
+        fake_render_message_template,
+    )
+
+    subject = Team(fake_bot())
+    subject.bot.user = SimpleNamespace(mention="@Rhoboto")
+    interaction = FakeInteraction(locale="en-US")
+
+    await subject.send_help_message(interaction, TeamRegister.help_template_key)
+
+    assert captured_values["sheet_url"] == (
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
+    )
+    assert interaction.followup.messages == [
+        ("rendered team help", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shift_user_help_uses_entry_worksheet_gid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(Shift, "ManagerType", ConfiguredHelpUrlManager)
+    captured_values: dict[str, object] = {}
+
+    def fake_render_message_template(
+        template_key: str,
+        locale: str,
+        **values: object,
+    ) -> str:
+        assert template_key == "shift.help"
+        assert locale == "en"
+        captured_values.update(values)
+        return "rendered shift help"
+
+    monkeypatch.setattr(
+        "cogs.base.feature_channel_base.render_message_template",
+        fake_render_message_template,
+    )
+
+    subject = Shift(fake_bot())
+    subject.bot.user = SimpleNamespace(mention="@Rhoboto")
+    interaction = FakeInteraction(locale="en-US")
+
+    await subject.send_help_message(interaction, ShiftRegister.help_template_key)
+
+    assert captured_values["sheet_url"] == (
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
+    )
+    assert interaction.followup.messages == [
+        ("rendered shift help", {"ephemeral": True})
+    ]
 
 
 @pytest.mark.asyncio

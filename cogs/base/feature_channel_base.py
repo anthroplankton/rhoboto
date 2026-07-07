@@ -33,6 +33,7 @@ from utils.announcement_languages import (
     ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
     render_announcement_messages,
 )
+from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
 from utils.reactions import add_reaction_if_possible
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from bot import Rhoboto
     from cogs.base.discord_context import GuildChannelSource
     from components.ui_settings_flow import SettingsPanel
+    from models.base.sheet_config_base import SheetConfigBase
     from utils.announcement_languages import RenderedAnnouncement
     from utils.key_async_lock import KeyAsyncLock
 
@@ -672,6 +674,21 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
 
     help_template_key: str
 
+    def _help_worksheet_id(
+        self,
+        _feature_config: SheetConfigBase,
+    ) -> int | None:
+        return None
+
+    def _help_sheet_url(
+        self,
+        feature_config: SheetConfigBase,
+    ) -> str:
+        return google_sheet_url_with_gid(
+            feature_config.sheet_url,
+            self._help_worksheet_id(feature_config),
+        )
+
     async def _help_callback(self, interaction: Interaction) -> None:
         """
         Show help for this feature.
@@ -699,7 +716,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                 context.guild_id,
                 self.logger,
                 bot=bot_mention,
-                sheet_url=context.feature_config.sheet_url,
+                sheet_url=self._help_sheet_url(context.feature_config),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -953,6 +970,21 @@ class FeatureChannelUserBase[
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
+    def _help_worksheet_id(
+        self,
+        _feature_config: SheetConfigBase,
+    ) -> int | None:
+        return None
+
+    def _help_sheet_url(
+        self,
+        feature_config: SheetConfigBase,
+    ) -> str:
+        return google_sheet_url_with_gid(
+            feature_config.sheet_url,
+            self._help_worksheet_id(feature_config),
+        )
+
     async def delete_callback(self, interaction: Interaction) -> None:
         """
         Delete the user's data for this feature in this channel.
@@ -1038,7 +1070,7 @@ class FeatureChannelUserBase[
                 template_key,
                 locale,
                 bot=bot_mention,
-                sheet_url=context.feature_config.sheet_url,
+                sheet_url=self._help_sheet_url(context.feature_config),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(

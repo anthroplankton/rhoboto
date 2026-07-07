@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
     from bot import Rhoboto
     from components.ui_settings_flow import SettingsPanel
+    from models.team_register import TeamRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -46,6 +47,13 @@ class TeamRegister(
     lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
+
+    @override
+    def _help_worksheet_id(
+        self,
+        feature_config: TeamRegisterConfig,
+    ) -> int:
+        return feature_config.summary_worksheet_id
 
     @override
     def _build_initial_setup_view(self, manager: TeamRegisterManager) -> View:

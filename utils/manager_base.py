@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from models.base.sheet_config_base import SheetConfigBase
 from utils.google_sheets import GoogleSheet
+from utils.google_sheets_urls import normalize_google_sheet_url
 from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
@@ -144,6 +145,7 @@ class ManagerBase[
         sheet_url: str,
         worksheet_titles: list[str],
     ) -> TGoogleSheetsMetadata:
+        sheet_url = normalize_google_sheet_url(sheet_url)
         self._google_sheet = GoogleSheet(sheet_url, self.service_account_path)
 
         metadata = await self.create_or_get_worksheets(worksheet_titles)

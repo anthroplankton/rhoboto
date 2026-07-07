@@ -12,6 +12,7 @@ from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
+    from models.shift_register import ShiftRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -27,6 +28,13 @@ class Shift(
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
+
+    @override
+    def _help_worksheet_id(
+        self,
+        feature_config: ShiftRegisterConfig,
+    ) -> int:
+        return feature_config.entry_worksheet_id
 
     @override
     async def _delete_user_data(
