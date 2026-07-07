@@ -50,9 +50,7 @@ class Shift(
 
     @app_commands.command(
         name=locale_str("delete"),
-        description=locale_str(
-            "Delete your registration data for this feature in this channel."
-        ),
+        description=locale_str("Delete your shift registration in this channel."),
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(

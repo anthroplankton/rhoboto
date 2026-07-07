@@ -35,9 +35,13 @@ class Translator(app_commands.Translator):
                 "ja": "シフトの登録方法を表示します。",
                 "zh-TW": "如何登記班表的說明。",
             },
-            "Delete your registration data for this feature in this channel.": {
-                "ja": "このチャンネルでこの機能の入力データを削除します。",
-                "zh-TW": "刪除您在此頻道該功能的登記資料",
+            "Delete your team registration in this channel.": {
+                "ja": "このチャンネルの編成登録を削除します。",
+                "zh-TW": "刪除您在此頻道的隊伍編成登記。",
+            },
+            "Delete your shift registration in this channel.": {
+                "ja": "このチャンネルのシフト登録を削除します。",
+                "zh-TW": "刪除您在此頻道的班表登記。",
             },
         }
         return translations.get(string.message, {}).get(locale.value, string.message)

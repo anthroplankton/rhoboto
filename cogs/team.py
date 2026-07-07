@@ -54,9 +54,7 @@ class Team(
 
     @app_commands.command(
         name=locale_str("delete"),
-        description=locale_str(
-            "Delete your registration data for this feature in this channel."
-        ),
+        description=locale_str("Delete your team registration in this channel."),
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
