@@ -883,7 +883,7 @@ async def test_app_command_predicate_disabled_uses_interaction_locale(
     with pytest.raises(FeatureNotEnabled) as exc_info:
         await predicate(FakeInteraction(locale="ja"))
 
-    assert str(exc_info.value) == "このチャンネルでは編成登録が有効になっていません。"
+    assert str(exc_info.value) == "⚠️ このチャンネルでは編成登録が有効になっていません。"
     assert calls == [(111, 222, "team_register")]
 
 
@@ -1927,7 +1927,7 @@ async def test_context_menu_missing_config_reports_private_clear_message() -> No
 
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
-        ("Team Register is not configured for this channel.", {"ephemeral": True})
+        ("⚠️ Team Register is not configured for this channel.", {"ephemeral": True})
     ]
 
 
@@ -2024,7 +2024,7 @@ async def test_user_guide_uses_followup_for_missing_config(
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
     assert kwargs["ephemeral"] is True
-    assert message == "Team Register is not configured for this channel."
+    assert message == "⚠️ Team Register is not configured for this channel."
 
 
 @pytest.mark.asyncio
@@ -2045,7 +2045,7 @@ async def test_user_guide_missing_config_uses_interaction_locale(
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
     assert kwargs["ephemeral"] is True
-    assert message == "此頻道尚未設定隊伍編成登記。"
+    assert message == "⚠️ 此頻道尚未設定隊伍編成登記。"
 
 
 @pytest.mark.asyncio
@@ -3253,7 +3253,7 @@ async def test_public_register_guide_reports_missing_config(
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
         (
-            "Team Register is not configured for this channel.",
+            "⚠️ Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
@@ -3567,7 +3567,7 @@ async def test_team_summary_reports_default_missing_config_message(
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
-            "Team Register is not configured for this channel.",
+            "⚠️ Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
@@ -3744,7 +3744,7 @@ async def test_delete_callback_reports_missing_config_without_lock(
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
         (
-            "Team Register is not configured for this channel.",
+            "⚠️ Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]

@@ -39,7 +39,7 @@ def test_register_user_text_uses_complete_templates_by_locale() -> None:
             "missing_config",
             fallback_display_name="Team Register",
         )
-        == "Team Register is not configured for this channel."
+        == "⚠️ Team Register is not configured for this channel."
     )
     assert (
         register_user_text(
@@ -48,7 +48,7 @@ def test_register_user_text_uses_complete_templates_by_locale() -> None:
             "missing_config",
             fallback_display_name="Team Register",
         )
-        == "このチャンネルでは編成登録が設定されていません。"
+        == "⚠️ このチャンネルでは編成登録が設定されていません。"
     )
     assert (
         register_user_text(
@@ -57,7 +57,7 @@ def test_register_user_text_uses_complete_templates_by_locale() -> None:
             "missing_config",
             fallback_display_name="Shift Register",
         )
-        == "此頻道尚未設定班表登記。"
+        == "⚠️ 此頻道尚未設定班表登記。"
     )
 
 
@@ -99,7 +99,7 @@ def test_register_user_text_formats_not_enabled() -> None:
             "not_enabled",
             fallback_display_name="Team Register",
         )
-        == "Team Register is not enabled in this channel."
+        == "⚠️ Team Register is not enabled in this channel."
     )
     assert (
         register_user_text(
@@ -108,7 +108,7 @@ def test_register_user_text_formats_not_enabled() -> None:
             "not_enabled",
             fallback_display_name="Team Register",
         )
-        == "このチャンネルでは編成登録が有効になっていません。"
+        == "⚠️ このチャンネルでは編成登録が有効になっていません。"
     )
     assert (
         register_user_text(
@@ -117,7 +117,7 @@ def test_register_user_text_formats_not_enabled() -> None:
             "not_enabled",
             fallback_display_name="Shift Register",
         )
-        == "此頻道尚未啟用班表登記。"
+        == "⚠️ 此頻道尚未啟用班表登記。"
     )
 
 
@@ -129,7 +129,7 @@ def test_register_user_text_falls_back_for_unknown_locale_and_feature() -> None:
             "missing_config",
             fallback_display_name="Team Register",
         )
-        == "Team Register is not configured for this channel."
+        == "⚠️ Team Register is not configured for this channel."
     )
     assert (
         register_user_text(
@@ -138,5 +138,5 @@ def test_register_user_text_falls_back_for_unknown_locale_and_feature() -> None:
             "missing_config",
             fallback_display_name="Custom Register",
         )
-        == "此頻道尚未設定Custom Register。"
+        == "⚠️ 此頻道尚未設定Custom Register。"
     )

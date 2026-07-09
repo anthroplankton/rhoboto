@@ -24,9 +24,9 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
         "zh_tw": "{feature_label}",
     },
     "missing_config": {
-        "en": "{feature_label} is not configured for this channel.",
-        "ja": "このチャンネルでは{feature_label}が設定されていません。",
-        "zh_tw": "此頻道尚未設定{feature_label}。",
+        "en": "⚠️ {feature_label} is not configured for this channel.",
+        "ja": "⚠️ このチャンネルでは{feature_label}が設定されていません。",
+        "zh_tw": "⚠️ 此頻道尚未設定{feature_label}。",
     },
     "delete_success": {
         "en": "✅ Your data for {feature_label} has been deleted successfully.",
@@ -34,9 +34,9 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
         "zh_tw": "✅ 已成功刪除您的{feature_label}資料。",
     },
     "not_enabled": {
-        "en": "{feature_label} is not enabled in this channel.",
-        "ja": "このチャンネルでは{feature_label}が有効になっていません。",
-        "zh_tw": "此頻道尚未啟用{feature_label}。",
+        "en": "⚠️ {feature_label} is not enabled in this channel.",
+        "ja": "⚠️ このチャンネルでは{feature_label}が有効になっていません。",
+        "zh_tw": "⚠️ 此頻道尚未啟用{feature_label}。",
     },
 }
 
