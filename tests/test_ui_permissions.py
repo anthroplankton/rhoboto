@@ -11,9 +11,15 @@ from tortoise.exceptions import DBConnectionError, IntegrityError
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from components.ui_auto_guide import (
+    AUTO_GUIDE_BUTTON_VIEW_TIMEOUT_SECONDS,
+    AUTO_GUIDE_DELETE_CUSTOM_ID_PREFIX,
     LATEST_GUIDE_FIELD_NAME,
     LATEST_GUIDE_SETTINGS_REFRESH_FAILED_WARNING,
+    AutoGuideButtonsView,
     LatestGuideButton,
+    auto_guide_button_language,
+    auto_guide_delete_custom_id,
+    discord_message_url,
 )
 from components.ui_feature_channel import (
     ConfirmDeleteUserDataView,
@@ -619,6 +625,101 @@ async def test_latest_guide_button_denies_unauthorized_user() -> None:
 
     assert_permission_denied(interaction)
     assert calls == []
+
+
+def test_auto_guide_button_language_uses_first_supported_language() -> None:
+    assert auto_guide_button_language(["zh_tw", "ja", "en"]) == "zh_tw"
+    assert auto_guide_button_language(["ja", "en"]) == "ja"
+    assert auto_guide_button_language(["unsupported", "en"]) == "en"
+    assert auto_guide_button_language([]) == "en"
+
+
+def test_auto_guide_delete_custom_id_includes_feature_name() -> None:
+    assert (
+        auto_guide_delete_custom_id("team_register")
+        == f"{AUTO_GUIDE_DELETE_CUSTOM_ID_PREFIX}team_register"
+    )
+
+
+def test_discord_message_url_uses_guild_channel_and_message_id() -> None:
+    assert (
+        discord_message_url(guild_id=111, channel_id=222, message_id=333)
+        == "https://discord.com/channels/111/222/333"
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_guide_buttons_view_builds_team_reply_buttons() -> None:
+    calls: list[object] = []
+
+    async def delete_callback(interaction: object) -> None:
+        calls.append(interaction)
+
+    view = AutoGuideButtonsView(
+        feature_name="team_register",
+        language="zh_tw",
+        delete_callback=delete_callback,
+        sheet_url="https://sheet.example/#gid=1",
+        full_guide_url="https://discord.com/channels/111/222/333",
+    )
+
+    assert [child.label for child in view.children] == [
+        "刪除我的編成",
+        "完整說明",
+        "Google Sheets",
+    ]
+    assert [str(child.emoji) for child in view.children] == ["🗑️", "⤴️", "👀"]
+    assert view.children[0].style is ButtonStyle.danger
+    assert view.children[0].custom_id == ("rhoboto:auto_guide:delete:team_register")
+    assert view.children[1].style is ButtonStyle.link
+    assert view.children[1].url == "https://discord.com/channels/111/222/333"
+    assert view.children[2].style is ButtonStyle.link
+    assert view.children[2].url == "https://sheet.example/#gid=1"
+    assert view.timeout == AUTO_GUIDE_BUTTON_VIEW_TIMEOUT_SECONDS
+    assert not view.is_persistent()
+
+    interaction = FakeInteraction()
+    await view.children[0].callback(interaction)
+    assert calls == [interaction]
+
+
+def test_auto_guide_buttons_view_omits_full_guide_without_url() -> None:
+    async def delete_callback(_interaction: object) -> None:
+        return None
+
+    view = AutoGuideButtonsView(
+        feature_name="shift_register",
+        language="ja",
+        delete_callback=delete_callback,
+        sheet_url="https://sheet.example/#gid=2",
+    )
+
+    assert [child.label for child in view.children] == [
+        "自分のシフトを削除",
+        "Google Sheets",
+    ]
+    assert [str(child.emoji) for child in view.children] == ["🗑️", "👀"]
+    assert view.children[0].style is ButtonStyle.danger
+    assert view.children[1].style is ButtonStyle.link
+
+
+def test_auto_guide_buttons_view_delete_only_is_persistent() -> None:
+    async def delete_callback(_interaction: object) -> None:
+        return None
+
+    view = AutoGuideButtonsView(
+        feature_name="team_register",
+        language="en",
+        delete_callback=delete_callback,
+        sheet_url=None,
+        delete_only=True,
+        timeout=None,
+    )
+
+    assert len(view.children) == 1
+    assert view.children[0].label == "Delete Your Teams"
+    assert view.children[0].custom_id == ("rhoboto:auto_guide:delete:team_register")
+    assert view.is_persistent()
 
 
 @pytest.mark.asyncio

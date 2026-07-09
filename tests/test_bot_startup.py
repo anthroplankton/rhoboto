@@ -123,3 +123,61 @@ async def test_close_uses_configured_db_url(monkeypatch: pytest.MonkeyPatch) -> 
     await bot.close()
 
     assert calls == ["sqlite://:memory:", "super.close"]
+
+
+@pytest.mark.asyncio
+async def test_setup_hook_registers_persistent_views_after_loading_cogs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    class PersistentCog(commands.Cog):
+        def register_persistent_views(self) -> None:
+            calls.append("register")
+
+    async def fake_init_db(_db_url: str) -> None:
+        calls.append("init_db")
+
+    async def fake_close_db(_db_url: str) -> None:
+        calls.append("close_db")
+
+    async def fake_bot_close(self: commands.Bot) -> None:
+        assert self is bot
+        calls.append("super.close")
+
+    async def fake_load_extension(_name: str) -> None:
+        calls.append("load_extension")
+        await bot.add_cog(PersistentCog())
+
+    async def fake_set_translator(_translator: object) -> None:
+        calls.append("set_translator")
+
+    async def fake_sync() -> None:
+        calls.append("sync")
+
+    bot = Rhoboto(
+        command_prefix="$",
+        db_url="sqlite://:memory:",
+        initial_cogs=["cogs.fake"],
+    )
+    monkeypatch.setattr("bot.bot.init_db", fake_init_db)
+    monkeypatch.setattr("bot.bot.close_db", fake_close_db)
+    monkeypatch.setattr(commands.Bot, "close", fake_bot_close)
+    bot.load_extension = fake_load_extension
+    bot.tree.set_translator = fake_set_translator
+    bot.tree.sync = fake_sync
+
+    try:
+        await bot.setup_hook()
+    finally:
+        await bot.close()
+
+    assert calls == [
+        "init_db",
+        "load_extension",
+        "register",
+        "set_translator",
+        "sync",
+        "close_db",
+        "super.close",
+    ]

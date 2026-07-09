@@ -64,9 +64,16 @@ class Rhoboto(commands.Bot):
             init_db(self.db_url),
             *(self.load_extension(name) for name in self.initial_cogs),
         )
+        self._register_persistent_views()
         await self.tree.set_translator(Translator())
         await self.tree.sync()
         logger.info("Slash commands synced.")
+
+    def _register_persistent_views(self) -> None:
+        for cog in self.cogs.values():
+            register = getattr(cog, "register_persistent_views", None)
+            if register is not None:
+                register()
 
     async def on_ready(self) -> None:
         """

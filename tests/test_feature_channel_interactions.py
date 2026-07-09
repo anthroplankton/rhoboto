@@ -682,6 +682,8 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_auto_guide_is_enabled",
         "_auto_guide_template_values",
         "_render_auto_guide_embeds",
+        "_auto_guide_delete_callback",
+        "_build_auto_guide_buttons_view",
         "_refresh_auto_guide_if_enabled",
         "_send_and_record_auto_guide",
         "_send_auto_guide_message",
@@ -2648,6 +2650,16 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
     send_kwargs = channel.send_attempts[0]
     assert send_kwargs["mention_author"] is False
     assert send_kwargs["reference"].message_id == 5555
+    view = send_kwargs["view"]
+    assert [child.label for child in view.children] == [
+        "Delete Your Teams",
+        "Full Guide",
+        "Google Sheets",
+    ]
+    assert [str(child.emoji) for child in view.children] == ["🗑️", "⤴️", "👀"]
+    assert view.children[0].custom_id == ("rhoboto:auto_guide:delete:team_register")
+    assert view.children[1].url == "https://discord.com/channels/111/222/5555"
+    assert view.children[2].url == "https://sheet.example"
     embed = send_kwargs["embeds"][0]
     assert embed.title == "en:team.auto_guide.title"
     assert embed.description == "en:team.auto_guide.description"
@@ -2838,8 +2850,96 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
     normal_kwargs = channel.send_attempts[1]
     assert "mention_author" not in normal_kwargs
     assert "reference" not in normal_kwargs
+    fallback_view = normal_kwargs["view"]
+    assert [child.label for child in fallback_view.children] == [
+        "Delete Your Teams",
+        "Google Sheets",
+    ]
+    assert [str(child.emoji) for child in fallback_view.children] == ["🗑️", "👀"]
     assert normal_kwargs["embeds"][0].footer.text is None
     assert auto_state.saved_message_ids == [channel.sent_messages[0].id]
+
+
+@pytest.mark.asyncio
+async def test_auto_guide_buttons_use_first_announcement_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context = auto_guide_context()
+    configured_context = ConfiguredFeatureChannelContext(
+        guild_id=111,
+        channel_id=222,
+        feature_channel=context.feature_channel,
+        manager=context.manager,
+        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+    )
+    channel = AutoGuideChannel()
+    auto_state = SaveableAutoGuideState()
+    subject = auto_guide_subject()
+
+    async def fake_get_auto_guide_state(_feature_channel: object) -> object:
+        return SimpleNamespace(is_enabled=True, message_id=None)
+
+    async def fake_get_or_create_auto_guide_state(_feature_channel: object) -> object:
+        return auto_state
+
+    async def fake_get_announcement_languages(
+        _guild_id: int,
+        _logger: object,
+    ) -> list[str]:
+        return ["zh_tw", "ja", "en"]
+
+    def fake_render_message_template(
+        template_key: str,
+        locale: str,
+        **_values: object,
+    ) -> str:
+        return f"{locale}:{template_key}"
+
+    async def fake_message_state_get_or_none(**_kwargs: object) -> None:
+        return None
+
+    async def configured_lookup(_context: object) -> object:
+        return configured_context
+
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_auto_guide_state",
+        fake_get_auto_guide_state,
+    )
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_or_create_auto_guide_state",
+        fake_get_or_create_auto_guide_state,
+    )
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_announcement_languages",
+        fake_get_announcement_languages,
+    )
+    monkeypatch.setattr(
+        feature_channel_base,
+        "render_message_template",
+        fake_render_message_template,
+    )
+    monkeypatch.setattr(
+        FeatureChannelMessageState,
+        "get_or_none",
+        fake_message_state_get_or_none,
+    )
+    subject._get_configured_feature_channel_context = configured_lookup
+
+    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+        subject,
+        context,
+        channel,
+    )
+
+    assert result is True
+    view = channel.send_attempts[0]["view"]
+    assert [child.label for child in view.children] == [
+        "刪除我的編成",
+        "Google Sheets",
+    ]
 
 
 @pytest.mark.asyncio
@@ -4164,6 +4264,28 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
 
     assert interaction.response.deferred == []
     assert interaction.response.messages == []
+
+
+@pytest.mark.asyncio
+async def test_auto_guide_persistent_delete_button_reuses_delete_callback() -> None:
+    calls: list[object] = []
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+    )
+
+    async def fake_delete_callback(interaction: object) -> None:
+        calls.append(interaction)
+
+    subject.delete_callback = fake_delete_callback
+    view = FeatureChannelUserBase.build_auto_guide_delete_view(subject)
+    interaction = FakeInteraction()
+
+    await view.children[0].callback(interaction)
+
+    assert view.is_persistent()
+    assert view.children[0].custom_id == ("rhoboto:auto_guide:delete:team_register")
+    assert calls == [interaction]
 
 
 def test_team_and_shift_use_inherited_setup_after_enable() -> None:

@@ -27,7 +27,13 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
     MessageParseStatus,
 )
-from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
+from components.ui_auto_guide import (
+    LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING,
+    AutoGuideButtonsView,
+    AutoGuideDeleteCallback,
+    auto_guide_button_language,
+    discord_message_url,
+)
 from components.ui_feature_channel import (
     ConfirmDeleteUserDataView,
     DisableAndClearConfirmView,
@@ -988,6 +994,36 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             embeds.append(embed)
         return embeds
 
+    def _auto_guide_delete_callback(self) -> AutoGuideDeleteCallback:
+        async def unavailable_callback(interaction: Interaction) -> None:
+            await interaction.response.send_message(
+                "⚠️ Delete is temporarily unavailable. Try the slash command instead.",
+                ephemeral=True,
+            )
+
+        for cog in getattr(self.bot, "cogs", {}).values():
+            if getattr(cog, "feature_name", None) != self.feature_name:
+                continue
+            callback = getattr(cog, "delete_callback", None)
+            if callback is not None:
+                return callback
+        return unavailable_callback
+
+    async def _build_auto_guide_buttons_view(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        *,
+        full_guide_url: str | None = None,
+    ) -> AutoGuideButtonsView:
+        languages = await get_announcement_languages(context.guild_id, self.logger)
+        return AutoGuideButtonsView(
+            feature_name=self.feature_name,
+            language=auto_guide_button_language(languages),
+            delete_callback=self._auto_guide_delete_callback(),
+            sheet_url=self._guide_sheet_url(context.feature_config),
+            full_guide_url=full_guide_url,
+        )
+
     async def _refresh_auto_guide_if_enabled(
         self,
         feature_channel_context: FeatureChannelContext[TManager],
@@ -1062,6 +1098,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             message_id__not_isnull=True,
         )
         if manual_anchor is not None:
+            full_guide_url = discord_message_url(
+                guild_id=context.guild_id,
+                channel_id=context.channel_id,
+                message_id=manual_anchor.message_id,
+            )
             reference = MessageReference(
                 message_id=manual_anchor.message_id,
                 channel_id=context.channel_id,
@@ -1075,6 +1116,10 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                     ),
                     reference=reference,
                     mention_author=False,
+                    view=await self._build_auto_guide_buttons_view(
+                        context,
+                        full_guide_url=full_guide_url,
+                    ),
                 )
             except (NotFound, Forbidden, HTTPException):
                 pass
@@ -1082,7 +1127,8 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
         return await channel.send(
             embeds=await self._render_auto_guide_embeds(
                 context,
-            )
+            ),
+            view=await self._build_auto_guide_buttons_view(context),
         )
 
     async def _delete_auto_guide_message(
@@ -1486,6 +1532,19 @@ class FeatureChannelUserBase[
     def __init__(self, bot: Rhoboto) -> None:
         self.bot = bot
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def build_auto_guide_delete_view(self) -> AutoGuideButtonsView:
+        return AutoGuideButtonsView(
+            feature_name=self.feature_name,
+            language="en",
+            delete_callback=self.delete_callback,
+            sheet_url=None,
+            delete_only=True,
+            timeout=None,
+        )
+
+    def register_persistent_views(self) -> None:
+        self.bot.add_view(self.build_auto_guide_delete_view())
 
     @abstractmethod
     async def _delete_user_data(

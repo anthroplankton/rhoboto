@@ -167,6 +167,11 @@ first.
 | Scenario | Steps | Pass Criteria | Result | Notes |
 | --- | --- | --- | --- | --- |
 | Enable latest guide | Open `/team_register settings`, enable Team Register Latest Guide, and save. | A short guide message is sent. |  |  |
+| Latest Guide buttons | Enable Latest Guide for Team and Shift in a development guild. Configure announcement languages with each of `en`, `zh_tw`, and `ja` first in separate checks. | The latest guide shows buttons in order: `🗑️` Delete, `⤴️` Full Guide when replying to a manual guide, and `👀 Google Sheets`. Delete and Full Guide labels follow the first announcement language. Google Sheets remains `Google Sheets`. |  |  |
+| Latest Guide delete button | Click the `🗑️` Delete button from Team and Shift latest guides. Test Confirm, Cancel, timeout, and another user clicking Confirm. | The flow matches `/team delete` and `/shift delete`: confirmation is ephemeral, Cancel/timeout apply no changes, only the requester can confirm, and Confirm deletes only the requester's registration data. |  |  |
+| Latest Guide Full Guide link | Post a manual guide announcement, enable or refresh Latest Guide, then click `⤴️` Full Guide on desktop and mobile Discord clients. | The link opens the replied manual guide message in the Discord client. If it opens an external browser unexpectedly, capture the client/platform and revisit whether to keep this button. |  |  |
+| Latest Guide Google Sheets link | Click `👀 Google Sheets` on Team and Shift latest guides. | The link opens the configured Google Sheets URL with the expected worksheet gid. |  |  |
+| Latest Guide delete after restart | Enable Latest Guide, restart the bot, then click `🗑️` Delete on an existing latest guide message. | The persistent Delete button still starts the existing ephemeral delete confirmation flow after restart. |  |  |
 | Reply to full guide | Run `/team_register announce_guide`, then send a non-bot message. | The short guide replies to the latest full guide and shows the footer. |  |  |
 | Missing full guide anchor | Delete the full guide anchor message, then send a non-bot message. | The short guide falls back to a normal message and has no footer. |  |  |
 | Refresh after messages | Send three ordinary non-bot messages. | The guide refreshes after each message, and the previous guide is deleted when bot permissions allow it. |  |  |
