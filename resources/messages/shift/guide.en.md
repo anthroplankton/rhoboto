@@ -1,7 +1,7 @@
 ## 📋 How to Register Your Shifts
 
-Enter the time ranges you want to register in the format `start-end` (30-hour clock).
-You can include multiple time ranges in one message, and you may add notes before or after them.
+Enter the time ranges you want to register in the format `Start-End` (30-hour clock).
+Notes can be added to each range. Send one message with all of your time ranges in the shift registration channel.
 
 **Every time range in the valid format is registered as your shift availability.**
 

@@ -2,6 +2,7 @@
 
 Enter one team per line in the format `LeaderSkill/InternalSkill/TeamPower`.
 You may add labels or notes before or after the values on each line.
+Send the message in the team registration channel.
 
 **Only lines in the team format are registered, from top to bottom.**
 

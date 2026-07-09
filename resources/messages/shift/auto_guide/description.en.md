@@ -1,4 +1,4 @@
-**start-end** (JST, 30-hour clock) for each time range you want to register. You can include multiple ranges in one message and add notes to each range.
+Send **Start-End** (JST, 30-hour clock) for each time range in this channel. Multiple time ranges can be included in one message, and notes can be added to each range.
 
 ‼️ To update, **send a new message with every shift time you want to keep**. Previous registrations are overwritten, and editing an old message does not update registration.
 
