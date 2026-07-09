@@ -10,6 +10,16 @@ from discord import ButtonStyle, Embed, Interaction, Object, Role, TextStyle
 from discord.ui import Button, Modal, RoleSelect, TextInput
 
 from bot import config
+from components.ui_auto_guide import (
+    LATEST_GUIDE_FIELD_NAME,
+    LatestGuideButton,
+    LatestGuideRefreshCallback,
+    LatestGuideStateResolver,
+    LatestGuideToggleCallback,
+    latest_guide_status_value,
+    refresh_latest_guide_after_settings_save,
+    resolve_latest_guide_enabled,
+)
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
     SETTINGS_STORAGE_EXCEPTIONS,
@@ -177,12 +187,21 @@ def build_encore_role_preview_embed(
     return embed
 
 
-def build_too_many_encore_roles_embed(active_role_count: int) -> Embed:
+def build_too_many_encore_roles_embed(
+    active_role_count: int,
+    *,
+    latest_guide_enabled: bool,
+) -> Embed:
     embed = Embed(title="Cannot Edit Encore Roles", color=config.DEFAULT_EMBED_COLOR)
     embed.description = (
         "There are too many active Encore roles to preselect safely. "
         f"Discord Role Select supports at most {ENCORE_ROLE_SELECT_MAX_VALUES} "
         f"selected roles, but {active_role_count} active roles are stored."
+    )
+    embed.add_field(
+        name=LATEST_GUIDE_FIELD_NAME,
+        value=latest_guide_status_value(enabled=latest_guide_enabled),
+        inline=False,
     )
     return embed
 
@@ -222,12 +241,20 @@ async def build_team_register_settings_panel(
     *,
     is_save_action: bool = False,
     metadata: TeamRegisterGoogleSheetsMetadata | None = None,
+    latest_guide_enabled: bool = False,
+    latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+    latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+    latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
 ) -> SettingsPanel:
     active_metadata = (
         metadata or await team_register_manager.fetch_google_sheets_metadata()
     )
     roles = list(interaction.guild.roles) if interaction.guild else []
     encore_role_ids = list(getattr(team_register, "encore_role_ids", []))
+    latest_guide_enabled = await resolve_latest_guide_enabled(
+        enabled=latest_guide_enabled,
+        state_resolver=latest_guide_state_resolver,
+    )
     embed = build_current_settings_embed(
         sheet_url=team_register.sheet_url,
         metadata=active_metadata,
@@ -235,6 +262,7 @@ async def build_team_register_settings_panel(
         color=config.DEFAULT_EMBED_COLOR,
         roles=roles,
         is_save_action=is_save_action,
+        latest_guide_enabled=latest_guide_enabled,
     )
     view = TeamRegisterView(
         team_register_manager=team_register_manager,
@@ -244,6 +272,10 @@ async def build_team_register_settings_panel(
         encore_role_ids=encore_role_ids,
         metadata=active_metadata,
         is_save_action=is_save_action,
+        latest_guide_enabled=latest_guide_enabled,
+        latest_guide_toggle_callback=latest_guide_toggle_callback,
+        latest_guide_state_resolver=latest_guide_state_resolver,
+        latest_guide_refresh_callback=latest_guide_refresh_callback,
     )
     return SettingsPanel(embed=embed, view=view)
 
@@ -259,6 +291,10 @@ class TeamRegisterSheetModal(Modal):
         summary_worksheet_title: str | None = None,
         *,
         requires_existing_settings: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(title="Team Register Setup")
         team_worksheet_titles = team_worksheet_titles or [
@@ -301,6 +337,10 @@ class TeamRegisterSheetModal(Modal):
         self.add_item(self.summary_worksheet_title)
         self.team_register_manager = team_register_manager
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def on_submit(self, interaction: Interaction) -> None:
         """
@@ -365,6 +405,10 @@ class TeamRegisterSheetModal(Modal):
                 team_register,
                 is_save_action=True,
                 metadata=metadata,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_refresh_failure(
@@ -376,6 +420,11 @@ class TeamRegisterSheetModal(Modal):
             )
             return
         await send_current_panel_followup(interaction, panel)
+        await refresh_latest_guide_after_settings_save(
+            interaction,
+            team_register,
+            self.latest_guide_refresh_callback,
+        )
 
 
 class TeamRegisterButton(Button):
@@ -391,6 +440,10 @@ class TeamRegisterButton(Button):
         *,
         style: ButtonStyle = ButtonStyle.primary,
         requires_existing_settings: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label=label, style=style)
         self.team_register_manager = team_register_manager
@@ -398,6 +451,10 @@ class TeamRegisterButton(Button):
         self.worksheet_titles = worksheet_titles
         self.summary_worksheet_title = summary_worksheet_title
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -408,6 +465,10 @@ class TeamRegisterButton(Button):
                 self.team_register_manager,
                 interaction,
                 team_register,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
 
         if not self.requires_existing_settings:
@@ -441,6 +502,10 @@ class TeamRegisterButton(Button):
                 team_worksheet_titles=worksheet_titles,
                 summary_worksheet_title=summary_worksheet_title,
                 requires_existing_settings=self.requires_existing_settings,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -452,10 +517,18 @@ class EditEncoreRolesButton(Button):
         *,
         metadata: TeamRegisterGoogleSheetsMetadata,
         style: ButtonStyle = ButtonStyle.secondary,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label="Edit Encore Roles", style=style)
         self.team_register_manager = team_register_manager
         self.metadata = metadata
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -473,12 +546,32 @@ class EditEncoreRolesButton(Button):
         roles = list(interaction.guild.roles) if interaction.guild else []
         resolution = resolve_encore_roles(team_register.encore_role_ids, roles)
         if len(resolution.active_roles) > ENCORE_ROLE_SELECT_MAX_VALUES:
+            try:
+                latest_guide_enabled = await resolve_latest_guide_enabled(
+                    enabled=self.latest_guide_enabled,
+                    state_resolver=self.latest_guide_state_resolver,
+                )
+            except SETTINGS_STORAGE_EXCEPTIONS as exc:
+                await send_settings_refresh_failure(
+                    interaction,
+                    exc,
+                    operation="team_register_encore_roles_refresh",
+                    feature_name=TEAM_REGISTER_FEATURE_NAME,
+                    log=logger,
+                    clear_current_message=True,
+                )
+                return
+
             replacement_view = TeamRegisterView(
                 team_register_manager=self.team_register_manager,
                 has_existing_settings=True,
                 roles=roles,
                 encore_role_ids=team_register.encore_role_ids,
                 metadata=self.metadata,
+                latest_guide_enabled=latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
             if current_view is not None:
                 replacement_view = prepare_replacement_settings_view(
@@ -487,7 +580,10 @@ class EditEncoreRolesButton(Button):
                 )
             await interaction.response.edit_message(
                 content=None,
-                embed=build_too_many_encore_roles_embed(len(resolution.active_roles)),
+                embed=build_too_many_encore_roles_embed(
+                    len(resolution.active_roles),
+                    latest_guide_enabled=latest_guide_enabled,
+                ),
                 view=replacement_view,
             )
             return
@@ -498,6 +594,10 @@ class EditEncoreRolesButton(Button):
             roles=roles,
             encore_role_ids=team_register.encore_role_ids,
             retained_missing_role_ids=resolution.missing_role_ids,
+            latest_guide_enabled=self.latest_guide_enabled,
+            latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+            latest_guide_state_resolver=self.latest_guide_state_resolver,
+            latest_guide_refresh_callback=self.latest_guide_refresh_callback,
         )
         if current_view is not None:
             replacement_view = prepare_replacement_settings_view(
@@ -517,10 +617,18 @@ class BackToTeamSettingsButton(Button):
         team_register_manager: TeamRegisterManager,
         *,
         metadata: TeamRegisterGoogleSheetsMetadata,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label="Back to Settings", style=ButtonStyle.secondary)
         self.team_register_manager = team_register_manager
         self.metadata = metadata
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -536,12 +644,32 @@ class BackToTeamSettingsButton(Button):
             return
 
         roles = list(interaction.guild.roles) if interaction.guild else []
+        try:
+            latest_guide_enabled = await resolve_latest_guide_enabled(
+                enabled=self.latest_guide_enabled,
+                state_resolver=self.latest_guide_state_resolver,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="team_register_settings_return_refresh",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+                clear_current_message=True,
+            )
+            return
+
         replacement_view = TeamRegisterView(
             team_register_manager=self.team_register_manager,
             has_existing_settings=True,
             roles=roles,
             encore_role_ids=team_register.encore_role_ids,
             metadata=self.metadata,
+            latest_guide_enabled=latest_guide_enabled,
+            latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+            latest_guide_state_resolver=self.latest_guide_state_resolver,
+            latest_guide_refresh_callback=self.latest_guide_refresh_callback,
         )
         if current_view is not None:
             replacement_view = prepare_replacement_settings_view(
@@ -556,6 +684,7 @@ class BackToTeamSettingsButton(Button):
                 encore_role_ids=team_register.encore_role_ids,
                 color=config.DEFAULT_EMBED_COLOR,
                 roles=roles,
+                latest_guide_enabled=latest_guide_enabled,
             ),
             view=replacement_view,
         )
@@ -620,6 +749,26 @@ class EncoreRoleSelect(RoleSelect):
                     retained_missing_role_ids=self.retained_missing_role_ids,
                     removed_missing_role_ids=(),
                     metadata=self.metadata,
+                    latest_guide_enabled=getattr(
+                        view,
+                        "latest_guide_enabled",
+                        False,
+                    ),
+                    latest_guide_toggle_callback=getattr(
+                        view,
+                        "latest_guide_toggle_callback",
+                        None,
+                    ),
+                    latest_guide_state_resolver=getattr(
+                        view,
+                        "latest_guide_state_resolver",
+                        None,
+                    ),
+                    latest_guide_refresh_callback=getattr(
+                        view,
+                        "latest_guide_refresh_callback",
+                        None,
+                    ),
                 ),
             ),
         )
@@ -634,10 +783,18 @@ class EncoreRoleEditView(SettingsTimeoutView):
         roles: Sequence[Role],
         encore_role_ids: Sequence[int],
         retained_missing_role_ids: Sequence[int],
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
         self.team_register_manager = team_register_manager
         self.metadata = metadata
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
         self.active_roles = resolve_encore_roles(encore_role_ids, roles).active_roles
         self.retained_missing_role_ids = tuple(retained_missing_role_ids)
         self.add_item(
@@ -655,6 +812,10 @@ class EncoreRoleEditView(SettingsTimeoutView):
             BackToTeamSettingsButton(
                 team_register_manager,
                 metadata=metadata,
+                latest_guide_enabled=latest_guide_enabled,
+                latest_guide_toggle_callback=latest_guide_toggle_callback,
+                latest_guide_state_resolver=latest_guide_state_resolver,
+                latest_guide_refresh_callback=latest_guide_refresh_callback,
             )
         )
 
@@ -710,6 +871,22 @@ class ConfirmEncoreRolesButton(Button):
                 clear_current_message=True,
             )
             return
+        try:
+            latest_guide_enabled = await resolve_latest_guide_enabled(
+                enabled=view.latest_guide_enabled,
+                state_resolver=view.latest_guide_state_resolver,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            view.stop()
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="team_register_encore_roles_refresh",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+                clear_current_message=True,
+            )
+            return
 
         await interaction.response.edit_message(
             content=None,
@@ -720,6 +897,7 @@ class ConfirmEncoreRolesButton(Button):
                 color=config.DEFAULT_EMBED_COLOR,
                 roles=roles,
                 is_save_action=True,
+                latest_guide_enabled=latest_guide_enabled,
             ),
             view=prepare_replacement_settings_view(
                 view,
@@ -731,6 +909,10 @@ class ConfirmEncoreRolesButton(Button):
                     encore_role_ids=role_ids,
                     metadata=metadata,
                     is_save_action=True,
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=view.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=view.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=view.latest_guide_refresh_callback,
                 ),
             ),
         )
@@ -755,6 +937,22 @@ class CancelEncoreRolesButton(Button):
             return
 
         roles = list(interaction.guild.roles) if interaction.guild else []
+        try:
+            latest_guide_enabled = await resolve_latest_guide_enabled(
+                enabled=view.latest_guide_enabled,
+                state_resolver=view.latest_guide_state_resolver,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="team_register_encore_roles_cancel_refresh",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+                clear_current_message=True,
+            )
+            return
+
         await interaction.response.edit_message(
             content=None,
             embed=build_current_settings_embed(
@@ -763,6 +961,7 @@ class CancelEncoreRolesButton(Button):
                 encore_role_ids=team_register.encore_role_ids,
                 color=config.DEFAULT_EMBED_COLOR,
                 roles=roles,
+                latest_guide_enabled=latest_guide_enabled,
             ),
             view=prepare_replacement_settings_view(
                 view,
@@ -772,6 +971,10 @@ class CancelEncoreRolesButton(Button):
                     roles=roles,
                     encore_role_ids=team_register.encore_role_ids,
                     metadata=view.metadata,
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=view.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=view.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=view.latest_guide_refresh_callback,
                 ),
             ),
         )
@@ -803,6 +1006,10 @@ class RemoveMissingIdsButton(Button):
                 retained_missing_role_ids=(),
                 removed_missing_role_ids=view.retained_missing_role_ids,
                 metadata=view.metadata,
+                latest_guide_enabled=view.latest_guide_enabled,
+                latest_guide_toggle_callback=view.latest_guide_toggle_callback,
+                latest_guide_state_resolver=view.latest_guide_state_resolver,
+                latest_guide_refresh_callback=view.latest_guide_refresh_callback,
             ),
         )
         await interaction.response.edit_message(
@@ -826,6 +1033,10 @@ class EncoreRolePreviewView(SettingsTimeoutView):
         retained_missing_role_ids: Sequence[int],
         removed_missing_role_ids: Sequence[int] = (),
         metadata: TeamRegisterGoogleSheetsMetadata,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
         self.team_register_manager = team_register_manager
@@ -833,6 +1044,10 @@ class EncoreRolePreviewView(SettingsTimeoutView):
         self.retained_missing_role_ids = tuple(retained_missing_role_ids)
         self.removed_missing_role_ids = tuple(removed_missing_role_ids)
         self.metadata = metadata
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
         self.add_item(ConfirmEncoreRolesButton())
         self.add_item(CancelEncoreRolesButton())
 
@@ -856,8 +1071,17 @@ class TeamRegisterView(SettingsTimeoutView):
         encore_role_ids: list[int] | None = None,
         metadata: TeamRegisterGoogleSheetsMetadata | None = None,
         is_save_action: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
+        self.team_register_manager = team_register_manager
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
         if metadata is not None:
             sheet_url = sheet_url or metadata.sheet_url
             team_worksheet_titles = team_worksheet_titles or [
@@ -881,7 +1105,18 @@ class TeamRegisterView(SettingsTimeoutView):
                 ButtonStyle.secondary if has_existing_settings else ButtonStyle.primary
             ),
             requires_existing_settings=has_existing_settings,
+            latest_guide_enabled=latest_guide_enabled,
+            latest_guide_toggle_callback=latest_guide_toggle_callback,
+            latest_guide_state_resolver=latest_guide_state_resolver,
+            latest_guide_refresh_callback=latest_guide_refresh_callback,
         )
+        if has_existing_settings and latest_guide_toggle_callback is not None:
+            self.add_item(
+                LatestGuideButton(
+                    enabled=latest_guide_enabled,
+                    toggle_callback=latest_guide_toggle_callback,
+                )
+            )
         self.add_item(button)
         if not has_existing_settings:
             return
@@ -896,6 +1131,10 @@ class TeamRegisterView(SettingsTimeoutView):
                         if is_save_action and not role_resolution.active_roles
                         else ButtonStyle.secondary
                     ),
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=latest_guide_toggle_callback,
+                    latest_guide_state_resolver=latest_guide_state_resolver,
+                    latest_guide_refresh_callback=latest_guide_refresh_callback,
                 )
             )
 
@@ -908,6 +1147,7 @@ def build_current_settings_embed(
     *,
     roles: Sequence[Role] | None = None,
     is_save_action: bool = False,
+    latest_guide_enabled: bool = False,
 ) -> Embed:
     """
     Build an embed showing the current team register settings.
@@ -975,6 +1215,11 @@ def build_current_settings_embed(
     embed.add_field(
         name="Encore Roles",
         value=encore_roles_value,
+        inline=False,
+    )
+    embed.add_field(
+        name=LATEST_GUIDE_FIELD_NAME,
+        value=latest_guide_status_value(enabled=latest_guide_enabled),
         inline=False,
     )
     if role_resolution.missing_role_ids:

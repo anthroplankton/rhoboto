@@ -77,6 +77,10 @@ async def fake_enabled_feature_channel_get_or_none(
     )
 
 
+async def noop_refresh_auto_guide(*_: object) -> bool:
+    return True
+
+
 class DummyManager:
     def __init__(self, feature_channel: object, service_account_path: str) -> None:
         self.feature_channel = feature_channel
@@ -116,6 +120,7 @@ def make_subject(feature_name: str) -> SimpleNamespace:
         logger=FakeLogger(),
         bot=SimpleNamespace(user=object()),
         ManagerType=manager_type,
+        _refresh_auto_guide_if_enabled=noop_refresh_auto_guide,
     )
     subject._parse_message_submission = MethodType(
         parse_message_submission,
@@ -392,7 +397,7 @@ async def test_shift_listener_marks_old_entry_header_google_sheets_error(
     bot_user = object()
     subject = make_subject("shift_register")
     subject.bot = SimpleNamespace(user=bot_user)
-    subject.lock = ShiftRegister.lock
+    subject.sheet_write_lock = ShiftRegister.sheet_write_lock
     write_shift_registration = ShiftRegister._write_shift_registration
     subject._write_shift_registration = MethodType(
         write_shift_registration,

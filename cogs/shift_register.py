@@ -18,15 +18,21 @@ from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
     ShiftRegisterView,
     build_shift_register_settings_panel,
+    get_fresh_shift_register_config_or_respond,
 )
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
-from utils.shift_register_timeline import render_shift_timeline_announcement_messages
+from utils.shift_register_timeline import (
+    build_shift_timeline_template_values,
+    render_shift_timeline_announcement_messages,
+)
 from utils.storage_errors import partial_success_storage_error
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from discord import Interaction, Message
     from discord.ui import View
 
@@ -43,8 +49,10 @@ class ShiftRegister(
     feature_name = "shift_register"
     feature_display_name = SHIFT_REGISTER_DISPLAY_NAME
     guide_template_key = "shift.guide"
+    auto_guide_template_key = "shift.auto_guide"
     timeline_template_key = "shift.timeline"
-    lock = KeyAsyncLock()
+    sheet_write_lock = KeyAsyncLock()
+    auto_guide_lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
 
@@ -56,8 +64,59 @@ class ShiftRegister(
         return feature_config.entry_worksheet_id
 
     @override
+    def _auto_guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        language: str,
+    ) -> dict[str, object]:
+        values = super()._auto_guide_template_values(context, language)
+        feature_config = context.feature_config
+        recruitment_ranges = RecruitmentTimeRanges.from_json(
+            getattr(feature_config, "recruitment_time_ranges", None)
+        )
+        values.update(
+            build_shift_timeline_template_values(
+                language,
+                day_number=getattr(feature_config, "day_number", None),
+                event_date=getattr(feature_config, "event_date", None),
+                recruitment_time_range=recruitment_ranges.announcement_display(),
+                submission_deadline_at=getattr(
+                    feature_config,
+                    "submission_deadline_at",
+                    None,
+                ),
+                draft_shift_proposal_at=getattr(
+                    feature_config,
+                    "draft_shift_proposal_at",
+                    None,
+                ),
+                final_shift_notice_at=getattr(
+                    feature_config,
+                    "final_shift_notice_at",
+                    None,
+                ),
+            )
+        )
+        return values
+
+    @override
     def _build_initial_setup_view(self, manager: ShiftRegisterManager) -> View:
-        return ShiftRegisterView(shift_register_manager=manager)
+        return ShiftRegisterView(
+            shift_register_manager=manager,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_shift_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    def _latest_guide_state_resolver(
+        self,
+        manager: ShiftRegisterManager,
+    ) -> Callable[[], Awaitable[bool]]:
+        async def latest_guide_state_resolver() -> bool:
+            return await self._auto_guide_is_enabled(manager.feature_channel)
+
+        return latest_guide_state_resolver
 
     @override
     async def _build_settings_panel(
@@ -69,6 +128,31 @@ class ShiftRegister(
         return await build_shift_register_settings_panel(
             manager,
             sheet_config,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_shift_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    async def _toggle_shift_latest_guide(
+        self,
+        interaction: Interaction,
+        *,
+        enabled: bool,
+        current_view: View,
+    ) -> None:
+        shift_register = await get_fresh_shift_register_config_or_respond(
+            current_view.shift_register_manager,
+            interaction,
+        )
+        if shift_register is None:
+            return
+
+        await self.toggle_auto_guide_from_settings(
+            interaction,
+            enabled=enabled,
+            current_view=current_view,
+            feature_config=shift_register,
         )
 
     @override
@@ -134,7 +218,7 @@ class ShiftRegister(
                 log=self.logger,
             )
 
-        async with self.lock(message.channel.id):
+        async with self.sheet_write_lock(message.channel.id):
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 

@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING
 
-from discord import Interaction, Message, app_commands
+from discord import (
+    Embed,
+    Forbidden,
+    HTTPException,
+    Interaction,
+    Message,
+    MessageReference,
+    NotFound,
+    app_commands,
+)
 from discord.ext import commands
 
 from bot import config
@@ -18,10 +27,13 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
     MessageParseStatus,
 )
+from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
 from components.ui_feature_channel import DisableAndClearConfirmView
 from components.ui_settings_flow import (
     initial_setup_content,
+    prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_refresh_failure,
     send_settings_view_followup,
 )
 from components.ui_storage_errors import (
@@ -29,8 +41,16 @@ from components.ui_storage_errors import (
     send_storage_error,
 )
 from models.feature_channel import FeatureChannel
+from models.feature_channel_message_state import (
+    FeatureChannelMessageKind,
+    FeatureChannelMessageState,
+    get_auto_guide_state,
+    get_or_create_auto_guide_state,
+    save_manual_guide_anchor,
+)
 from utils.announcement_languages import (
     ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+    get_announcement_languages,
     render_announcement_messages,
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
@@ -47,7 +67,7 @@ from utils.storage_errors import (
 from utils.structs_base import GoogleSheetsMetadata, UserInfo
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from discord.ui import View
 
@@ -64,6 +84,16 @@ class _MessageUpsertStatus(Enum):
     INVALID = auto()
     MISSING_CONFIG = auto()
     PROCESSED = auto()
+
+
+LATEST_GUIDE_DELETE_FAILED_WARNING = (
+    "Latest Guide Message was disabled, but the previous guide message could "
+    "not be deleted. Check bot permissions and delete it manually if needed."
+)
+HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING = (
+    "Feature settings were cleared, but the previous latest guide message could "
+    "not be deleted. Check bot permissions and delete it manually if needed."
+)
 
 
 @dataclass(frozen=True)
@@ -254,7 +284,8 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
 
     feature_name: str  # Stable feature identifier; overridden by subclasses.
     feature_display_name: str  # Human-facing settings UI label.
-    lock: KeyAsyncLock
+    sheet_write_lock: KeyAsyncLock
+    auto_guide_lock: KeyAsyncLock
 
     ManagerType: type[TManager]  # Type of the manager to use for this feature
 
@@ -483,26 +514,32 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             return
 
         try:
-            await self._process_feature_channel_message_with_outcome(
-                message,
+            try:
+                await self._process_feature_channel_message_with_outcome(
+                    message,
+                    feature_channel_context,
+                )
+            except Exception as exc:
+                error = classify_storage_exception(exc)
+                if error is None:
+                    raise
+                await mark_storage_message_failure(
+                    message,
+                    self.bot.user,
+                    error,
+                    context=StorageOperationContext(
+                        operation="message_upsert",
+                        feature_name=self.feature_name,
+                        guild_id=message.guild.id,
+                        channel_id=message.channel.id,
+                        message_id=message.id,
+                    ),
+                    log=self.logger,
+                )
+        finally:
+            await self._refresh_auto_guide_if_enabled(
                 feature_channel_context,
-            )
-        except Exception as exc:
-            error = classify_storage_exception(exc)
-            if error is None:
-                raise
-            await mark_storage_message_failure(
-                message,
-                self.bot.user,
-                error,
-                context=StorageOperationContext(
-                    operation="message_upsert",
-                    feature_name=self.feature_name,
-                    guild_id=message.guild.id,
-                    channel_id=message.channel.id,
-                    message_id=message.id,
-                ),
-                log=self.logger,
+                message.channel,
             )
 
     async def setup_after_enable(self, interaction: Interaction) -> None:
@@ -566,6 +603,134 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
         msg = "Subclasses must implement _build_settings_panel method."
         raise NotImplementedError(msg)
 
+    async def _auto_guide_is_enabled(self, feature_channel: FeatureChannel) -> bool:
+        auto_guide_state = await get_auto_guide_state(feature_channel)
+        return bool(auto_guide_state and auto_guide_state.is_enabled)
+
+    def _latest_guide_refresh_callback(
+        self,
+        manager: TManager,
+    ) -> Callable[[Interaction, SheetConfigBase], Awaitable[bool]]:
+        async def latest_guide_refresh_callback(
+            interaction: Interaction,
+            feature_config: SheetConfigBase,
+        ) -> bool:
+            try:
+                source = require_guild_channel_source(
+                    interaction,
+                    action="refresh latest guide message",
+                )
+                feature_channel_context = FeatureChannelContext(
+                    guild_id=source.guild.id,
+                    channel_id=source.channel.id,
+                    feature_channel=manager.feature_channel,
+                    manager=manager,
+                )
+                return await self._refresh_auto_guide_if_enabled(
+                    feature_channel_context,
+                    source.channel,
+                    feature_config=feature_config,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to refresh auto guide after settings save for Feature: "
+                    "`%s`",
+                    self.feature_name,
+                )
+                return False
+
+        return latest_guide_refresh_callback
+
+    async def toggle_auto_guide_from_settings(
+        self,
+        interaction: Interaction,
+        *,
+        enabled: bool,
+        current_view: View | None,
+        feature_config: SheetConfigBase,
+    ) -> None:
+        source = require_guild_channel_source(
+            interaction,
+            action="toggle latest guide message",
+        )
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            auto_guide_state = await get_or_create_auto_guide_state(
+                feature_channel_context.feature_channel
+            )
+            auto_guide_state.is_enabled = enabled
+            await auto_guide_state.save()
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="latest_guide_toggle_save",
+            )
+            return
+
+        try:
+            panel = await self._build_settings_panel(
+                interaction,
+                feature_channel_context.manager,
+                feature_config,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if current_view is not None:
+                current_view.stop()
+            deleted = True
+            if not enabled:
+                deleted = await self._disable_auto_guide_and_delete_message(
+                    feature_channel_context
+                )
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="latest_guide_toggle_refresh_panel",
+                feature_name=self.feature_name,
+                log=self.logger,
+                clear_current_message=True,
+            )
+            if not deleted:
+                await interaction.followup.send(
+                    LATEST_GUIDE_DELETE_FAILED_WARNING,
+                    ephemeral=True,
+                )
+            return
+
+        replacement_view = (
+            panel.view
+            if current_view is None
+            else prepare_replacement_settings_view(current_view, panel.view)
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=panel.embed,
+            view=replacement_view,
+        )
+
+        if enabled:
+            refreshed = await self._refresh_auto_guide_if_enabled(
+                feature_channel_context,
+                source.channel,
+                feature_config=feature_config,
+            )
+            if not refreshed:
+                await interaction.followup.send(
+                    LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING,
+                    ephemeral=True,
+                )
+            return
+
+        deleted = await self._disable_auto_guide_and_delete_message(
+            feature_channel_context
+        )
+        if not deleted:
+            await interaction.followup.send(
+                LATEST_GUIDE_DELETE_FAILED_WARNING,
+                ephemeral=True,
+            )
+
     @app_commands.command(
         name="enable", description="Enable this feature in the current channel."
     )
@@ -602,8 +767,33 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             interaction,
             action="proceed with disable command",
         )
+        auto_guide_deleted = True
         try:
-            result = await self._disable_channel(source.guild.id, source.channel.id)
+            feature_channel_context = await self._get_feature_channel_context_or_none(
+                guild_id=source.guild.id,
+                channel_id=source.channel.id,
+                require_enabled=True,
+            )
+            if feature_channel_context is None:
+                result = False
+                self.logger.info(
+                    "No enabled record to disable for Feature: `%s` in "
+                    "Guild: `%s` Channel: `%s`",
+                    self.feature_name,
+                    source.guild.id,
+                    source.channel.id,
+                )
+            else:
+                result = await self._disable_channel(
+                    source.guild.id,
+                    source.channel.id,
+                )
+                if result:
+                    auto_guide_deleted = (
+                        await self._disable_auto_guide_and_delete_message(
+                            feature_channel_context,
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
                 interaction,
@@ -621,6 +811,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             )
         )
         await interaction.response.send_message(msg, ephemeral=True)
+        if result and not auto_guide_deleted:
+            await interaction.followup.send(
+                LATEST_GUIDE_DELETE_FAILED_WARNING,
+                ephemeral=True,
+            )
 
     @app_commands.command(
         name="disable_and_clear",
@@ -648,7 +843,20 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
         # Wait for user interaction
         await view.wait()
         if view.value:
+            auto_guide_deleted = True
             try:
+                feature_channel_context = (
+                    await self._get_feature_channel_context_or_none(
+                        guild_id=source.guild.id,
+                        channel_id=source.channel.id,
+                    )
+                )
+                if feature_channel_context is not None:
+                    auto_guide_deleted = (
+                        await self._delete_auto_guide_message_for_hard_clear(
+                            feature_channel_context,
+                        )
+                    )
                 await self._clear_feature_settings(source.guild.id, source.channel.id)
             except Exception as exc:  # noqa: BLE001
                 await self._send_interaction_storage_error_or_raise(
@@ -664,6 +872,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                 f"cleared.",
                 ephemeral=True,
             )
+            if not auto_guide_deleted:
+                await interaction.followup.send(
+                    HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING,
+                    ephemeral=True,
+                )
         elif view.value is False:
             # Already sent cancel message in view
             pass
@@ -673,6 +886,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             )
 
     guide_template_key: str
+    auto_guide_template_key: str
 
     def _guide_worksheet_id(
         self,
@@ -688,6 +902,241 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             feature_config.sheet_url,
             self._guide_worksheet_id(feature_config),
         )
+
+    def _auto_guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        language: str,
+    ) -> dict[str, object]:
+        del language
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+        return {
+            "bot": bot_mention,
+            "sheet_url": self._guide_sheet_url(context.feature_config),
+        }
+
+    async def _render_auto_guide_embeds(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        *,
+        include_footer: bool = False,
+    ) -> list[Embed]:
+        embeds: list[Embed] = []
+        languages = await get_announcement_languages(context.guild_id, self.logger)
+        for language in languages:
+            values = self._auto_guide_template_values(context, language)
+            embed = Embed(
+                title=render_message_template(
+                    f"{self.auto_guide_template_key}.title",
+                    language,
+                    **values,
+                ),
+                description=render_message_template(
+                    f"{self.auto_guide_template_key}.description",
+                    language,
+                    **values,
+                ),
+                color=config.DEFAULT_EMBED_COLOR,
+            )
+            if include_footer:
+                embed.set_footer(
+                    text=render_message_template(
+                        f"{self.auto_guide_template_key}.footer",
+                        language,
+                        **values,
+                    )
+                )
+            embeds.append(embed)
+        return embeds
+
+    async def _refresh_auto_guide_if_enabled(
+        self,
+        feature_channel_context: FeatureChannelContext[TManager],
+        channel: object,
+        *,
+        feature_config: SheetConfigBase | None = None,
+    ) -> bool:
+        async with self.auto_guide_lock(feature_channel_context.channel_id):
+            try:
+                auto_guide_state = await get_auto_guide_state(
+                    feature_channel_context.feature_channel
+                )
+                if auto_guide_state is None or not auto_guide_state.is_enabled:
+                    return True
+
+                if feature_config is None:
+                    context = await self._get_configured_feature_channel_context(
+                        feature_channel_context
+                    )
+                    if context is None:
+                        return True
+                else:
+                    context = ConfiguredFeatureChannelContext(
+                        guild_id=feature_channel_context.guild_id,
+                        channel_id=feature_channel_context.channel_id,
+                        feature_channel=feature_channel_context.feature_channel,
+                        manager=feature_channel_context.manager,
+                        feature_config=feature_config,
+                    )
+
+                return await self._send_and_record_auto_guide(
+                    context,
+                    channel,
+                    auto_guide_state,
+                )
+            except Exception:
+                self.logger.exception(
+                    "Failed to refresh auto guide for Feature: `%s` in "
+                    "Guild: `%s` Channel: `%s`",
+                    self.feature_name,
+                    feature_channel_context.guild_id,
+                    feature_channel_context.channel_id,
+                )
+                return False
+
+    async def _send_and_record_auto_guide(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        channel: object,
+        auto_guide_state: FeatureChannelMessageState,
+    ) -> bool:
+        message = await self._send_auto_guide_message(
+            context,
+            channel,
+        )
+        if auto_guide_state.message_id is not None:
+            await self._delete_auto_guide_message(channel, auto_guide_state.message_id)
+
+        state = await get_or_create_auto_guide_state(context.feature_channel)
+        state.message_id = message.id
+        await state.save()
+        return True
+
+    async def _send_auto_guide_message(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        channel: object,
+    ) -> Message:
+        manual_anchor = await FeatureChannelMessageState.get_or_none(
+            feature_channel=context.feature_channel,
+            message_kind=FeatureChannelMessageKind.MANUAL_GUIDE,
+            message_id__not_isnull=True,
+        )
+        if manual_anchor is not None:
+            reference = MessageReference(
+                message_id=manual_anchor.message_id,
+                channel_id=context.channel_id,
+                guild_id=context.guild_id,
+            )
+            try:
+                return await channel.send(
+                    embeds=await self._render_auto_guide_embeds(
+                        context,
+                        include_footer=True,
+                    ),
+                    reference=reference,
+                    mention_author=False,
+                )
+            except (NotFound, Forbidden, HTTPException):
+                pass
+
+        return await channel.send(
+            embeds=await self._render_auto_guide_embeds(
+                context,
+            )
+        )
+
+    async def _delete_auto_guide_message(
+        self,
+        channel: object,
+        message_id: int,
+    ) -> bool:
+        try:
+            message = await channel.fetch_message(message_id)
+            await message.delete()
+        except NotFound:
+            return True
+        except (Forbidden, HTTPException):
+            self.logger.warning(
+                "Failed to delete previous auto guide message `%s`.",
+                message_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _disable_auto_guide_and_delete_message(
+        self,
+        feature_channel_context: FeatureChannelContext[TManager],
+    ) -> bool:
+        async with self.auto_guide_lock(feature_channel_context.channel_id):
+            auto_guide_state = await get_auto_guide_state(
+                feature_channel_context.feature_channel
+            )
+            if auto_guide_state is None:
+                return True
+
+            auto_guide_state.is_enabled = False
+            await auto_guide_state.save()
+            if auto_guide_state.message_id is None:
+                return True
+
+            get_channel = getattr(self.bot, "get_channel", None)
+            channel = (
+                get_channel(feature_channel_context.channel_id)
+                if callable(get_channel)
+                else None
+            )
+            if channel is None:
+                self.logger.warning(
+                    "Failed to delete latest auto guide message `%s`; channel `%s` "
+                    "was not available.",
+                    auto_guide_state.message_id,
+                    feature_channel_context.channel_id,
+                )
+                return False
+
+            deleted = await self._delete_auto_guide_message(
+                channel,
+                auto_guide_state.message_id,
+            )
+            if not deleted:
+                return False
+
+            auto_guide_state.message_id = None
+            await auto_guide_state.save()
+            return True
+
+    async def _delete_auto_guide_message_for_hard_clear(
+        self,
+        feature_channel_context: FeatureChannelContext[TManager],
+    ) -> bool:
+        async with self.auto_guide_lock(feature_channel_context.channel_id):
+            auto_guide_state = await get_auto_guide_state(
+                feature_channel_context.feature_channel
+            )
+            if auto_guide_state is None or auto_guide_state.message_id is None:
+                return True
+
+            get_channel = getattr(self.bot, "get_channel", None)
+            channel = (
+                get_channel(feature_channel_context.channel_id)
+                if callable(get_channel)
+                else None
+            )
+            if channel is None:
+                self.logger.warning(
+                    "Failed to delete latest auto guide message `%s`; channel `%s` "
+                    "was not available.",
+                    auto_guide_state.message_id,
+                    feature_channel_context.channel_id,
+                )
+                return False
+
+            return await self._delete_auto_guide_message(
+                channel,
+                auto_guide_state.message_id,
+            )
 
     async def send_guide_message(self, interaction: Interaction) -> None:
         """
@@ -725,7 +1174,39 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             )
             return
 
-        await _send_public_announcement_followups(interaction, announcements)
+        if not announcements:
+            await interaction.followup.send(
+                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+
+        anchor_saved = False
+        for announcement in announcements:
+            message = await interaction.followup.send(
+                announcement.content,
+                ephemeral=False,
+                wait=True,
+            )
+            if anchor_saved:
+                continue
+            anchor_saved = True
+            try:
+                await save_manual_guide_anchor(context.feature_channel, message.id)
+            except Exception:  # noqa: BLE001
+                self.logger.warning(
+                    (
+                        "Failed to save manual guide anchor for Feature: `%s` in "
+                        "Guild: `%s` Channel: `%s` MessageKind: `%s` "
+                        "Message: `%s`"
+                    ),
+                    self.feature_name,
+                    context.guild_id,
+                    context.channel_id,
+                    FeatureChannelMessageKind.MANUAL_GUIDE.value,
+                    message.id,
+                    exc_info=True,
+                )
 
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
         """
@@ -1010,7 +1491,7 @@ class FeatureChannelUserBase[
 
             manager = context.manager
 
-            async with self.FeatureChannelType.lock(context.channel_id):
+            async with self.FeatureChannelType.sheet_write_lock(context.channel_id):
                 metadata = await manager.fetch_google_sheets_metadata()
                 await self._delete_user_data(manager, user_info, metadata)
 

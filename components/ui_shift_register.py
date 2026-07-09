@@ -7,6 +7,16 @@ from discord import ButtonStyle, Embed, Interaction, TextStyle
 from discord.ui import Button, Modal, TextInput
 
 from bot import config
+from components.ui_auto_guide import (
+    LATEST_GUIDE_FIELD_NAME,
+    LatestGuideButton,
+    LatestGuideRefreshCallback,
+    LatestGuideStateResolver,
+    LatestGuideToggleCallback,
+    latest_guide_status_value,
+    refresh_latest_guide_after_settings_save,
+    resolve_latest_guide_enabled,
+)
 from components.ui_permissions import require_settings_permissions
 from components.ui_settings_flow import (
     SETTINGS_STORAGE_EXCEPTIONS,
@@ -91,6 +101,10 @@ async def build_shift_register_settings_panel(
     *,
     is_save_action: bool = False,
     metadata: ShiftRegisterGoogleSheetsMetadata | None = None,
+    latest_guide_enabled: bool = False,
+    latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+    latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+    latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
 ) -> SettingsPanel:
     active_metadata = (
         metadata or await shift_register_manager.fetch_google_sheets_metadata()
@@ -100,6 +114,10 @@ async def build_shift_register_settings_panel(
         "final_schedule_anchor_cell",
         "A1",
     )
+    latest_guide_enabled = await resolve_latest_guide_enabled(
+        enabled=latest_guide_enabled,
+        state_resolver=latest_guide_state_resolver,
+    )
     embed = build_current_settings_embed(
         sheet_url=shift_register.sheet_url,
         metadata=active_metadata,
@@ -107,6 +125,7 @@ async def build_shift_register_settings_panel(
         shift_register=shift_register,
         color=config.DEFAULT_EMBED_COLOR,
         is_save_action=is_save_action,
+        latest_guide_enabled=latest_guide_enabled,
     )
     view = ShiftRegisterView(
         shift_register_manager=shift_register_manager,
@@ -116,6 +135,10 @@ async def build_shift_register_settings_panel(
         draft_worksheet_title=active_metadata.draft_worksheet.title,
         final_schedule_worksheet_title=active_metadata.final_schedule_worksheet.title,
         final_schedule_anchor_cell=final_schedule_anchor_cell,
+        latest_guide_enabled=latest_guide_enabled,
+        latest_guide_toggle_callback=latest_guide_toggle_callback,
+        latest_guide_state_resolver=latest_guide_state_resolver,
+        latest_guide_refresh_callback=latest_guide_refresh_callback,
     )
     return SettingsPanel(embed=embed, view=view)
 
@@ -205,6 +228,11 @@ async def _send_modal_validation_error(
 async def _send_saved_shift_register_panel(
     interaction: Interaction,
     shift_register_manager: ShiftRegisterManager,
+    *,
+    latest_guide_enabled: bool = False,
+    latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+    latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+    latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
 ) -> None:
     try:
         shift_register = await shift_register_manager.get_sheet_config()
@@ -212,6 +240,10 @@ async def _send_saved_shift_register_panel(
             shift_register_manager,
             shift_register,
             is_save_action=True,
+            latest_guide_enabled=latest_guide_enabled,
+            latest_guide_toggle_callback=latest_guide_toggle_callback,
+            latest_guide_state_resolver=latest_guide_state_resolver,
+            latest_guide_refresh_callback=latest_guide_refresh_callback,
         )
     except SETTINGS_STORAGE_EXCEPTIONS as exc:
         await send_settings_refresh_failure(
@@ -223,6 +255,11 @@ async def _send_saved_shift_register_panel(
         )
         return
     await send_current_panel_followup(interaction, panel)
+    await refresh_latest_guide_after_settings_save(
+        interaction,
+        shift_register,
+        latest_guide_refresh_callback,
+    )
 
 
 class ShiftRegisterSheetModal(Modal):
@@ -238,6 +275,10 @@ class ShiftRegisterSheetModal(Modal):
         final_schedule_anchor_cell: str = "A1",
         *,
         requires_existing_settings: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(title="Shift Register Setup")
         entry_worksheet_title = entry_worksheet_title or next(
@@ -294,6 +335,10 @@ class ShiftRegisterSheetModal(Modal):
         self.add_item(self.final_schedule_anchor_cell)
         self.shift_register_manager = shift_register_manager
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def on_submit(self, interaction: Interaction) -> None:
         """
@@ -360,6 +405,10 @@ class ShiftRegisterSheetModal(Modal):
                 shift_register,
                 is_save_action=True,
                 metadata=metadata,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_refresh_failure(
@@ -371,6 +420,11 @@ class ShiftRegisterSheetModal(Modal):
             )
             return
         await send_current_panel_followup(interaction, panel)
+        await refresh_latest_guide_after_settings_save(
+            interaction,
+            shift_register,
+            self.latest_guide_refresh_callback,
+        )
 
 
 class ShiftTimelineModal(Modal):
@@ -386,6 +440,10 @@ class ShiftTimelineModal(Modal):
         draft_shift_proposal_at: str = "",
         final_shift_notice_at: str = "",
         requires_existing_settings: bool = True,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(title="Shift Timeline")
         self.day_number: TextInput = TextInput(
@@ -430,6 +488,10 @@ class ShiftTimelineModal(Modal):
         self.add_item(self.final_shift_notice_at)
         self.shift_register_manager = shift_register_manager
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def on_submit(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -457,6 +519,10 @@ class ShiftTimelineModal(Modal):
                 view=ShiftTimelineEditAgainView(
                     self.shift_register_manager,
                     **_timeline_defaults_from_modal(self),
+                    latest_guide_enabled=self.latest_guide_enabled,
+                    latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=self.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=self.latest_guide_refresh_callback,
                 ),
             )
             return
@@ -479,7 +545,14 @@ class ShiftTimelineModal(Modal):
                 log=logger,
             )
             return
-        await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
+        await _send_saved_shift_register_panel(
+            interaction,
+            self.shift_register_manager,
+            latest_guide_enabled=self.latest_guide_enabled,
+            latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+            latest_guide_state_resolver=self.latest_guide_state_resolver,
+            latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+        )
 
 
 class ShiftRecruitmentRangeModal(Modal):
@@ -491,6 +564,10 @@ class ShiftRecruitmentRangeModal(Modal):
         *,
         recruitment_time_range: str = "",
         requires_existing_settings: bool = True,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(title="Recruitment Time Range")
         self.recruitment_time_range: TextInput = TextInput(
@@ -503,6 +580,10 @@ class ShiftRecruitmentRangeModal(Modal):
         self.add_item(self.recruitment_time_range)
         self.shift_register_manager = shift_register_manager
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def on_submit(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -530,6 +611,10 @@ class ShiftRecruitmentRangeModal(Modal):
                 view=ShiftRecruitmentRangeEditAgainView(
                     self.shift_register_manager,
                     recruitment_time_range=self.recruitment_time_range.value,
+                    latest_guide_enabled=self.latest_guide_enabled,
+                    latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=self.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=self.latest_guide_refresh_callback,
                 ),
             )
             return
@@ -546,7 +631,14 @@ class ShiftRecruitmentRangeModal(Modal):
                 log=logger,
             )
             return
-        await _send_saved_shift_register_panel(interaction, self.shift_register_manager)
+        await _send_saved_shift_register_panel(
+            interaction,
+            self.shift_register_manager,
+            latest_guide_enabled=self.latest_guide_enabled,
+            latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+            latest_guide_state_resolver=self.latest_guide_state_resolver,
+            latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+        )
 
 
 class ShiftRegisterButton(Button):
@@ -563,6 +655,10 @@ class ShiftRegisterButton(Button):
         final_schedule_anchor_cell: str = "A1",
         *,
         requires_existing_settings: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label=label, style=ButtonStyle.primary)
         self.shift_register_manager = shift_register_manager
@@ -572,6 +668,10 @@ class ShiftRegisterButton(Button):
         self.final_schedule_worksheet_title = final_schedule_worksheet_title
         self.final_schedule_anchor_cell = final_schedule_anchor_cell
         self.requires_existing_settings = requires_existing_settings
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -581,6 +681,10 @@ class ShiftRegisterButton(Button):
             return await build_shift_register_settings_panel(
                 self.shift_register_manager,
                 shift_register,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
 
         if not self.requires_existing_settings:
@@ -627,6 +731,10 @@ class ShiftRegisterButton(Button):
                 final_schedule_worksheet_title=final_schedule_worksheet_title,
                 final_schedule_anchor_cell=final_schedule_anchor_cell,
                 requires_existing_settings=self.requires_existing_settings,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -634,9 +742,21 @@ class ShiftRegisterButton(Button):
 class ShiftTimelineButton(Button):
     """Button that opens the Shift Timeline modal with fresh saved values."""
 
-    def __init__(self, shift_register_manager: ShiftRegisterManager) -> None:
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
+    ) -> None:
         super().__init__(label="Edit Shift Timeline", style=ButtonStyle.secondary)
         self.shift_register_manager = shift_register_manager
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -653,6 +773,10 @@ class ShiftTimelineButton(Button):
             ShiftTimelineModal(
                 self.shift_register_manager,
                 **_timeline_defaults_from_config(shift_register),
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -660,12 +784,24 @@ class ShiftTimelineButton(Button):
 class ShiftRecruitmentRangeButton(Button):
     """Button that opens the recruitment time range modal with fresh values."""
 
-    def __init__(self, shift_register_manager: ShiftRegisterManager) -> None:
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
+    ) -> None:
         super().__init__(
             label="Edit Recruitment Time Range",
             style=ButtonStyle.secondary,
         )
         self.shift_register_manager = shift_register_manager
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -685,6 +821,10 @@ class ShiftRecruitmentRangeButton(Button):
             ShiftRecruitmentRangeModal(
                 self.shift_register_manager,
                 recruitment_time_range=ranges.display(),
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -701,6 +841,10 @@ class ShiftTimelineEditAgainButton(Button):
         submission_deadline_at: str,
         draft_shift_proposal_at: str,
         final_shift_notice_at: str,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label="Edit Again", style=ButtonStyle.primary)
         self.shift_register_manager = shift_register_manager
@@ -711,6 +855,10 @@ class ShiftTimelineEditAgainButton(Button):
             "draft_shift_proposal_at": draft_shift_proposal_at,
             "final_shift_notice_at": final_shift_notice_at,
         }
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -727,6 +875,10 @@ class ShiftTimelineEditAgainButton(Button):
             ShiftTimelineModal(
                 self.shift_register_manager,
                 **self.values,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -743,6 +895,10 @@ class ShiftTimelineEditAgainView(SettingsTimeoutView):
         submission_deadline_at: str,
         draft_shift_proposal_at: str,
         final_shift_notice_at: str,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
         self.add_item(
@@ -753,6 +909,10 @@ class ShiftTimelineEditAgainView(SettingsTimeoutView):
                 submission_deadline_at=submission_deadline_at,
                 draft_shift_proposal_at=draft_shift_proposal_at,
                 final_shift_notice_at=final_shift_notice_at,
+                latest_guide_enabled=latest_guide_enabled,
+                latest_guide_toggle_callback=latest_guide_toggle_callback,
+                latest_guide_state_resolver=latest_guide_state_resolver,
+                latest_guide_refresh_callback=latest_guide_refresh_callback,
             )
         )
 
@@ -765,10 +925,18 @@ class ShiftRecruitmentRangeEditAgainButton(Button):
         shift_register_manager: ShiftRegisterManager,
         *,
         recruitment_time_range: str,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__(label="Edit Again", style=ButtonStyle.primary)
         self.shift_register_manager = shift_register_manager
         self.recruitment_time_range = recruitment_time_range
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
     async def callback(self, interaction: Interaction) -> None:
         if not await require_settings_permissions(interaction):
@@ -785,6 +953,10 @@ class ShiftRecruitmentRangeEditAgainButton(Button):
             ShiftRecruitmentRangeModal(
                 self.shift_register_manager,
                 recruitment_time_range=self.recruitment_time_range,
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
             )
         )
 
@@ -797,12 +969,20 @@ class ShiftRecruitmentRangeEditAgainView(SettingsTimeoutView):
         shift_register_manager: ShiftRegisterManager,
         *,
         recruitment_time_range: str,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
         self.add_item(
             ShiftRecruitmentRangeEditAgainButton(
                 shift_register_manager,
                 recruitment_time_range=recruitment_time_range,
+                latest_guide_enabled=latest_guide_enabled,
+                latest_guide_toggle_callback=latest_guide_toggle_callback,
+                latest_guide_state_resolver=latest_guide_state_resolver,
+                latest_guide_refresh_callback=latest_guide_refresh_callback,
             )
         )
 
@@ -820,8 +1000,17 @@ class ShiftRegisterView(SettingsTimeoutView):
         draft_worksheet_title: str | None = None,
         final_schedule_worksheet_title: str | None = None,
         final_schedule_anchor_cell: str = "A1",
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
     ) -> None:
         super().__init__()
+        self.shift_register_manager = shift_register_manager
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
         label = (
             "Edit Sheet Settings" if has_existing_settings else "Set Up Shift Register"
         )
@@ -834,11 +1023,38 @@ class ShiftRegisterView(SettingsTimeoutView):
             final_schedule_worksheet_title=final_schedule_worksheet_title,
             final_schedule_anchor_cell=final_schedule_anchor_cell,
             requires_existing_settings=has_existing_settings,
+            latest_guide_enabled=latest_guide_enabled,
+            latest_guide_toggle_callback=latest_guide_toggle_callback,
+            latest_guide_state_resolver=latest_guide_state_resolver,
+            latest_guide_refresh_callback=latest_guide_refresh_callback,
         )
+        if has_existing_settings and latest_guide_toggle_callback is not None:
+            self.add_item(
+                LatestGuideButton(
+                    enabled=latest_guide_enabled,
+                    toggle_callback=latest_guide_toggle_callback,
+                )
+            )
         self.add_item(button)
         if has_existing_settings:
-            self.add_item(ShiftTimelineButton(shift_register_manager))
-            self.add_item(ShiftRecruitmentRangeButton(shift_register_manager))
+            self.add_item(
+                ShiftTimelineButton(
+                    shift_register_manager,
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=latest_guide_toggle_callback,
+                    latest_guide_state_resolver=latest_guide_state_resolver,
+                    latest_guide_refresh_callback=latest_guide_refresh_callback,
+                )
+            )
+            self.add_item(
+                ShiftRecruitmentRangeButton(
+                    shift_register_manager,
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=latest_guide_toggle_callback,
+                    latest_guide_state_resolver=latest_guide_state_resolver,
+                    latest_guide_refresh_callback=latest_guide_refresh_callback,
+                )
+            )
 
 
 def build_current_settings_embed(
@@ -849,6 +1065,7 @@ def build_current_settings_embed(
     color: int,
     *,
     is_save_action: bool = False,
+    latest_guide_enabled: bool = False,
 ) -> Embed:
     """
     Build an embed showing the current shift register settings.
@@ -906,6 +1123,11 @@ def build_current_settings_embed(
     embed.add_field(
         name="Final Schedule Anchor Cell",
         value=f"`{final_schedule_anchor_cell}`",
+        inline=False,
+    )
+    embed.add_field(
+        name=LATEST_GUIDE_FIELD_NAME,
+        value=latest_guide_status_value(enabled=latest_guide_enabled),
         inline=False,
     )
 

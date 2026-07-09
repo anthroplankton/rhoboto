@@ -151,6 +151,32 @@ development guild.
 | Shift guide announcements | Run `/shift_register announce_guide`. | The channel receives one public guide message per saved language, in saved order, and each message includes the bot mention and Sheet link. |  |  |
 | Shift timeline announcements | Run `/shift_register announce_timeline` after saving Shift Timeline and Recruitment Time Range settings. | The channel receives one public timeline message per saved language, in saved order. The messages include the saved day/date when present, recruitment range, milestone lines, and bot mention when a submission deadline is set. |  |  |
 
+## Latest Guide Message
+
+Run these checks in a development channel with Team Register and Shift Register
+settings available.
+
+Schema note: this feature adds the Tortoise-managed
+`feature_channel_message_state` table for bot-managed `auto_guide` and
+`manual_guide` message state. Fresh databases create it from the current models
+through `generate_schemas()`. Existing deployments must apply the usual schema
+rollout before enabling the feature because `generate_schemas()` is not a safe
+production migration mechanism; back up the database and verify the table exists
+first.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Enable latest guide | Open `/team_register settings`, enable Team Register Latest Guide, and save. | A short guide message is sent. |  |  |
+| Reply to full guide | Run `/team_register announce_guide`, then send a non-bot message. | The short guide replies to the latest full guide and shows the footer. |  |  |
+| Missing full guide anchor | Delete the full guide anchor message, then send a non-bot message. | The short guide falls back to a normal message and has no footer. |  |  |
+| Refresh after messages | Send three ordinary non-bot messages. | The guide refreshes after each message, and the previous guide is deleted when bot permissions allow it. |  |  |
+| Disable latest guide | Disable Latest Guide from `/team_register settings`. | The previous short guide is deleted, or the administrator receives the delete-permission warning. |  |  |
+| Soft disable feature | Run the feature's `/disable` command. | Latest Guide is disabled, and the same delete warning appears if the bot cannot delete the old guide. |  |  |
+| Hard clear feature | Run `/disable_and_clear` and confirm. | Feature settings are cleared, and the hard clear delete warning appears if the bot cannot delete the old guide. |  |  |
+| Team settings refresh | Edit Team sheet settings, then edit Encore roles. | Latest Guide refreshes after Team sheet changes and does not refresh after Encore role changes. |  |  |
+| Shift settings refresh | Edit Shift sheet settings, timeline, and recruitment time range. | Each successful save refreshes Latest Guide. |  |  |
+| Permission warnings | Remove send, reply, and delete permissions in a development channel. | Administrator warnings match the design, and registration still works. |  |  |
+
 ## Feature Lifecycle
 
 Run these checks for both feature channels.

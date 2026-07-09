@@ -17,6 +17,7 @@ from components.ui_team_register import (
     TeamRegisterView,
     build_summary_embed,
     build_team_register_settings_panel,
+    get_fresh_team_register_config_or_respond,
 )
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
@@ -29,6 +30,8 @@ from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from discord.ui import View
 
     from bot import Rhoboto
@@ -44,7 +47,9 @@ class TeamRegister(
     feature_name = "team_register"
     feature_display_name = TEAM_REGISTER_DISPLAY_NAME
     guide_template_key = "team.guide"
-    lock = KeyAsyncLock()
+    auto_guide_template_key = "team.auto_guide"
+    sheet_write_lock = KeyAsyncLock()
+    auto_guide_lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
 
@@ -57,7 +62,22 @@ class TeamRegister(
 
     @override
     def _build_initial_setup_view(self, manager: TeamRegisterManager) -> View:
-        return TeamRegisterView(team_register_manager=manager)
+        return TeamRegisterView(
+            team_register_manager=manager,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_team_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    def _latest_guide_state_resolver(
+        self,
+        manager: TeamRegisterManager,
+    ) -> Callable[[], Awaitable[bool]]:
+        async def latest_guide_state_resolver() -> bool:
+            return await self._auto_guide_is_enabled(manager.feature_channel)
+
+        return latest_guide_state_resolver
 
     @override
     async def _build_settings_panel(
@@ -70,6 +90,31 @@ class TeamRegister(
             manager,
             interaction,
             sheet_config,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_team_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    async def _toggle_team_latest_guide(
+        self,
+        interaction: Interaction,
+        *,
+        enabled: bool,
+        current_view: View,
+    ) -> None:
+        team_register = await get_fresh_team_register_config_or_respond(
+            current_view.team_register_manager,
+            interaction,
+        )
+        if team_register is None:
+            return
+
+        await self.toggle_auto_guide_from_settings(
+            interaction,
+            enabled=enabled,
+            current_view=current_view,
+            feature_config=team_register,
         )
 
     @override
@@ -120,7 +165,7 @@ class TeamRegister(
         team_tuple = classified_teams.as_tuple()
         manager = context.manager
 
-        async with self.lock(context.channel_id):
+        async with self.sheet_write_lock(context.channel_id):
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 
@@ -206,7 +251,7 @@ class TeamRegister(
             return
 
         try:
-            async with self.lock(context.channel_id):
+            async with self.sheet_write_lock(context.channel_id):
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
 

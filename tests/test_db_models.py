@@ -5,8 +5,16 @@ import datetime as dt
 
 import pytest
 from tortoise import Tortoise
+from tortoise.exceptions import IntegrityError
 
 from models.feature_channel import FeatureChannel
+from models.feature_channel_message_state import (
+    FeatureChannelMessageKind,
+    FeatureChannelMessageState,
+    get_auto_guide_state,
+    get_or_create_auto_guide_state,
+    save_manual_guide_anchor,
+)
 from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
@@ -23,6 +31,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert apps is not None
         assert sorted(apps["models"]) == [
             "FeatureChannel",
+            "FeatureChannelMessageState",
             "GuildLanguageSettings",
             "ShiftRegisterConfig",
             "TeamRegisterConfig",
@@ -67,6 +76,52 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert shift_config.deadline_automation_enabled is False
     finally:
         await Tortoise.close_connections()
+
+
+@pytest.mark.asyncio
+async def test_feature_channel_message_state_enum_unique_and_cascade() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="team_register",
+        )
+
+        auto_state = await get_or_create_auto_guide_state(feature_channel)
+        assert auto_state.message_kind is FeatureChannelMessageKind.AUTO_GUIDE
+        assert auto_state.is_enabled is False
+        assert auto_state.message_id is None
+
+        auto_state.is_enabled = True
+        auto_state.message_id = 123456789012345678
+        await auto_state.save()
+
+        fetched_auto_state = await get_auto_guide_state(feature_channel)
+        assert fetched_auto_state is not None
+        assert fetched_auto_state.message_kind is FeatureChannelMessageKind.AUTO_GUIDE
+        assert fetched_auto_state.message_id == 123456789012345678
+
+        manual_state = await save_manual_guide_anchor(
+            feature_channel,
+            987654321098765432,
+        )
+        assert manual_state.message_kind is FeatureChannelMessageKind.MANUAL_GUIDE
+        assert manual_state.is_enabled is True
+        assert manual_state.message_id == 987654321098765432
+
+        with pytest.raises(IntegrityError):
+            await FeatureChannelMessageState.create(
+                feature_channel=feature_channel,
+                message_kind=FeatureChannelMessageKind.AUTO_GUIDE,
+                is_enabled=False,
+            )
+
+        await feature_channel.delete()
+        assert await FeatureChannelMessageState.all().count() == 0
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio

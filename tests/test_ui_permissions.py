@@ -8,6 +8,13 @@ import pytest
 from discord import ButtonStyle
 from tortoise.exceptions import DBConnectionError, IntegrityError
 
+from cogs.shift_register import ShiftRegister
+from cogs.team_register import TeamRegister
+from components.ui_auto_guide import (
+    LATEST_GUIDE_FIELD_NAME,
+    LATEST_GUIDE_SETTINGS_REFRESH_FAILED_WARNING,
+    LatestGuideButton,
+)
 from components.ui_feature_channel import DisableAndClearConfirmView
 from components.ui_language_settings import AnnouncementLanguageSettingsView
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
@@ -21,6 +28,7 @@ from components.ui_shift_register import (
     ShiftRegisterSheetModal,
     ShiftRegisterView,
     ShiftTimelineModal,
+    build_current_settings_embed as build_shift_current_settings_embed,
 )
 from components.ui_team_register import (
     BackToTeamSettingsButton,
@@ -31,6 +39,7 @@ from components.ui_team_register import (
     TeamRegisterButton,
     TeamRegisterSheetModal,
     TeamRegisterView,
+    build_current_settings_embed as build_team_current_settings_embed,
 )
 from tests.fakes import FakeInteraction, FakeRole
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
@@ -43,6 +52,7 @@ class RecordingTeamRegisterManager:
         self.encore_role_id_updates: list[list[int]] = []
         self.encore_role_ids: list[int] = []
         self.config_exists = True
+        self.feature_channel = SimpleNamespace(id=222)
         self.sheet_url = "https://sheet.example"
         self.metadata = team_register_metadata()
         self.upsert_error: Exception | None = None
@@ -115,6 +125,7 @@ class RecordingShiftRegisterManager:
         self.timeline_updates: list[dict[str, object]] = []
         self.recruitment_range_updates: list[object] = []
         self.config_exists = True
+        self.feature_channel = SimpleNamespace(id=222)
         self.sheet_url = "https://sheet.example"
         self.final_schedule_anchor_cell = "B2"
         self.day_number = 2
@@ -145,6 +156,7 @@ class RecordingShiftRegisterManager:
     ) -> SimpleNamespace:
         if self.upsert_error is not None:
             raise self.upsert_error
+        self.config_exists = True
         self.upsert_calls.append(
             {
                 "sheet_url": sheet_url,
@@ -319,6 +331,80 @@ def child_with_label(view: object, label: str) -> object:
     )
 
 
+def assert_latest_guide_enabled_panel(
+    kwargs: dict[str, object],
+    *,
+    toggle_callback: object,
+) -> None:
+    embed = kwargs["embed"]
+    view = kwargs["view"]
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map[LATEST_GUIDE_FIELD_NAME] == (
+        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "When a full guide announcement exists, the short guide replies to it."
+    )
+    assert view.children[0].label == "Disable Latest Guide"
+    assert view.children[0].style is ButtonStyle.secondary
+    assert view.children[0].toggle_callback is toggle_callback
+
+
+def assert_latest_guide_disabled_panel(kwargs: dict[str, object]) -> None:
+    embed = kwargs["embed"]
+    view = kwargs["view"]
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map[LATEST_GUIDE_FIELD_NAME] == (
+        "`Disabled` : No short guide is maintained near new messages. Enable this to "
+        "keep registration rules visible as the channel moves."
+    )
+    assert view.children[0].label == "Enable Latest Guide"
+    assert view.children[0].style is ButtonStyle.primary
+    assert view.children[0].toggle_callback is not None
+
+
+async def noop_latest_guide_toggle(
+    _interaction: object,
+    *,
+    enabled: bool,
+    current_view: object,
+) -> None:
+    del enabled, current_view
+
+
+async def latest_guide_is_enabled() -> bool:
+    return True
+
+
+async def latest_guide_disabled_for_feature(_feature_channel: object) -> bool:
+    return False
+
+
+async def noop_latest_guide_refresh(*_: object, **__: object) -> bool:
+    return True
+
+
+class RecordingLatestGuideRefreshCallback:
+    def __init__(self, *, result: bool = True) -> None:
+        self.result = result
+        self.calls: list[tuple[object, object, int]] = []
+
+    async def __call__(self, interaction: object, feature_config: object) -> bool:
+        self.calls.append(
+            (
+                interaction,
+                feature_config,
+                len(interaction.followup.messages),
+            )
+        )
+        return self.result
+
+
+def fake_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        tree=SimpleNamespace(add_command=lambda _command: None),
+        user=None,
+    )
+
+
 def test_team_register_setup_view_uses_set_up_button_label() -> None:
     manager = RecordingTeamRegisterManager()
 
@@ -333,6 +419,263 @@ def test_shift_register_setup_view_uses_set_up_button_label() -> None:
     view = ShiftRegisterView(manager, has_existing_settings=False)
 
     assert [child.label for child in view.children] == ["Set Up Shift Register"]
+
+
+def test_setup_views_do_not_show_latest_guide_button() -> None:
+    team_view = TeamRegisterView(
+        RecordingTeamRegisterManager(),
+        has_existing_settings=False,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+    shift_view = ShiftRegisterView(
+        RecordingShiftRegisterManager(),
+        has_existing_settings=False,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    assert "Disable Latest Guide" not in [child.label for child in team_view.children]
+    assert "Disable Latest Guide" not in [child.label for child in shift_view.children]
+
+
+@pytest.mark.asyncio
+async def test_cog_setup_views_pass_latest_guide_refresh_callback_to_sheet_modals() -> (
+    None
+):
+    team_manager = RecordingTeamRegisterManager()
+    team_manager.config_exists = False
+    team_view = TeamRegister(fake_bot())._build_initial_setup_view(  # noqa: SLF001
+        team_manager
+    )
+    team_interaction = FakeInteraction()
+
+    await child_with_label(team_view, "Set Up Team Register").callback(team_interaction)
+
+    team_modal = team_interaction.response.modals[0]
+    assert isinstance(team_modal, TeamRegisterSheetModal)
+    assert team_modal.latest_guide_refresh_callback is not None
+
+    shift_manager = RecordingShiftRegisterManager()
+    shift_manager.config_exists = False
+    shift_view = ShiftRegister(fake_bot())._build_initial_setup_view(  # noqa: SLF001
+        shift_manager
+    )
+    shift_interaction = FakeInteraction()
+
+    await child_with_label(shift_view, "Set Up Shift Register").callback(
+        shift_interaction
+    )
+
+    shift_modal = shift_interaction.response.modals[0]
+    assert isinstance(shift_modal, ShiftRegisterSheetModal)
+    assert shift_modal.latest_guide_refresh_callback is not None
+
+
+def test_configured_team_view_starts_with_enable_latest_guide_button() -> None:
+    view = TeamRegisterView(
+        RecordingTeamRegisterManager(),
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    first_child = view.children[0]
+    assert first_child.label == "Enable Latest Guide"
+    assert first_child.style is ButtonStyle.primary
+    assert "Edit Team Register Settings" in [child.label for child in view.children]
+    assert "Edit Encore Roles" in [child.label for child in view.children]
+
+
+def test_configured_shift_view_starts_with_disable_latest_guide_button() -> None:
+    view = ShiftRegisterView(
+        RecordingShiftRegisterManager(),
+        has_existing_settings=True,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    first_child = view.children[0]
+    assert first_child.label == "Disable Latest Guide"
+    assert first_child.style is ButtonStyle.secondary
+
+
+@pytest.mark.asyncio
+async def test_team_latest_guide_button_callback_has_view_manager() -> None:
+    manager = RecordingTeamRegisterManager()
+    calls: list[tuple[bool, object]] = []
+
+    async def toggle_callback(
+        _interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        calls.append((enabled, current_view.team_register_manager))
+
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        latest_guide_toggle_callback=toggle_callback,
+    )
+
+    await child_with_label(view, "Enable Latest Guide").callback(FakeInteraction())
+
+    assert calls == [(True, manager)]
+
+
+@pytest.mark.asyncio
+async def test_shift_latest_guide_button_callback_has_view_manager() -> None:
+    manager = RecordingShiftRegisterManager()
+    calls: list[tuple[bool, object]] = []
+
+    async def toggle_callback(
+        _interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        calls.append((enabled, current_view.shift_register_manager))
+
+    view = ShiftRegisterView(
+        manager,
+        has_existing_settings=True,
+        latest_guide_toggle_callback=toggle_callback,
+    )
+
+    await child_with_label(view, "Enable Latest Guide").callback(FakeInteraction())
+
+    assert calls == [(True, manager)]
+
+
+def test_team_settings_embed_includes_latest_guide_status_after_encore_roles() -> None:
+    embed = build_team_current_settings_embed(
+        sheet_url="https://sheet.example",
+        metadata=team_register_metadata(),
+        encore_role_ids=[],
+        color=0,
+        latest_guide_enabled=True,
+    )
+    field_names = [field.name for field in embed.fields]
+
+    assert field_names.index(LATEST_GUIDE_FIELD_NAME) == (
+        field_names.index("Encore Roles") + 1
+    )
+    latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
+    assert latest_guide_field.value == (
+        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "When a full guide announcement exists, the short guide replies to it."
+    )
+
+
+def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> None:
+    manager = RecordingShiftRegisterManager()
+    embed = build_shift_current_settings_embed(
+        sheet_url=manager.sheet_url,
+        metadata=manager.metadata,
+        final_schedule_anchor_cell=manager.final_schedule_anchor_cell,
+        shift_register=manager,
+        color=0,
+        latest_guide_enabled=False,
+    )
+    field_names = [field.name for field in embed.fields]
+
+    assert field_names.index(LATEST_GUIDE_FIELD_NAME) == (
+        field_names.index("Final Schedule Anchor Cell") + 1
+    )
+    assert field_names.index("Shift Timeline") == (
+        field_names.index(LATEST_GUIDE_FIELD_NAME) + 1
+    )
+    latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
+    assert latest_guide_field.value == (
+        "`Disabled` : No short guide is maintained near new messages. Enable this to "
+        "keep registration rules visible as the channel moves."
+    )
+
+
+@pytest.mark.asyncio
+async def test_latest_guide_button_denies_unauthorized_user() -> None:
+    calls: list[tuple[object, bool, object]] = []
+
+    async def toggle_callback(
+        interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        calls.append((interaction, enabled, current_view))
+
+    interaction = unauthorized_interaction()
+    button = LatestGuideButton(enabled=False, toggle_callback=toggle_callback)
+
+    await button.callback(interaction)
+
+    assert_permission_denied(interaction)
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_team_initial_setup_save_shows_disabled_latest_guide_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = TeamRegister(fake_bot())
+    monkeypatch.setattr(
+        subject,
+        "_auto_guide_is_enabled",
+        latest_guide_disabled_for_feature,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_refresh_auto_guide_if_enabled",
+        noop_latest_guide_refresh,
+    )
+    manager = RecordingTeamRegisterManager()
+    manager.config_exists = False
+    view = subject._build_initial_setup_view(manager)  # noqa: SLF001
+
+    assert [child.label for child in view.children] == ["Set Up Team Register"]
+    setup_interaction = FakeInteraction()
+    await child_with_label(view, "Set Up Team Register").callback(setup_interaction)
+    modal = setup_interaction.response.modals[0]
+
+    save_interaction = FakeInteraction()
+    await modal.on_submit(save_interaction)
+
+    assert len(save_interaction.followup.messages) == 1
+    assert_latest_guide_disabled_panel(save_interaction.followup.messages[0][1])
+
+
+@pytest.mark.asyncio
+async def test_shift_initial_setup_save_shows_disabled_latest_guide_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = ShiftRegister(fake_bot())
+    monkeypatch.setattr(
+        subject,
+        "_auto_guide_is_enabled",
+        latest_guide_disabled_for_feature,
+    )
+    monkeypatch.setattr(
+        subject,
+        "_refresh_auto_guide_if_enabled",
+        noop_latest_guide_refresh,
+    )
+    manager = RecordingShiftRegisterManager()
+    manager.config_exists = False
+    view = subject._build_initial_setup_view(manager)  # noqa: SLF001
+
+    assert [child.label for child in view.children] == ["Set Up Shift Register"]
+    setup_interaction = FakeInteraction()
+    await child_with_label(view, "Set Up Shift Register").callback(setup_interaction)
+    modal = setup_interaction.response.modals[0]
+
+    save_interaction = FakeInteraction()
+    await modal.on_submit(save_interaction)
+
+    assert len(save_interaction.followup.messages) == 1
+    assert_latest_guide_disabled_panel(save_interaction.followup.messages[0][1])
 
 
 @pytest.mark.asyncio
@@ -593,6 +936,101 @@ async def test_team_modal_submit_allows_authorized_user() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_edit_modal_save_preserves_latest_guide_controls() -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+        requires_existing_settings=True,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_edit_modal_save_refreshes_latest_guide_state() -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+        requires_existing_settings=True,
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        latest_guide_state_resolver=latest_guide_is_enabled,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_modal_save_calls_latest_guide_refresh_after_panel_refresh() -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert len(refresh_callback.calls) == 1
+    call_interaction, feature_config, followup_count = refresh_callback.calls[0]
+    assert call_interaction is interaction
+    assert feature_config.sheet_url == "https://sheet.example"
+    assert followup_count == 1
+
+
+@pytest.mark.asyncio
+async def test_team_modal_save_warns_when_latest_guide_refresh_fails() -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback(result=False)
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(refresh_callback.calls) == 1
+    assert len(interaction.followup.messages) == 2
+    _, panel_kwargs = interaction.followup.messages[0]
+    assert panel_kwargs["embed"].title == "Team Register Settings Saved"
+    assert interaction.followup.messages[1] == (
+        LATEST_GUIDE_SETTINGS_REFRESH_FAILED_WARNING,
+        {"ephemeral": True},
+    )
+
+
+@pytest.mark.asyncio
 async def test_team_setup_modal_submit_can_create_missing_settings() -> None:
     manager = RecordingTeamRegisterManager()
     manager.config_exists = False
@@ -801,6 +1239,40 @@ async def test_edit_encore_roles_button_rejects_more_than_25_active_roles() -> N
 
 
 @pytest.mark.asyncio
+async def test_edit_encore_roles_too_many_refreshes_latest_guide_state() -> None:
+    manager = RecordingTeamRegisterManager()
+    roles = [FakeRole(id=i, name=f"Role {i}", position=i) for i in range(1, 27)]
+    manager.encore_role_ids = [role.id for role in roles]
+    interaction = FakeInteraction(roles=roles)
+    view = TeamRegisterView(
+        manager,
+        has_existing_settings=True,
+        metadata=team_register_metadata(),
+        roles=roles,
+        encore_role_ids=manager.encore_role_ids,
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        latest_guide_state_resolver=latest_guide_is_enabled,
+    )
+
+    await child_with_label(view, "Edit Encore Roles").callback(interaction)
+
+    updated_view = interaction.response.edits[0][1]["view"]
+    assert updated_view.latest_guide_enabled is True
+    assert updated_view.children[0].label == "Disable Latest Guide"
+    assert updated_view.children[0].style is ButtonStyle.secondary
+    assert updated_view.children[0].toggle_callback is noop_latest_guide_toggle
+    field_map = {
+        field.name: field.value
+        for field in interaction.response.edits[0][1]["embed"].fields
+    }
+    assert field_map[LATEST_GUIDE_FIELD_NAME] == (
+        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "When a full guide announcement exists, the short guide replies to it."
+    )
+
+
+@pytest.mark.asyncio
 async def test_edit_encore_roles_too_many_transfers_message_to_settings() -> None:
     manager = RecordingTeamRegisterManager()
     roles = [FakeRole(id=i, name=f"Role {i}", position=i) for i in range(1, 27)]
@@ -961,6 +1433,26 @@ async def test_encore_role_confirm_saves_selected_and_retained_missing_ids() -> 
 
     assert manager.encore_role_id_updates == [[1, 99]]
     assert len(interaction.response.edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_does_not_call_latest_guide_refresh() -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    assert manager.encore_role_id_updates == [[1]]
+    assert refresh_callback.calls == []
 
 
 @pytest.mark.asyncio
@@ -1727,6 +2219,86 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_edit_modal_save_preserves_latest_guide_controls() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+        requires_existing_settings=True,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_edit_modal_save_refreshes_latest_guide_state() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+        requires_existing_settings=True,
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        latest_guide_state_resolver=latest_guide_is_enabled,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_modal_save_calls_latest_guide_refresh_after_panel_refresh() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="C3",
+        requires_existing_settings=True,
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert manager.anchor_updates == ["C3"]
+    assert len(interaction.followup.messages) == 1
+    assert len(refresh_callback.calls) == 1
+    call_interaction, feature_config, followup_count = refresh_callback.calls[0]
+    assert call_interaction is interaction
+    assert feature_config.final_schedule_anchor_cell == "C3"
+    assert followup_count == 1
+
+
+@pytest.mark.asyncio
 async def test_shift_edit_modal_submit_uses_fresh_missing_settings_guard() -> None:
     manager = RecordingShiftRegisterManager()
     manager.config_exists = False
@@ -1871,6 +2443,82 @@ async def test_shift_timeline_modal_submit_updates_timeline() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_timeline_modal_save_preserves_latest_guide_controls() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="2026/08/13 20",
+        final_shift_notice_at="2026-08-14 18",
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_modal_save_refreshes_latest_guide_state() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="2026/08/13 20",
+        final_shift_notice_at="2026-08-14 18",
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        latest_guide_state_resolver=latest_guide_is_enabled,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_save_calls_latest_guide_refresh_after_panel_refresh() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="2026/08/13 20",
+        final_shift_notice_at="2026-08-14 18",
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert len(refresh_callback.calls) == 1
+    call_interaction, feature_config, followup_count = refresh_callback.calls[0]
+    assert call_interaction is interaction
+    assert feature_config.day_number == 3
+    assert followup_count == 1
+
+
+@pytest.mark.asyncio
 async def test_shift_timeline_modal_submit_normalizes_full_width_values() -> None:
     manager = RecordingShiftRegisterManager()
     interaction = FakeInteraction()
@@ -1925,6 +2573,37 @@ async def test_shift_timeline_modal_submit_reports_google_sheets_error_safely() 
     assert "settings view could not be refreshed" in content
     assert "Reference: `STG-" in content
     assert_no_private_storage_terms(content)
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_panel_refresh_failure_skips_latest_guide_refresh() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    manager.metadata_error = GoogleSheetsError(
+        GoogleSheetsErrorKind.PERMISSION,
+        "Check the sheet sharing settings and service account access.",
+    )
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert refresh_callback.calls == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "settings view could not be refreshed" in content
     assert kwargs == {"ephemeral": True}
 
 
@@ -2028,6 +2707,70 @@ async def test_shift_recruitment_range_modal_submit_updates_range() -> None:
     assert len(interaction.followup.messages) == 1
     _, kwargs = interaction.followup.messages[0]
     assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_save_preserves_latest_guide_controls() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(
+        manager,
+        recruitment_time_range="4-8, 8-12",
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_range_save_refreshes_latest_guide_state() -> None:
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(
+        manager,
+        recruitment_time_range="4-8, 8-12",
+        latest_guide_enabled=False,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        latest_guide_state_resolver=latest_guide_is_enabled,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert_latest_guide_enabled_panel(
+        interaction.followup.messages[0][1],
+        toggle_callback=noop_latest_guide_toggle,
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_range_save_calls_latest_guide_refresh_after_panel_refresh() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    interaction = FakeInteraction()
+    refresh_callback = RecordingLatestGuideRefreshCallback()
+    modal = ShiftRecruitmentRangeModal(
+        manager,
+        recruitment_time_range="4-8, 8-12",
+        latest_guide_refresh_callback=refresh_callback,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert len(interaction.followup.messages) == 1
+    assert len(refresh_callback.calls) == 1
+    call_interaction, feature_config, followup_count = refresh_callback.calls[0]
+    assert call_interaction is interaction
+    assert feature_config.recruitment_time_ranges == [{"start": 4, "end": 12}]
+    assert followup_count == 1
 
 
 @pytest.mark.asyncio
