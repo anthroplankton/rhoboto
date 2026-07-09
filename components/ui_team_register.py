@@ -200,7 +200,7 @@ def build_too_many_encore_roles_embed(
     )
     embed.add_field(
         name=LATEST_GUIDE_FIELD_NAME,
-        value=latest_guide_status_value(enabled=latest_guide_enabled),
+        value=f"- {latest_guide_status_value(enabled=latest_guide_enabled)}",
         inline=False,
     )
     return embed
@@ -1181,8 +1181,9 @@ def build_current_settings_embed(
         is_save_action=is_save_action,
     )
 
-    sheet_url_row = f"**Link** -> {sheet_url}"
-    embed.add_field(name="Google Sheet", value=sheet_url_row, inline=False)
+    embed.add_field(
+        name="Google Sheet", value=f"- **Link** = {sheet_url}", inline=False
+    )
 
     worksheet_rows = [
         f"- `{ws.title or '**Not Found**'}` : `{ws.id}`"
@@ -1214,12 +1215,12 @@ def build_current_settings_embed(
         )
     embed.add_field(
         name="Encore Roles",
-        value=encore_roles_value,
+        value=f"- {encore_roles_value}",
         inline=False,
     )
     embed.add_field(
         name=LATEST_GUIDE_FIELD_NAME,
-        value=latest_guide_status_value(enabled=latest_guide_enabled),
+        value=f"- {latest_guide_status_value(enabled=latest_guide_enabled)}",
         inline=False,
     )
     if role_resolution.missing_role_ids:

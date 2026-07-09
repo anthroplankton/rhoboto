@@ -1102,15 +1102,16 @@ def build_current_settings_embed(
         is_save_action=is_save_action,
     )
 
-    sheet_url_row = f"**Link** -> {sheet_url}"
-    embed.add_field(name="Google Sheet", value=sheet_url_row, inline=False)
+    embed.add_field(
+        name="Google Sheet", value=f"- **Link** = {sheet_url}", inline=False
+    )
 
     worksheet_rows = [
-        f"- **Entry** -> `{metadata.entry_worksheets.title or '**Not Found**'}` : "
+        f"- **Entry** = `{metadata.entry_worksheets.title or '**Not Found**'}` : "
         f"`{metadata.entry_worksheets.id}`",
-        f"- **Draft** -> `{metadata.draft_worksheet.title or '**Not Found**'}` : "
+        f"- **Draft** = `{metadata.draft_worksheet.title or '**Not Found**'}` : "
         f"`{metadata.draft_worksheet.id}`",
-        f"- **Final Schedule** -> "
+        f"- **Final Schedule** = "
         f"`{metadata.final_schedule_worksheet.title or '**Not Found**'}` : "
         f"`{metadata.final_schedule_worksheet.id}`",
     ]
@@ -1122,12 +1123,12 @@ def build_current_settings_embed(
 
     embed.add_field(
         name="Final Schedule Anchor Cell",
-        value=f"`{final_schedule_anchor_cell}`",
+        value=f"- `{final_schedule_anchor_cell}`",
         inline=False,
     )
     embed.add_field(
         name=LATEST_GUIDE_FIELD_NAME,
-        value=latest_guide_status_value(enabled=latest_guide_enabled),
+        value=f"- {latest_guide_status_value(enabled=latest_guide_enabled)}",
         inline=False,
     )
 
@@ -1147,15 +1148,15 @@ def build_current_settings_embed(
         None,
     )
     timeline_rows = [
-        f"- **Day Number** -> "
+        f"- **Day Number** = "
         f"`{_format_optional_value(getattr(shift_register, 'day_number', None))}`",
-        f"- **Event Date** -> "
+        f"- **Event Date** = "
         f"`{_format_settings_date(getattr(shift_register, 'event_date', None))}`",
-        f"- **Submission Deadline** -> "
+        f"- **Submission Deadline** = "
         f"`{_format_settings_datetime(submission_deadline_at)}`",
-        f"- **Draft Shift Proposal** -> "
+        f"- **Draft Shift Proposal** = "
         f"`{_format_settings_datetime(draft_shift_proposal_at)}`",
-        f"- **Final Shift Notice** -> "
+        f"- **Final Shift Notice** = "
         f"`{_format_settings_datetime(final_shift_notice_at)}`",
     ]
     embed.add_field(
@@ -1169,7 +1170,7 @@ def build_current_settings_embed(
     )
     embed.add_field(
         name="Recruitment Time Range",
-        value=f"`{recruitment_ranges.display()}`",
+        value=f"- `{recruitment_ranges.display()}`",
         inline=False,
     )
 

@@ -340,7 +340,7 @@ def assert_latest_guide_enabled_panel(
     view = kwargs["view"]
     field_map = {field.name: field.value for field in embed.fields}
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "- `Enabled` : A short guide is automatically kept near the newest messages. "
         "When a full guide announcement exists, the short guide replies to it."
     )
     assert view.children[0].label == "Disable Latest Guide"
@@ -353,7 +353,7 @@ def assert_latest_guide_disabled_panel(kwargs: dict[str, object]) -> None:
     view = kwargs["view"]
     field_map = {field.name: field.value for field in embed.fields}
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "`Disabled` : No short guide is maintained near new messages. Enable this to "
+        "- `disabled` : No short guide is maintained near new messages. Enable this to "
         "keep registration rules visible as the channel moves."
     )
     assert view.children[0].label == "Enable Latest Guide"
@@ -565,7 +565,7 @@ def test_team_settings_embed_includes_latest_guide_status_after_encore_roles() -
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
-        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "- `Enabled` : A short guide is automatically kept near the newest messages. "
         "When a full guide announcement exists, the short guide replies to it."
     )
 
@@ -590,7 +590,7 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
-        "`Disabled` : No short guide is maintained near new messages. Enable this to "
+        "- `disabled` : No short guide is maintained near new messages. Enable this to "
         "keep registration rules visible as the channel moves."
     )
 
@@ -1267,7 +1267,7 @@ async def test_edit_encore_roles_too_many_refreshes_latest_guide_state() -> None
         for field in interaction.response.edits[0][1]["embed"].fields
     }
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "`Enabled` : A short guide is automatically kept near the newest messages. "
+        "- `Enabled` : A short guide is automatically kept near the newest messages. "
         "When a full guide announcement exists, the short guide replies to it."
     )
 
@@ -2002,13 +2002,13 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
     )
     field_map = {field.name: field.value for field in kwargs["embed"].fields}
     assert field_map["Shift Timeline"] == (
-        "- **Day Number** -> `2`\n"
-        "- **Event Date** -> `2026-08-12`\n"
-        "- **Submission Deadline** -> `2026-08-12 21:00 JST`\n"
-        "- **Draft Shift Proposal** -> `2026-08-13 20:00 JST`\n"
-        "- **Final Shift Notice** -> `2026-08-14 18:00 JST`"
+        "- **Day Number** = `2`\n"
+        "- **Event Date** = `2026-08-12`\n"
+        "- **Submission Deadline** = `2026-08-12 21:00 JST`\n"
+        "- **Draft Shift Proposal** = `2026-08-13 20:00 JST`\n"
+        "- **Final Shift Notice** = `2026-08-14 18:00 JST`"
     )
-    assert field_map["Recruitment Time Range"] == "`4-28`"
+    assert field_map["Recruitment Time Range"] == "- `4-28`"
     assert [child.label for child in kwargs["view"].children] == [
         "Edit Sheet Settings",
         "Edit Shift Timeline",
