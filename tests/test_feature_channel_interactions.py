@@ -670,6 +670,8 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
     subject = SimpleNamespace(**attributes)
     for method_name in (
         "_get_feature_channel_context",
+        "_get_enabled_feature_channel_or_none",
+        "_get_feature_channel_context_or_none",
         "_get_configured_feature_channel_context",
         "_build_feature_channel_context",
         "_send_missing_config_followup",
@@ -1714,7 +1716,7 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
         message: FakeMessage,
         _feature_channel_context: object,
     ) -> None:
-        await message.add_reaction("<:haruka_math:1402204882492063825>")
+        await message.add_reaction(config.PROCESSING_EMOJI)
         raise GoogleSheetsError(
             GoogleSheetsErrorKind.QUOTA,
             "Google Sheets is rate-limiting requests. Try again later.",
@@ -1744,12 +1746,10 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
     assert "Google Sheets is rate-limiting requests. Try again later." in content
     assert "Reference: `STG-" in content
     assert kwargs == {"ephemeral": True}
-    assert message.removed_reactions == [
-        ("<:haruka_math:1402204882492063825>", bot_user)
-    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
     assert message.added_reactions == [
-        "<:haruka_math:1402204882492063825>",
-        "⚠️",
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
         "🛠️",
     ]
 
@@ -1957,7 +1957,7 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         message: FakeMessage,
         _feature_channel_context: object,
     ) -> None:
-        await message.add_reaction("<:haruka_math:1402204882492063825>")
+        await message.add_reaction(config.PROCESSING_EMOJI)
         raise GoogleSheetsError(
             GoogleSheetsErrorKind.TRANSIENT,
             "Google Sheets is temporarily unavailable. Try again later.",
@@ -1974,35 +1974,42 @@ async def test_message_listener_marks_google_sheets_error() -> None:
 
     await FeatureChannelBase.on_message(subject, message)
 
-    assert message.removed_reactions == [
-        ("<:haruka_math:1402204882492063825>", bot_user)
-    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
     assert message.added_reactions == [
-        "<:haruka_math:1402204882492063825>",
-        "⚠️",
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
         "🛠️",
     ]
 
 
 @pytest.mark.asyncio
-async def test_delete_callback_db_failure_sends_safe_storage_error() -> None:
-    async def failing_context(_source: object) -> object:
+async def test_delete_after_confirmation_db_failure_sends_safe_storage_error() -> None:
+    async def failing_context(**_: object) -> object:
         raise private_database_error()
 
     interaction = FakeInteraction()
+    await interaction.response.send_message("delete prompt", ephemeral=True)
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = failing_context
+    subject._get_feature_channel_context_or_none = failing_context
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
 
     contents = interaction_contents(interaction)
-    assert len(contents) == 1
-    assert_safe_storage_content(contents[0])
-    assert interaction.response.deferred == [True]
+    assert len(contents) == 2
+    assert_safe_storage_content(contents[1])
+    assert interaction.response.deferred == []
     assert interaction.followup.messages[0][1] == {"ephemeral": True}
 
 
@@ -3721,15 +3728,30 @@ async def test_team_summary_missing_guild_raises_before_defer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_delete_callback_reports_missing_config_without_lock(
+async def test_delete_callback_sends_confirmation_without_touching_storage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     lock = RecordingLock()
+    created_views: list[object] = []
+
+    class ConfirmView:
+        value = False
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+            created_views.append(self)
+
+        async def wait(self) -> None:
+            return None
 
     async def fail_delete(*_: object, **__: object) -> None:
         raise AssertionError
 
+    monkeypatch.setattr(
+        feature_channel_base,
+        "ConfirmDeleteUserDataView",
+        ConfirmView,
+    )
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
@@ -3737,25 +3759,85 @@ async def test_delete_callback_reports_missing_config_without_lock(
         FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
         _delete_user_data=fail_delete,
     )
-    interaction = FakeInteraction()
+    interaction = FakeInteraction(locale="en-US", user_id=333)
 
     await FeatureChannelUserBase.delete_callback(subject, interaction)
 
-    assert interaction.response.deferred == [True]
-    assert interaction.followup.messages == [
-        (
-            "⚠️ Team Register is not configured for this channel.",
-            {"ephemeral": True},
-        )
-    ]
+    assert interaction.response.deferred == []
+    assert len(interaction.response.messages) == 1
+    content, kwargs = interaction.response.messages[0]
+    assert content == (
+        "‼️ Are you sure you want to delete your data for Team Register in this channel?"
+    )
+    assert kwargs["ephemeral"] is True
+    assert kwargs["view"] is created_views[0]
+    assert created_views[0].kwargs["requesting_user_id"] == 333
+    assert created_views[0].kwargs["confirm_label"] == "Confirm"
+    assert created_views[0].kwargs["cancel_label"] == "Cancel"
+    assert created_views[0].kwargs["in_progress_message"] == (
+        f"{config.PROCESSING_EMOJI} Deleting your data..."
+    )
+    assert created_views[0].kwargs["cancelled_message"] == "✖️ Delete cancelled."
+    assert created_views[0].kwargs["unauthorized_message"] == (
+        "⚠️ Only the user who started this delete request can use these buttons."
+    )
     assert lock.keys == []
 
 
 @pytest.mark.asyncio
-async def test_delete_callback_deletes_with_configured_context(
+@pytest.mark.parametrize(
+    ("view_value", "expected_followups"),
+    [
+        (False, []),
+        (None, [("✖️ No response received. Delete cancelled.", {"ephemeral": True})]),
+    ],
+)
+async def test_delete_callback_cancel_or_timeout_skips_delete_and_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    view_value: object,
+    expected_followups: list[tuple[str, dict[str, object]]],
+) -> None:
+    lock = RecordingLock()
+    deleted: list[object] = []
+
+    class ConfirmView:
+        value = view_value
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            return None
+
+    async def fake_delete_user_data(*args: object) -> None:
+        deleted.append(args)
+
+    monkeypatch.setattr(
+        feature_channel_base,
+        "ConfirmDeleteUserDataView",
+        ConfirmView,
+    )
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        ManagerType=DeleteManager,
+        FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
+        _delete_user_data=fake_delete_user_data,
+    )
+    interaction = FakeInteraction(locale="en-US", user_id=333)
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.followup.messages == expected_followups
+    assert deleted == []
+    assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_delete_after_confirmation_deletes_with_configured_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
     lock = RecordingLock()
     deleted: list[tuple[object, object, object]] = []
 
@@ -3773,13 +3855,20 @@ async def test_delete_callback_deletes_with_configured_context(
         FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
         _delete_user_data=fake_delete_user_data,
     )
-    interaction = FakeInteraction(locale="en-US")
+    interaction = FakeInteraction(locale="en-US", user_id=333)
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
 
     manager = DeleteManager.last_instance
     assert manager is not None
-    assert interaction.response.deferred == [True]
     assert manager.feature_channel.guild_id == 111
     assert manager.feature_channel.channel_id == 222
     assert manager.feature_channel.feature_name == "team_register"
@@ -3790,19 +3879,206 @@ async def test_delete_callback_deletes_with_configured_context(
     assert user_info.username == "alice"
     assert user_info.display_name == "Alice"
     assert metadata is manager.metadata
+    assert result == "✅ Your data for Team Register has been deleted successfully."
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_delete_callback_confirm_edits_prompt_to_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ConfirmView:
+        value = True
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            return None
+
+    async def fake_delete_after_confirmation(
+        interaction_arg: object,
+        source_arg: object,
+    ) -> str:
+        assert interaction_arg is interaction
+        assert source_arg is interaction
+        return "success"
+
+    monkeypatch.setattr(
+        feature_channel_base,
+        "ConfirmDeleteUserDataView",
+        ConfirmView,
+    )
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+    )
+    subject._delete_user_data_after_confirmation = fake_delete_after_confirmation
+    interaction = FakeInteraction(locale="en-US", user_id=333)
+
+    await FeatureChannelUserBase.delete_callback(subject, interaction)
+
+    assert interaction.original_response_edits == [("success", {"view": None})]
+    assert interaction.followup.messages == []
+
+
+@pytest.mark.asyncio
+async def test_delete_after_confirmation_reports_missing_config_without_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
+    lock = RecordingLock()
+
+    async def fail_delete(*_: object, **__: object) -> None:
+        raise AssertionError
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        ManagerType=MissingConfigManager,
+        FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
+        _delete_user_data=fail_delete,
+    )
+    interaction = FakeInteraction(locale="en-US")
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
+
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
+
     assert interaction.followup.messages == [
         (
-            "✅ Your data for Team Register has been deleted successfully.",
+            "⚠️ Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]
+    assert result is None
+    assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_delete_after_confirmation_disabled_feature_skips_delete_and_lock() -> (
+    None
+):
+    lock = RecordingLock()
+    deleted: list[tuple[object, object, object]] = []
+
+    async def fake_get_enabled_context_or_none(
+        *,
+        guild_id: int,
+        channel_id: int,
+        require_enabled: bool = False,
+    ) -> object | None:
+        assert (guild_id, channel_id, require_enabled) == (111, 222, True)
+        return None
+
+    async def fake_get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def fake_get_configured_feature_channel_context(
+        _context: object,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            channel_id=222,
+            manager=SimpleNamespace(metadata=SimpleNamespace(name="metadata")),
+        )
+
+    async def fake_delete_user_data(
+        manager: object,
+        user_info: object,
+        metadata: object,
+    ) -> None:
+        deleted.append((manager, user_info, metadata))
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
+        _delete_user_data=fake_delete_user_data,
+    )
+    subject._get_feature_channel_context_or_none = fake_get_enabled_context_or_none
+    subject._get_feature_channel_context = fake_get_feature_channel_context
+    subject._get_configured_feature_channel_context = (
+        fake_get_configured_feature_channel_context
+    )
+    interaction = FakeInteraction(locale="en-US")
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
+
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
+
+    assert interaction.followup.messages == [
+        (
+            "⚠️ Team Register is not enabled in this channel.",
+            {"ephemeral": True},
+        )
+    ]
+    assert result is None
+    assert deleted == []
+    assert lock.keys == []
+
+
+@pytest.mark.asyncio
+async def test_delete_after_confirmation_missing_feature_row_reports_not_enabled() -> (
+    None
+):
+    async def fake_get_enabled_context_or_none(
+        *,
+        guild_id: int,
+        channel_id: int,
+        require_enabled: bool = False,
+    ) -> object | None:
+        assert (guild_id, channel_id, require_enabled) == (111, 222, True)
+        return None
+
+    async def fail_stale_row_lookup(_source: object) -> object:
+        msg = "stale hard-cleared row lookup must not run"
+        raise AssertionError(msg)
+
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=NullLogger(),
+    )
+    subject._get_feature_channel_context_or_none = fake_get_enabled_context_or_none
+    subject._get_feature_channel_context = fail_stale_row_lookup
+    interaction = FakeInteraction(locale="en-US")
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
+
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
+
+    assert interaction.followup.messages == [
+        (
+            "⚠️ Team Register is not enabled in this channel.",
+            {"ephemeral": True},
+        )
+    ]
+    assert result is None
 
 
 @pytest.mark.asyncio
 async def test_delete_callback_uses_feature_catalog_in_zh_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
     lock = RecordingLock()
 
     async def fake_delete_user_data(*_: object) -> None:
@@ -3816,19 +4092,26 @@ async def test_delete_callback_uses_feature_catalog_in_zh_copy(
         _delete_user_data=fake_delete_user_data,
     )
     interaction = FakeInteraction(locale="zh-TW")
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
 
-    assert interaction.followup.messages == [
-        ("✅ 已成功刪除您的隊伍編成登記資料。", {"ephemeral": True})
-    ]
+    assert result == "✅ 已成功刪除您的隊伍編成登記資料。"
+    assert interaction.followup.messages == []
 
 
 @pytest.mark.asyncio
 async def test_delete_callback_uses_feature_catalog_in_ja_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
     lock = RecordingLock()
 
     async def fake_delete_user_data(*_: object) -> None:
@@ -3842,12 +4125,19 @@ async def test_delete_callback_uses_feature_catalog_in_ja_copy(
         _delete_user_data=fake_delete_user_data,
     )
     interaction = FakeInteraction(locale="ja")
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
 
-    assert interaction.followup.messages == [
-        ("✅ 編成登録の入力データを正常に削除しました。", {"ephemeral": True})
-    ]
+    assert result == "✅ 編成登録の入力データを正常に削除しました。"
+    assert interaction.followup.messages == []
 
 
 @pytest.mark.asyncio
@@ -3873,6 +4163,7 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
         await FeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.response.deferred == []
+    assert interaction.response.messages == []
 
 
 def test_team_and_shift_use_inherited_setup_after_enable() -> None:

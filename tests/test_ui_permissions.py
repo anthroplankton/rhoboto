@@ -15,7 +15,10 @@ from components.ui_auto_guide import (
     LATEST_GUIDE_SETTINGS_REFRESH_FAILED_WARNING,
     LatestGuideButton,
 )
-from components.ui_feature_channel import DisableAndClearConfirmView
+from components.ui_feature_channel import (
+    ConfirmDeleteUserDataView,
+    DisableAndClearConfirmView,
+)
 from components.ui_language_settings import AnnouncementLanguageSettingsView
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
 from components.ui_settings_flow import (
@@ -2891,6 +2894,64 @@ async def test_disable_and_clear_confirm_denies_unauthorized_user() -> None:
     assert view.value is False
     assert view.is_finished()
     assert interaction.response.edits == []
+
+
+@pytest.mark.asyncio
+async def test_delete_confirm_allows_requesting_user() -> None:
+    interaction = FakeInteraction(user_id=333)
+    view = ConfirmDeleteUserDataView(
+        requesting_user_id=333,
+        confirm_label="Confirm",
+        cancel_label="Cancel",
+        in_progress_message="processing",
+        cancelled_message="cancelled",
+        unauthorized_message="unauthorized",
+    )
+
+    await child_with_label(view, "Confirm").callback(interaction)
+
+    assert view.value is True
+    assert view.is_finished()
+    assert interaction.response.edits == [("processing", {"view": None})]
+
+
+@pytest.mark.asyncio
+async def test_delete_confirm_rejects_other_user_without_finishing() -> None:
+    interaction = FakeInteraction(user_id=444)
+    view = ConfirmDeleteUserDataView(
+        requesting_user_id=333,
+        confirm_label="Confirm",
+        cancel_label="Cancel",
+        in_progress_message="processing",
+        cancelled_message="cancelled",
+        unauthorized_message="unauthorized",
+    )
+
+    await child_with_label(view, "Confirm").callback(interaction)
+
+    assert view.value is None
+    assert not view.is_finished()
+    assert interaction.response.messages == [("unauthorized", {"ephemeral": True})]
+    assert interaction.response.edits == []
+
+
+@pytest.mark.asyncio
+async def test_delete_cancel_finishes_without_confirming() -> None:
+    interaction = FakeInteraction(user_id=333)
+    view = ConfirmDeleteUserDataView(
+        requesting_user_id=333,
+        confirm_label="Confirm",
+        cancel_label="Cancel",
+        in_progress_message="processing",
+        cancelled_message="cancelled",
+        unauthorized_message="unauthorized",
+    )
+
+    await child_with_label(view, "Cancel").callback(interaction)
+
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.edits == [("cancelled", {"view": None})]
 
 
 @pytest.mark.asyncio

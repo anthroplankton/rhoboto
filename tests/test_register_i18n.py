@@ -1,3 +1,4 @@
+from bot import config
 from utils.register_i18n import register_user_text
 
 
@@ -139,4 +140,100 @@ def test_register_user_text_falls_back_for_unknown_locale_and_feature() -> None:
             fallback_display_name="Custom Register",
         )
         == "⚠️ 此頻道尚未設定Custom Register。"
+    )
+
+
+def test_register_user_text_formats_delete_confirmation_copy() -> None:
+    assert register_user_text(
+        "team_register",
+        "en-US",
+        "delete_confirm_prompt",
+        fallback_display_name="Team Register",
+    ) == (
+        "‼️ Are you sure you want to delete your data for Team Register in this channel?"
+    )
+    assert (
+        register_user_text(
+            "team_register",
+            "ja",
+            "delete_confirm_prompt",
+            fallback_display_name="Team Register",
+        )
+        == "‼️ このチャンネルの編成登録の入力データを削除してもよろしいですか？"  # noqa: RUF001
+    )
+    assert (
+        register_user_text(
+            "shift_register",
+            "zh-TW",
+            "delete_confirm_prompt",
+            fallback_display_name="Shift Register",
+        )
+        == "‼️ 確定要刪除您在此頻道的班表登記資料嗎？"  # noqa: RUF001
+    )
+
+
+def test_register_user_text_formats_delete_confirmation_status_copy() -> None:
+    assert (
+        register_user_text(
+            "team_register",
+            "en-US",
+            "delete_in_progress",
+            fallback_display_name="Team Register",
+            processing_emoji=config.PROCESSING_EMOJI,
+        )
+        == f"{config.PROCESSING_EMOJI} Deleting your data..."
+    )
+    assert (
+        register_user_text(
+            "team_register",
+            "ja",
+            "delete_cancelled",
+            fallback_display_name="Team Register",
+        )
+        == "✖️ 削除をキャンセルしました。"
+    )
+    assert (
+        register_user_text(
+            "shift_register",
+            "zh-TW",
+            "delete_timeout",
+            fallback_display_name="Shift Register",
+        )
+        == "✖️ 未收到回應，已取消刪除。"  # noqa: RUF001
+    )
+    assert register_user_text(
+        "team_register",
+        "en-US",
+        "delete_unauthorized",
+        fallback_display_name="Team Register",
+    ) == ("⚠️ Only the user who started this delete request can use these buttons.")
+
+
+def test_register_user_text_formats_delete_confirmation_button_labels() -> None:
+    assert (
+        register_user_text(
+            "team_register",
+            "en-US",
+            "delete_confirm_button",
+            fallback_display_name="Team Register",
+        )
+        == "Confirm"
+    )
+    assert (
+        register_user_text(
+            "team_register",
+            "ja",
+            "delete_cancel_button",
+            fallback_display_name="Team Register",
+        )
+        == "キャンセル"
+    )
+    assert (
+        register_user_text(
+            "shift_register",
+            "zh-TW",
+            "delete_cancel_button",
+            fallback_display_name="Shift Register",
+        )
+        == "取消"
     )

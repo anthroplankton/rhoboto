@@ -28,7 +28,10 @@ from cogs.base.feature_channel_context import (
     MessageParseStatus,
 )
 from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
-from components.ui_feature_channel import DisableAndClearConfirmView
+from components.ui_feature_channel import (
+    ConfirmDeleteUserDataView,
+    DisableAndClearConfirmView,
+)
 from components.ui_settings_flow import (
     initial_setup_content,
     prepare_replacement_settings_view,
@@ -1506,28 +1509,117 @@ class FeatureChannelUserBase[
 
     async def delete_callback(self, interaction: Interaction) -> None:
         """
-        Delete the user's data for this feature in this channel.
+        Ask for confirmation before deleting the user's data for this feature.
         """
         source = require_guild_channel_source(
             interaction,
             action="delete feature user data",
         )
+        locale = interaction.locale.value
+        prompt = register_user_text(
+            self.feature_name,
+            locale,
+            "delete_confirm_prompt",
+            fallback_display_name=self.feature_display_name,
+        )
+        view = ConfirmDeleteUserDataView(
+            requesting_user_id=interaction.user.id,
+            confirm_label=register_user_text(
+                self.feature_name,
+                locale,
+                "delete_confirm_button",
+                fallback_display_name=self.feature_display_name,
+            ),
+            cancel_label=register_user_text(
+                self.feature_name,
+                locale,
+                "delete_cancel_button",
+                fallback_display_name=self.feature_display_name,
+            ),
+            in_progress_message=register_user_text(
+                self.feature_name,
+                locale,
+                "delete_in_progress",
+                fallback_display_name=self.feature_display_name,
+                processing_emoji=config.PROCESSING_EMOJI,
+            ),
+            cancelled_message=register_user_text(
+                self.feature_name,
+                locale,
+                "delete_cancelled",
+                fallback_display_name=self.feature_display_name,
+            ),
+            unauthorized_message=register_user_text(
+                self.feature_name,
+                locale,
+                "delete_unauthorized",
+                fallback_display_name=self.feature_display_name,
+            ),
+        )
+        await interaction.response.send_message(
+            prompt,
+            view=view,
+            ephemeral=True,
+        )
+        await view.wait()
+        if view.value is True:
+            success_content = await self._delete_user_data_after_confirmation(
+                interaction,
+                source,
+            )
+            if success_content is not None:
+                await interaction.edit_original_response(
+                    content=success_content,
+                    view=None,
+                )
+        elif view.value is None:
+            await interaction.followup.send(
+                register_user_text(
+                    self.feature_name,
+                    locale,
+                    "delete_timeout",
+                    fallback_display_name=self.feature_display_name,
+                ),
+                ephemeral=True,
+            )
 
-        await interaction.response.defer(ephemeral=True)
-
+    async def _delete_user_data_after_confirmation(
+        self,
+        interaction: Interaction,
+        source: GuildChannelSource,
+    ) -> str | None:
+        """
+        Delete the user's data for this feature after UI confirmation.
+        """
         try:
             user_info = UserInfo(
                 username=interaction.user.name,
                 display_name=interaction.user.display_name,
             )
 
-            feature_channel_context = await self._get_feature_channel_context(source)
+            feature_channel_context = await self._get_feature_channel_context_or_none(
+                guild_id=source.guild.id,
+                channel_id=source.channel.id,
+                require_enabled=True,
+            )
+            if feature_channel_context is None:
+                await interaction.followup.send(
+                    register_user_text(
+                        self.feature_name,
+                        interaction.locale.value,
+                        "not_enabled",
+                        fallback_display_name=self.feature_display_name,
+                    ),
+                    ephemeral=True,
+                )
+                return None
+
             context = await self._get_configured_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
                 await self._send_missing_config_followup(interaction)
-                return
+                return None
 
             manager = context.manager
 
@@ -1548,9 +1640,9 @@ class FeatureChannelUserBase[
                 source=source,
                 operation="delete_user_data",
             )
-            return
+            return None
 
-        await interaction.followup.send(content=content, ephemeral=True)
+        return content
 
     async def send_guide_message(
         self,

@@ -121,7 +121,7 @@ async def test_missing_config_followup_uses_feature_display_name() -> None:
 
     assert interaction.followup.messages == [
         (
-            "Team Register is not configured for this channel.",
+            "⚠️ Team Register is not configured for this channel.",
             {"ephemeral": True},
         )
     ]

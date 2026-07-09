@@ -75,7 +75,7 @@ class FakeGuild:
 
 
 class FakeInteraction:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         locale: str = "en-US",
@@ -83,10 +83,12 @@ class FakeInteraction:
         manage_channels: bool = True,
         guild: object | None = None,
         roles: list[object] | None = None,
+        user_id: int = 333,
     ) -> None:
         self.channel = SimpleNamespace(id=222)
         self.guild = guild if guild is not None else FakeGuild(roles=roles)
         self.user = SimpleNamespace(
+            id=user_id,
             name="alice",
             display_name="Alice",
             guild_permissions=FakePermissions(
@@ -97,6 +99,14 @@ class FakeInteraction:
         self.locale = SimpleNamespace(value=locale)
         self.response = FakeDiscordResponse()
         self.followup = FakeDiscordFollowup()
+        self.original_response_edits: list[tuple[object, dict[str, object]]] = []
+
+    async def edit_original_response(
+        self,
+        content: object = MISSING_CONTENT,
+        **kwargs: object,
+    ) -> None:
+        self.original_response_edits.append((content, kwargs))
 
 
 class FakeContext:

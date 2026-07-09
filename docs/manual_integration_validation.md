@@ -104,7 +104,7 @@ Use the team test channel.
 | Team ordinary text | Send ordinary announcement text with no team-like numbers. | No worksheet write occurs and no reaction appears. |  |  |
 | Team context menu invalid attempt | Use the `team_register upsert` context menu on `160//600/33`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
 | Summary refresh | Run `/team_register summary`. | Summary worksheet and summary embed match the submitted teams and encore roles. |  |  |
-| Delete own data | Run `/team delete`. | The current user's team rows and summary row are removed or blanked as expected. |  |  |
+| Delete own data confirmation | Run `/team delete`, confirm the localized `‼️` prompt appears, click Cancel, and verify the current user's Team rows and summary row remain. Run `/team delete` again and click Confirm. | Cancel shows `✖️` cancellation copy and leaves data unchanged. Confirm shows processing copy with `config.PROCESSING_EMOJI`, then the current user's Team rows and summary row are removed or blanked as expected. |  |  |
 
 ## Shift Register
 
@@ -131,7 +131,7 @@ Use the shift test channel.
 | Invalid Shift time attempt | Send `18:00-20:00`, `18點到20點`, `18點到`, or `到20點`. | No worksheet write occurs, and `⚠️` then the confused reaction appear. |  |  |
 | Shift ordinary text | Send `20:00` or `20點前`. | No worksheet write occurs and no reaction appears. |  |  |
 | Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
-| Delete own data | Run `/shift delete`. | The current user's entry row is removed or blanked as expected. |  |  |
+| Delete own data confirmation | Run `/shift delete`, confirm the localized `‼️` prompt appears, click Cancel, and verify the current user's Shift entry row remains. Run `/shift delete` again and click Confirm. | Cancel shows `✖️` cancellation copy and leaves data unchanged. Confirm shows processing copy with `config.PROCESSING_EMOJI`, then the current user's entry row is removed or blanked as expected. |  |  |
 
 ## Announcement Languages
 
