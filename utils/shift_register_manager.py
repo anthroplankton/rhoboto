@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, overload, override
 from utils.structs_base import validate_anchor_cell
 
 if TYPE_CHECKING:
+    from datetime import date, datetime
 
     from utils.structs_base import UserInfo
 
@@ -12,15 +13,16 @@ from models.shift_register import ShiftRegisterConfig
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
     EntryWorksheetContent,
+    RecruitmentTimeRanges,
     Shift,
     ShiftRegisterGoogleSheetsMetadata,
 )
+from utils.storage_errors import StorageError, StorageErrorKind
 
 
 class ShiftRegisterManager(
     ManagerBase[ShiftRegisterConfig, ShiftRegisterGoogleSheetsMetadata]
 ):
-
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 
@@ -87,6 +89,42 @@ class ShiftRegisterManager(
         shift_register_config.final_schedule_anchor_cell = anchor_cell
         await shift_register_config.save()
 
+    async def update_timeline(
+        self,
+        *,
+        day_number: int | None,
+        event_date: date | None,
+        submission_deadline_at: datetime | None,
+        draft_shift_proposal_at: datetime | None,
+        final_shift_notice_at: datetime | None,
+    ) -> None:
+        shift_register_config = await self.get_sheet_config()
+        shift_register_config.day_number = day_number
+        shift_register_config.event_date = event_date
+        shift_register_config.submission_deadline_at = submission_deadline_at
+        shift_register_config.draft_shift_proposal_at = draft_shift_proposal_at
+        shift_register_config.final_shift_notice_at = final_shift_notice_at
+        await shift_register_config.save(
+            update_fields=[
+                "day_number",
+                "event_date",
+                "submission_deadline_at",
+                "draft_shift_proposal_at",
+                "final_shift_notice_at",
+                "updated_at",
+            ]
+        )
+
+    async def update_recruitment_time_ranges(
+        self,
+        ranges: RecruitmentTimeRanges,
+    ) -> None:
+        shift_register_config = await self.get_sheet_config()
+        shift_register_config.recruitment_time_ranges = ranges.to_json()
+        await shift_register_config.save(
+            update_fields=["recruitment_time_ranges", "updated_at"]
+        )
+
     async def upsert_or_delete_user_shift(
         self,
         user: UserInfo,
@@ -104,6 +142,12 @@ class ShiftRegisterManager(
             return
 
         df = await worksheet.to_frame()
+        try:
+            EntryWorksheetContent.validate_core_header(df)
+        except ValueError as exc:
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
         shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(df)
         content = EntryWorksheetContent(shift_df, plain_df)
 

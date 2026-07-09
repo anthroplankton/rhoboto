@@ -3,21 +3,24 @@ from __future__ import annotations
 import dataclasses
 import itertools as it
 import re
+import unicodedata
 from dataclasses import InitVar, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self, override
 
 import pandas as pd
 
 from utils.structs_base import (
+    ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
     OriginalMessage,
+    SubmissionParseResult,
     UserInfo,
     WorksheetContentBase,
     WorksheetMetadata,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
 
 @dataclass
@@ -51,7 +54,6 @@ class TeamInfo:
     leader_skill_value: int
     internal_skill_value: int
     team_power: float
-    original_message: str
 
     """
     Team skill values and related information.
@@ -60,7 +62,6 @@ class TeamInfo:
         leader_skill_value (int): Leader skill value.
         internal_skill_value (int): Internal skill value.
         team_power (float): Team power value.
-        original_message (str): Original message string.
     """
 
     def __repr__(self) -> str:
@@ -108,7 +109,6 @@ class Team(OriginalMessage, TeamInfo, UserInfo):
             leader_skill_value=self.leader_skill_value,
             internal_skill_value=self.internal_skill_value,
             team_power=self.team_power,
-            original_message=self.original_message,
         )
 
     def __repr__(self) -> str:
@@ -138,11 +138,14 @@ class Team(OriginalMessage, TeamInfo, UserInfo):
             float: The effective skill value.
         """
         return Team.compute_effective_skill_value(
-            self.team.leader_skill_value, self.team.internal_skill_value
+            self.leader_skill_value,
+            self.internal_skill_value,
         )
 
     @classmethod
-    def compute_effective_skill_value(cls, leader_skill, internal_skill):
+    def compute_effective_skill_value(
+        cls, leader_skill: float, internal_skill: float
+    ) -> float:
         return leader_skill + (internal_skill - leader_skill) / 5
 
 
@@ -180,19 +183,44 @@ class TeamFormatError(Exception):
         super().__init__(msg)
 
 
+@dataclass(frozen=True)
+class TeamParseResult(SubmissionParseResult[list[Team]]):
+    @property
+    def teams(self) -> list[Team]:
+        return self.submission or []
+
+
 class TeamParser:
-    """
-    Parser for team info lines.
+    """Parser for team info lines."""
 
-    Attributes:
-        pattern (Pattern): Regex pattern for parsing team info lines.
-    """
-
-    PATTERN = re.compile(
+    PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"(?P<leader_skill>[0-9]+)\s*/\s*"
         r"(?P<total_skill>[0-9]+)\s*/\s*"
         r"(?P<team_power>([0-9]+(\.[0-9]*)?|\.[0-9]+))"
     )
+    NUMBER_TOKEN_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+"
+    )
+    MIN_INVALID_ATTEMPT_NUMBER_TOKENS: ClassVar[int] = 3
+
+    @classmethod
+    def _from_match(
+        cls,
+        user_info: UserInfo,
+        match: re.Match[str],
+        original_message: str,
+    ) -> Team:
+        leader_skill_value = int(match.group("leader_skill"))
+        total_skill_value = int(match.group("total_skill"))
+        team_power = float(match.group("team_power"))
+        return Team(
+            username=user_info.username,
+            display_name=user_info.display_name,
+            leader_skill_value=leader_skill_value,
+            internal_skill_value=total_skill_value,
+            team_power=team_power,
+            original_message=original_message,
+        )
 
     @classmethod
     def parse_line(cls, user_info: UserInfo, line: str) -> Team:
@@ -209,51 +237,71 @@ class TeamParser:
         Raises:
             TeamFormatError: If the line does not match the expected format.
         """
-        match = cls.PATTERN.search(line)
+        match = cls.PATTERN.search(unicodedata.normalize("NFKC", line))
         if not match:
             raise TeamFormatError(line)
-        leader_skill_value = int(match.group("leader_skill"))
-        total_skill_value = int(match.group("total_skill"))
-        team_power = float(match.group("team_power"))
-        return Team(
-            username=user_info.username,
-            display_name=user_info.display_name,
-            leader_skill_value=leader_skill_value,
-            internal_skill_value=total_skill_value,
-            team_power=team_power,
-            original_message=line.strip(),
-        )
+        return cls._from_match(user_info, match, line.strip())
 
     @classmethod
-    def parse_lines(cls, user_info: UserInfo, lines: list[str]) -> list[Team]:
+    def parse_submission(
+        cls,
+        user_info: UserInfo,
+        lines: list[str],
+    ) -> TeamParseResult:
         """
-        Parse multiple lines into Team objects.
+        Parse a full message submission into teams and invalid attempts.
 
         Args:
             user_info (UserInfo): The user information.
             lines (list[str]): List of team info strings.
 
         Returns:
-            list[Team]: List of successfully parsed Team objects.
+            TeamParseResult: Parsed teams and invalid team-like lines.
         """
-        valid_lines = [line for line in lines if cls.PATTERN.search(line)]
-        return [cls.parse_line(user_info, line) for line in valid_lines]
+        invalid_attempts: list[str] = []
+        pending_lines: list[str] = []
+        team_matches: list[re.Match[str]] = []
+        message_blocks: list[list[str]] = []
+        for line in lines:
+            stripped_line = line.strip()
+            if not stripped_line:
+                continue
+            normalized_line = unicodedata.normalize("NFKC", line)
+            match = cls.PATTERN.search(normalized_line)
+            if match:
+                team_matches.append(match)
+                message_blocks.append([*pending_lines, stripped_line])
+                pending_lines = []
+                continue
+            if (
+                len(cls.NUMBER_TOKEN_PATTERN.findall(normalized_line))
+                >= cls.MIN_INVALID_ATTEMPT_NUMBER_TOKENS
+            ):
+                invalid_attempts.append(stripped_line)
+            target = message_blocks[-1] if message_blocks else pending_lines
+            target.append(stripped_line)
+        teams = [
+            cls._from_match(
+                user_info,
+                match,
+                ORIGINAL_MESSAGE_LINE_SEPARATOR.join(block),
+            )
+            for match, block in zip(team_matches, message_blocks, strict=True)
+        ]
+        return TeamParseResult(
+            submission=teams or None,
+            invalid_attempts=invalid_attempts,
+        )
 
     @classmethod
     def classify_teams(cls, teams: list[Team]) -> ClassifiedTeams:
-        backup_teams = teams.copy()
+        if not teams:
+            msg = "Cannot classify an empty team list."
+            raise ValueError(msg)
 
-        main_team = max(teams)
-        backup_teams.remove(main_team)
-
-        encore_team = None
-        if backup_teams:
-            encore_team = max(backup_teams, key=lambda t: t.team_power)
-            # Ensure encore_team is not weaker than main_team
-            if encore_team.team_power < main_team.team_power:
-                encore_team = None
-            else:
-                backup_teams.remove(encore_team)
+        main_team = teams[0]
+        encore_team = teams[1] if len(teams) > 1 else None
+        backup_teams = teams[2:]
 
         return ClassifiedTeams(main_team, encore_team, backup_teams)
 
@@ -279,12 +327,25 @@ class Summary(UserInfoWithEncoreRoles):
         ):
             self._summary[isv_title] = team.effective_skill_value if team else ""
             self._summary[power_title] = team.team_power if team else ""
+        self._summary[self.original_message_title()] = self.join_original_messages(
+            team.original_message for team in teams if team is not None
+        )
 
     def __getattr__(self, name: str) -> float | str:
         if name in self._summary:
             return self._summary[name]
         msg = f"{name} not found in summary"
         raise AttributeError(msg)
+
+    @classmethod
+    def original_message_title(cls) -> str:
+        return "original_message"
+
+    @classmethod
+    def join_original_messages(cls, messages: Iterable[object]) -> str:
+        return ORIGINAL_MESSAGE_LINE_SEPARATOR.join(
+            str(message) for message in messages if message
+        )
 
     @classmethod
     def isv_title(cls, title: str) -> str:
@@ -362,7 +423,7 @@ class TeamWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for team worksheets.
 
@@ -409,7 +470,7 @@ class SummaryWorksheetMetadata(WorksheetMetadata):
 
     @classmethod
     @override
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         """
         Generate default titles for the summary worksheet.
 
@@ -478,7 +539,6 @@ class TeamRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
 
 
 class TeamWorksheetContent(WorksheetContentBase[Team]):
-
     COLUMNS: ClassVar[list[str]] = [f.name for f in dataclasses.fields(Team)]
     DTYPES: ClassVar[dict[str, str]] = {
         f.name: str(f.type) for f in dataclasses.fields(Team)
@@ -488,7 +548,6 @@ class TeamWorksheetContent(WorksheetContentBase[Team]):
 
 
 class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
-
     COLUMNS: ClassVar[list[str]] = [
         f.name for f in dataclasses.fields(UserInfoWithEncoreRoles)
     ]
@@ -513,7 +572,10 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
         Returns:
             list[str]: List of extended column names.
         """
-        columns = [c for pair in Summary.isv_power_title_pairs(titles) for c in pair]
+        columns = [
+            *[c for pair in Summary.isv_power_title_pairs(titles) for c in pair],
+            Summary.original_message_title(),
+        ]
         return columns, dict.fromkeys(columns, "object")
 
     @classmethod
@@ -563,6 +625,31 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
             extra_columns.extend([isv_col, power_col])
             extra_dtypes[isv_col] = "object"
             extra_dtypes[power_col] = "object"
+
+        message_series = pd.Series("", index=summary_df.index, dtype="object")
+        for df in team_df_by_titles.values():
+            if Summary.original_message_title() not in df.columns:
+                continue
+            messages = (
+                df[Summary.original_message_title()]
+                .reindex(summary_df.index)
+                .fillna("")
+            )
+            message_series = pd.Series(
+                (
+                    Summary.join_original_messages([current, message])
+                    for current, message in zip(
+                        message_series,
+                        messages,
+                        strict=True,
+                    )
+                ),
+                index=summary_df.index,
+                dtype="object",
+            )
+        summary_df[Summary.original_message_title()] = message_series
+        extra_columns.append(Summary.original_message_title())
+        extra_dtypes[Summary.original_message_title()] = "object"
 
         return cls(
             summary_df, extended_columns=extra_columns, extended_dtypes=extra_dtypes

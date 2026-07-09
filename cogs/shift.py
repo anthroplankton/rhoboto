@@ -12,6 +12,7 @@ from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
+    from models.shift_register import ShiftRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -21,12 +22,19 @@ class Shift(
     ],
     group_name=locale_str("shift"),
 ):
-
     feature_name = ShiftRegister.feature_name
+    feature_display_name = ShiftRegister.feature_display_name
 
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
+
+    @override
+    def _guide_worksheet_id(
+        self,
+        feature_config: ShiftRegisterConfig,
+    ) -> int:
+        return feature_config.entry_worksheet_id
 
     @override
     async def _delete_user_data(
@@ -42,34 +50,32 @@ class Shift(
 
     @app_commands.command(
         name=locale_str("delete"),
-        description=locale_str(
-            "Delete your registration data for this feature in this channel."
-        ),
+        description=locale_str("Delete your shift registration in this channel."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def delete(self, interaction: Interaction) -> None:
         await self.delete_callback(interaction)
 
     @app_commands.command(
-        name=locale_str("help"),
+        name=locale_str("guide"),
         description=locale_str("Show how to register your shifts."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
-    async def help(self, interaction: Interaction) -> None:
-        """Show how to register your shifts.
-
-        Args:
-            interaction (Interaction): The Discord interaction.
-        """
-        await self.send_help_message(
+    async def guide(self, interaction: Interaction) -> None:
+        """Show how to register your shifts."""
+        await self.send_guide_message(
             interaction,
-            ShiftRegister.help_text_en,
-            ShiftRegister.help_text_ja,
-            ShiftRegister.help_text_zh_tw,
+            ShiftRegister.guide_template_key,
         )
 
 

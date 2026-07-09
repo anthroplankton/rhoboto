@@ -16,12 +16,21 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version-file: .python-version
 
-      - name: Install dependencies
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.11"
+          enable-cache: true
+
+      - name: Verify dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          uv lock --check
+          uv sync --locked
+          uv run python -m compileall -q main.py bot cogs components models utils
+          uv run python -c "import discord, pandas, tortoise, gspread_asyncio; print('runtime imports ok')"
+          uv sync --locked --no-default-groups
 
       - name: Install Heroku CLI
         run: |

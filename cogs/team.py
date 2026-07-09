@@ -13,6 +13,7 @@ from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
+    from models.team_register import TeamRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -23,10 +24,18 @@ class Team(
     group_name=app_commands.locale_str("team"),
 ):
     feature_name = TeamRegister.feature_name
+    feature_display_name = TeamRegister.feature_display_name
 
     FeatureChannelType = TeamRegister
     ManagerType = TeamRegisterManager
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
+
+    @override
+    def _guide_worksheet_id(
+        self,
+        feature_config: TeamRegisterConfig,
+    ) -> int:
+        return feature_config.summary_worksheet_id
 
     @override
     async def _delete_user_data(
@@ -45,34 +54,32 @@ class Team(
 
     @app_commands.command(
         name=locale_str("delete"),
-        description=locale_str(
-            "Delete your registration data for this feature in this channel."
-        ),
+        description=locale_str("Delete your team registration in this channel."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def delete(self, interaction: Interaction) -> None:
         await self.delete_callback(interaction)
 
     @app_commands.command(
-        name=locale_str("help"),
+        name=locale_str("guide"),
         description=locale_str("Show how to register your teams."),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
-    async def help(self, interaction: Interaction) -> None:
-        """Show how to register your teams.
-
-        Args:
-            interaction (Interaction): The Discord interaction.
-        """
-        await self.send_help_message(
+    async def guide(self, interaction: Interaction) -> None:
+        """Show how to register your teams."""
+        await self.send_guide_message(
             interaction,
-            TeamRegister.help_text_en,
-            TeamRegister.help_text_ja,
-            TeamRegister.help_text_zh_tw,
+            TeamRegister.guide_template_key,
         )
 
 

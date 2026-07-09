@@ -152,7 +152,8 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# Google Service Account credentials
+# Sensitive or secret files
+secrets/
 bot/service_account.json
 
 # PyCharm
@@ -168,3 +169,12 @@ bot/service_account.json
 
 # Project runtime data (SQLite DB, logs, generated artifacts)
 data/
+
+# Agent working memory
+/.planning/
+/.superpowers/
+/docs/superpowers/
+
+# Agent isolated worktrees
+/.worktrees/
+/worktrees/

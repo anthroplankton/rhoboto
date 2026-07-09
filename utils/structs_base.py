@@ -5,7 +5,7 @@ import re
 from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -38,6 +38,15 @@ class UserInfo:
         username (str): The user's Discord username.
         display_name (str): The user's Discord display name.
     """
+
+
+ORIGINAL_MESSAGE_LINE_SEPARATOR = " ⏎  "
+
+
+@dataclass(frozen=True)
+class SubmissionParseResult[TSubmission]:
+    submission: TSubmission | None
+    invalid_attempts: list[str]
 
 
 @dataclass
@@ -110,7 +119,7 @@ class WorksheetMetadata:
         return self.worksheet is None
 
     @classmethod
-    def default_title_generator(cls) -> Generator[str, None, None]:
+    def default_title_generator(cls) -> Generator[str]:
         yield from (f"Worksheet {i}" for i in it.count(1))
 
 
@@ -352,11 +361,7 @@ class GoogleSheetsMetadata:
         return cls.from_subtyped_worksheets(metadata.sheet_url, new_worksheets)
 
 
-TEntry = TypeVar("TEntry")
-
-
-class WorksheetContentBase(ABC, Generic[TEntry]):
-
+class WorksheetContentBase[TEntry](ABC):
     INDEX_NAME: ClassVar[str]
     COLUMNS: ClassVar[list[str]]
     DTYPES: ClassVar[dict[str, str]]
@@ -386,9 +391,7 @@ class WorksheetContentBase(ABC, Generic[TEntry]):
 
     def __repr__(self) -> str:
         return (
-            f"{self.__class__.__name__}\n"
-            f"main=\n{self.main!r}\n"
-            f"extra=\n{self.extra!r}"
+            f"{self.__class__.__name__}\nmain=\n{self.main!r}\nextra=\n{self.extra!r}"
         )
 
     def upsert(self, entry: TEntry) -> None:
@@ -461,7 +464,7 @@ class WorksheetContentBase(ABC, Generic[TEntry]):
         if df.index.name == cls.INDEX_NAME:
             df = df.reset_index()
 
-        df = df.rename(columns=dict(zip(df.columns, columns)))
+        df = df.rename(columns=dict(zip(df.columns, columns, strict=False)))
         df = df[columns[: len(df.columns)]]
 
         temp = pd.concat([temp, df])

@@ -4,7 +4,7 @@ from models.base.timestamp_mixin import TimestampMixin
 
 
 class FeatureChannel(models.Model, TimestampMixin):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     guild_id = fields.BigIntField()
     channel_id = fields.BigIntField()
     feature_name = fields.CharField(max_length=32)

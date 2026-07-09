@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, overload, override
 import pandas as pd
 
 if TYPE_CHECKING:
-
     from discord import Member, Role
 
     from utils.google_sheets import AsyncioGspreadWorksheet
@@ -29,7 +28,6 @@ from utils.team_register_structs import (
 class TeamRegisterManager(
     ManagerBase[TeamRegisterConfig, TeamRegisterGoogleSheetsMetadata]
 ):
-
     SheetConfigType = TeamRegisterConfig
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
 
@@ -94,9 +92,18 @@ class TeamRegisterManager(
         Args:
             roles (list[Role]): List of encore roles.
         """
+        await self.update_encore_role_ids_record([role.id for role in roles])
+
+    async def update_encore_role_ids_record(self, role_ids: list[int]) -> None:
+        """
+        Update the encore role IDs in the TeamRegister database record.
+
+        Args:
+            role_ids (list[int]): List of encore role IDs.
+        """
         team_register_config = await self.get_sheet_config()
 
-        team_register_config.encore_role_ids = [role.id for role in roles]
+        team_register_config.encore_role_ids = role_ids
         await team_register_config.save()
 
     async def upsert_or_delete_user_team(
@@ -320,7 +327,7 @@ class TeamRegisterManager(
         new = SummaryWorksheetContent.generate_from_team_dataframes(
             team_df_by_titles={
                 ws.title: df
-                for ws, df in zip(metadata.team_worksheets, team_dfs)
+                for ws, df in zip(metadata.team_worksheets, team_dfs, strict=False)
                 if ws.title is not None
             }
         )

@@ -2,18 +2,15 @@ from __future__ import annotations
 
 import logging
 from abc import ABC
-from typing import TYPE_CHECKING, Generic, TypeVar
+from typing import TYPE_CHECKING
 
 from models.base.sheet_config_base import SheetConfigBase
 from utils.google_sheets import GoogleSheet
+from utils.google_sheets_urls import normalize_google_sheet_url
 from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
-
     from models.feature_channel import FeatureChannel
-
-TSheetConfig = TypeVar("TSheetConfig", bound=SheetConfigBase)
-TGoogleSheetsMetadata = TypeVar("TGoogleSheetsMetadata", bound=GoogleSheetsMetadata)
 
 
 class SheetConfigNotFoundError(Exception):
@@ -29,8 +26,10 @@ class SheetConfigNotFoundError(Exception):
         super().__init__(msg)
 
 
-class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
-
+class ManagerBase[
+    TSheetConfig: SheetConfigBase,
+    TGoogleSheetsMetadata: GoogleSheetsMetadata,
+](ABC):
     SheetConfigType: type[TSheetConfig]
     GoogleSheetsMetadataType: type[TGoogleSheetsMetadata]
 
@@ -57,6 +56,12 @@ class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
             error = SheetConfigNotFoundError(self.feature_channel)
             raise error
         return self._sheet_config
+
+    async def get_fresh_sheet_config(self) -> TSheetConfig | None:
+        """Return current sheet config without using cached manager state."""
+        self._sheet_config = None
+        self._google_sheet = None
+        return await self.get_sheet_config_or_none()
 
     async def get_google_sheet(self) -> GoogleSheet:
         """
@@ -140,6 +145,7 @@ class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
         sheet_url: str,
         worksheet_titles: list[str],
     ) -> TGoogleSheetsMetadata:
+        sheet_url = normalize_google_sheet_url(sheet_url)
         self._google_sheet = GoogleSheet(sheet_url, self.service_account_path)
 
         metadata = await self.create_or_get_worksheets(worksheet_titles)
@@ -153,10 +159,6 @@ class ManagerBase(ABC, Generic[TSheetConfig, TGoogleSheetsMetadata]):
         metadata: TGoogleSheetsMetadata,
         counts: dict[type[WorksheetMetadata], int] | None = None,
     ) -> TGoogleSheetsMetadata:
-
-        # if all(ws.worksheet is not None for ws in metadata):
-        #     return metadata
-
         ensured_metadata = self.GoogleSheetsMetadataType.assign_missing_default_titles(
             metadata, counts
         )

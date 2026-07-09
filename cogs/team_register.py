@@ -1,116 +1,129 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, override
 
 from discord import Interaction, Member, Message, app_commands
 
 from bot import config
+from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import FeatureChannelBase
+from components.ui_storage_errors import send_storage_error
 from components.ui_team_register import (
+    TEAM_REGISTER_DISPLAY_NAME,
     TeamRegisterView,
-    build_current_settings_embed,
     build_summary_embed,
+    build_team_register_settings_panel,
+    get_fresh_team_register_config_or_respond,
 )
-from models.feature_channel import FeatureChannel
 from utils.key_async_lock import KeyAsyncLock
-from utils.structs_base import UserInfo
+from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.storage_errors import (
+    StorageOperationContext,
+    classify_storage_exception,
+    partial_success_storage_error,
+)
 from utils.team_register_manager import TeamRegisterManager
-from utils.team_register_structs import ClassifiedTeams, TeamParser
+from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from discord.ui import View
+
     from bot import Rhoboto
+    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
+    from components.ui_settings_flow import SettingsPanel
+    from models.team_register import TeamRegisterConfig
+    from utils.structs_base import UserInfo
 
 
 class TeamRegister(
-    FeatureChannelBase[TeamRegisterManager, ClassifiedTeams], group_name="team_register"
+    FeatureChannelBase[TeamRegisterManager, list[Team], ClassifiedTeams],
+    group_name="team_register",
 ):
-
     feature_name = "team_register"
-    lock = KeyAsyncLock()
+    feature_display_name = TEAM_REGISTER_DISPLAY_NAME
+    guide_template_key = "team.guide"
+    auto_guide_template_key = "team.auto_guide"
+    sheet_write_lock = KeyAsyncLock()
+    auto_guide_lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
-
-    async def setup_after_enable(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        feature_channel = await FeatureChannel.get(
-            guild_id=guild_id,
-            channel_id=channel_id,
-            feature_name=self.feature_name,
-        )
-
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            content = (
-                "Team Register is not yet configured for this channel. "
-                "Click below to set up."
-            )
-            embed = None
-            view = TeamRegisterView(team_register_manager=manager)
-        else:
-            metadata = await manager.fetch_google_sheets_metadata()
-            roles = list(interaction.guild.roles) if interaction.guild else []
-            encore_role_ids = team_register_config.encore_role_ids
-            embed = build_current_settings_embed(
-                sheet_url=team_register_config.sheet_url,
-                metadata=metadata,
-                encore_role_ids=encore_role_ids,
-                color=config.DEFAULT_EMBED_COLOR,
-            )
-            view = TeamRegisterView(
-                team_register_manager=manager,
-                has_existing_settings=True,
-                sheet_url=team_register_config.sheet_url,
-                team_worksheet_titles=[ws.title for ws in metadata.team_worksheets],
-                summary_worksheet_title=metadata.summary_worksheet.title,
-                roles=roles,
-                encore_role_ids=encore_role_ids,
-            )
-
-        if embed is None:
-            await interaction.followup.send(content=content, view=view, ephemeral=True)
-        else:
-            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    ParserType = TeamParser
 
     @override
-    async def process_upsert_from_message(
-        self, message: Message
+    def _guide_worksheet_id(
+        self,
+        feature_config: TeamRegisterConfig,
+    ) -> int:
+        return feature_config.summary_worksheet_id
+
+    @override
+    def _build_initial_setup_view(self, manager: TeamRegisterManager) -> View:
+        return TeamRegisterView(
+            team_register_manager=manager,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_team_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    def _latest_guide_state_resolver(
+        self,
+        manager: TeamRegisterManager,
+    ) -> Callable[[], Awaitable[bool]]:
+        async def latest_guide_state_resolver() -> bool:
+            return await self._auto_guide_is_enabled(manager.feature_channel)
+
+        return latest_guide_state_resolver
+
+    @override
+    async def _build_settings_panel(
+        self,
+        interaction: Interaction,
+        manager: TeamRegisterManager,
+        sheet_config: object,
+    ) -> SettingsPanel:
+        return await build_team_register_settings_panel(
+            manager,
+            interaction,
+            sheet_config,
+            latest_guide_enabled=False,
+            latest_guide_toggle_callback=self._toggle_team_latest_guide,
+            latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
+            latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+        )
+
+    async def _toggle_team_latest_guide(
+        self,
+        interaction: Interaction,
+        *,
+        enabled: bool,
+        current_view: View,
+    ) -> None:
+        team_register = await get_fresh_team_register_config_or_respond(
+            current_view.team_register_manager,
+            interaction,
+        )
+        if team_register is None:
+            return
+
+        await self.toggle_auto_guide_from_settings(
+            interaction,
+            enabled=enabled,
+            current_view=current_view,
+            feature_config=team_register,
+        )
+
+    @override
+    async def _process_configured_message_submission(
+        self,
+        message: Message,
+        context: ConfiguredFeatureChannelContext[TeamRegisterManager],
+        submission: list[Team],
+        user_info: UserInfo,
     ) -> ClassifiedTeams | None:
-        if (
-            message.author.bot
-            or not message.guild
-            or not message.channel
-            or not await self.is_enabled(message.guild.id, message.channel.id)
-        ):
-            return None
-
-        self.logger.debug(
-            "Received message in Guild: `%s` Channel: `%s` (Feature: `%s`): %r",
-            message.guild.id,
-            message.channel.id,
-            self.feature_name,
-            message.content,
-        )
-
-        user_info = UserInfo(
-            username=message.author.name,
-            display_name=message.author.display_name,
-        )
-        teams = TeamParser.parse_lines(user_info, lines=message.content.splitlines())
-        if not teams:
-            return None
-
+        teams = submission
         self.logger.info(
             "Parsed teams in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%s)",
             message.guild.id,
@@ -123,50 +136,50 @@ class TeamRegister(
             ),
         )
 
-        feature_channel = await FeatureChannel.get_or_none(
-            guild_id=message.guild.id,
-            channel_id=message.channel.id,
-            feature_name=self.feature_name,
-        )
-        if not feature_channel:
-            return None
-
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            return None
-
         if self.bot.user is not None:
-            await message.add_reaction(config.PROCESSING_EMOJI)
+            await add_reaction_if_possible(
+                message,
+                config.PROCESSING_EMOJI,
+                log=self.logger,
+            )
 
         classified_teams = TeamParser.classify_teams(teams)
         team_tuple = classified_teams.as_tuple()
+        manager = context.manager
 
-        async with self.lock(message.channel.id):
+        async with self.sheet_write_lock(context.channel_id):
             metadata = await manager.fetch_google_sheets_metadata()
             manager.log_missing_worksheet_warnings(metadata)
 
-            metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                metadata, count=len(team_tuple)
-            )
-
-            await asyncio.gather(
-                manager.upsert_user_teams(user_info, *team_tuple, metadata=metadata),
-                manager.upsert_user_summary(
+            try:
+                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
+                    metadata, count=len(team_tuple)
+                )
+                await manager.upsert_user_teams(
+                    user_info,
+                    *team_tuple,
+                    metadata=metadata,
+                )
+                await manager.upsert_user_summary(
                     user_info,
                     message.author.roles if isinstance(message.author, Member) else [],
                     *team_tuple,
                     metadata=metadata,
-                ),
-            )
+                )
+            except Exception as exc:
+                error = partial_success_storage_error(exc)
+                if error is None:
+                    raise
+                raise error from error.__cause__
 
         if self.bot.user is not None:
-            await message.remove_reaction("⌛", self.bot.user)
-            await message.remove_reaction(config.PROCESSING_EMOJI, self.bot.user)
-            await message.add_reaction("✅")
+            await remove_reaction_if_present(
+                message,
+                config.PROCESSING_EMOJI,
+                self.bot.user,
+                log=self.logger,
+            )
+            await add_reaction_if_possible(message, "✅", log=self.logger)
 
         return classified_teams
 
@@ -178,50 +191,86 @@ class TeamRegister(
         ),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def summary(self, interaction: Interaction) -> None:
-        if interaction.channel is None or interaction.guild is None:
-            msg = (
-                "Interaction channel or guild is None. "
-                "Cannot proceed with setup message."
-            )
-            raise ValueError(msg)
+        source = require_guild_channel_source(
+            interaction,
+            action="refresh team summary",
+        )
+        member_by_names = {member.name: member for member in source.guild.members}
 
         await interaction.response.defer(ephemeral=True)
-
-        guild_id = interaction.guild.id
-        channel_id = interaction.channel.id
-        feature_channel = await FeatureChannel.get(
-            guild_id=guild_id,
-            channel_id=channel_id,
+        operation_context = StorageOperationContext(
+            operation="team_register_summary",
             feature_name=self.feature_name,
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
         )
 
-        manager = TeamRegisterManager(
-            feature_channel, config.GOOGLE_SERVICE_ACCOUNT_PATH
-        )
-
-        team_register_config = await manager.get_sheet_config_or_none()
-        if team_register_config is None:
-            await interaction.followup.send(
-                content="Team Register is not configured for this channel.",
-                ephemeral=True,
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+        except Exception as exc:
+            storage_error = classify_storage_exception(exc)
+            if storage_error is None:
+                raise
+            await send_storage_error(
+                interaction,
+                storage_error,
+                context=operation_context,
+                log=self.logger,
             )
             return
 
-        async with self.lock(interaction.channel.id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            manager.log_missing_worksheet_warnings(metadata)
+        if context is None:
+            await self._send_missing_config_followup(interaction)
+            return
 
-            metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                metadata,
-                count=0,  # No teams to process, just refresh summary
-            )
+        try:
+            async with self.sheet_write_lock(context.channel_id):
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                context.manager.log_missing_worksheet_warnings(metadata)
 
-            summary_df = await manager.refresh_summary_worksheet(
-                metadata, member_by_names={m.name: m for m in interaction.guild.members}
+                try:
+                    metadata = (
+                        await context.manager.ensure_worksheets_and_upsert_sheet_config(
+                            metadata,
+                            count=0,  # No teams to process, just refresh summary
+                        )
+                    )
+
+                    summary_df = await context.manager.refresh_summary_worksheet(
+                        metadata,
+                        member_by_names=member_by_names,
+                    )
+                except Exception as exc:
+                    storage_error = partial_success_storage_error(exc)
+                    if storage_error is None:
+                        raise
+                    await send_storage_error(
+                        interaction,
+                        storage_error,
+                        context=operation_context,
+                        log=self.logger,
+                    )
+                    return
+        except Exception as exc:
+            storage_error = classify_storage_exception(exc)
+            if storage_error is None:
+                raise
+            await send_storage_error(
+                interaction,
+                storage_error,
+                context=operation_context,
+                log=self.logger,
             )
+            return
 
         if summary_df is None:
             await interaction.followup.send(
@@ -237,7 +286,10 @@ class TeamRegister(
         description="Show and edit current feature settings for this channel.",
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
     async def settings(self, interaction: Interaction) -> None:
         """Slash command to show and edit current feature settings."""
@@ -245,82 +297,19 @@ class TeamRegister(
         await self.setup_after_enable(interaction)
 
     @app_commands.command(
-        name="help",
-        description="Show the all language how to register your data for this feature.",
+        name="announce_guide",
+        description=(
+            "Post the team registration guide using configured announcement languages."
+        ),
     )
     @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(feature_name)
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
     )
-    async def help(self, interaction: Interaction) -> None:
-        await self._help_callback(interaction)
-
-    help_text_en = """### 📋 How to Register Your Teams
-
-Each line represents a team. The format is `LeaderSkill/InternalSkill/TeamPower`, and you may add notes at the end of each line.
-
-Example:
-```
-150/740/33.4 This is the main team
-140/680/35.3 No HP check
-150/700/39 Encore, any other notes
-```
-Order does not matter. {bot} will automatically determine:
-- The team with the highest effective skill value is the "Main Team"
-- Among the rest, the one with the highest power (not less than the main team) is the "Encore Team"
-- Others are "Backup Teams"
-- As long as a line contains the format `xxx/xxx/xx.x`, it will be recognized, so adding labels at the beginning of the line is also fine.
-
-To delete your team data, please use the slash command: `/team delete`.
-To update, simply submit again; your previous team registrations will be removed or completely overwritten.
-Japanese:
-
-After registration, {bot} will automatically process your teams and record the results in [Google Sheets]({sheet_url}) for you to view and confirm.
-"""
-
-    help_text_ja = """## 📋 編成入力の使い方
-
-1行ごとに1つの編成を入力します。フォーマットは `リーダー値/内部値/総合力` で、行末に備考を記入することも可能です。
-
-例：
-```
-150/740/33.4 内部編成
-140/680/35.3 裏ライフ依存1枚
-150/700/39 アンコ、その他備考
-```
-順番は問いません。{bot}が自動で判定します：
-- 実効値が最も高い編成が「内部編成」となります
-- 残りの中で総合が内部編成以上かつ最大のものが「アンコ編成」となります
-- その他は「その他編成」となります
-- 1行に `xxx/xxx/xx.x` の形式が含まれていれば認識されるため、行頭にラベルを付けても問題ありません。
-
-編成を削除したい場合は、スラッシュコマンド `/編成 削除` をご利用ください。
-更新する場合は、再度入力するだけで構いません。以前のデータはすべて上書きされます。
-
-登録後、{bot}が編成データを自動で処理し、結果を [Google Sheets]({sheet_url}) に記録しますので、確認・閲覧できます。
-"""
-
-    help_text_zh_tw = """## 📋 隊伍登記格式說明
-
-每行對應一個編成，格式為 `隊長技能/內部技能/總合力`，行尾可加備註。
-
-範例：
-```
-150/740/33.4 這是內部編成
-140/680/35.3 無血量判定
-150/700/39 安可，其他任意備註
-```
-順序不拘，{bot} 會自動判斷：
-- 實效值最高為「內部編成」
-- 其餘中綜合力最大且不小於內部編成的為「安可編成」
-- 其餘為「其他編成」
-- 只要一行當中包含 `xxx/xxx/xx.x` 的格式就會被識別，因此添加標籤在行頭也沒問題。
-
-如需刪除隊伍編成，請輸入 slash command: `/編成 刪除`。
-更新時，請直接重新提交即可，舊的隊伍編成會消除或所有的都完全覆蓋。
-
-
-登記後，{bot} 會自動處理並將結果記錄在 [Google Sheets]({sheet_url}) ，提供查看與確認。
-"""
+    async def announce_guide(self, interaction: Interaction) -> None:
+        await self.send_guide_message(interaction)
 
 
 async def setup(bot: Rhoboto) -> None:

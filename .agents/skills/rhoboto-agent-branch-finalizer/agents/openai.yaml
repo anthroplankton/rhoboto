@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rhoboto Agent Branch Finalizer"
+  short_description: "Finalize reviewed agent branches"
+  default_prompt: "Use $rhoboto-agent-branch-finalizer to prepare a safe handoff for approved Rhoboto agent branch final commits."
