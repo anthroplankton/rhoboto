@@ -54,6 +54,8 @@ def get_template_environment() -> Environment:
             default_for_string=False,
             default=False,
         ),
+        trim_blocks=True,
+        lstrip_blocks=True,
         keep_trailing_newline=True,
     )
 

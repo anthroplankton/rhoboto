@@ -344,7 +344,7 @@ async def render_shift_timeline_announcement_messages(
         rendered.append(
             RenderedAnnouncement(
                 language=language,
-                content=_compact_shift_timeline_message(content),
+                content=content,
             )
         )
     return rendered
@@ -360,20 +360,3 @@ def _optional_date(value: object) -> date | None:
 
 def _optional_datetime(value: object) -> datetime | None:
     return value if value.__class__ is datetime else None
-
-
-def _compact_shift_timeline_message(content: str) -> str:
-    lines = [line.rstrip() for line in content.splitlines()]
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-
-    compacted: list[str] = []
-    for index, line in enumerate(lines):
-        if line.strip():
-            compacted.append(line)
-            continue
-        if index == 1 and compacted:
-            compacted.append("")
-    return "\n".join(compacted)

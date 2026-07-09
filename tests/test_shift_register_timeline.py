@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from utils.message_templates import render_message_template
 from utils.shift_register_timeline import (
     ShiftTimelineInput,
     ShiftTimelineParseError,
@@ -288,6 +290,56 @@ def test_build_shift_timeline_template_values_uses_jst_date_for_milestone_weekda
     assert values["submission_deadline"].hour == 1
 
 
+def test_shift_runtime_templates_trim_jinja_block_lines() -> None:
+    values = {
+        "day_number": 2,
+        "event_date": SimpleNamespace(
+            month=8,
+            month_name="Aug",
+            day=12,
+            weekday="水",
+        ),
+        "recruitment_time_range": "4-28",
+        "submission_deadline": SimpleNamespace(day=12, weekday="水", hour=21),
+        "draft_shift_proposal": SimpleNamespace(day=13, weekday="木", hour=20),
+        "final_shift_notice": SimpleNamespace(day=14, weekday="金", hour=18),
+    }
+
+    auto_content = render_message_template(
+        "shift.auto_guide.description",
+        "ja",
+        bot="@Rhoboto",
+        sheet_url="https://docs.google.com/spreadsheets/d/example#gid=123",
+        **values,
+    )
+    timeline_content = render_message_template("shift.timeline", "ja", **values)
+
+    assert "\n\n\n" not in auto_content
+    assert "\n\n\n" not in timeline_content
+
+    lines = auto_content.splitlines()
+    heading_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("### 募集時間") and "4-28" in line
+    )
+    assert lines[heading_index + 1].startswith("- 募集締切")
+
+    deadline_index = next(
+        index for index, line in enumerate(lines) if line.startswith("- 募集締切")
+    )
+    assert lines[deadline_index + 1].startswith("- 仮シフト提示")
+    assert lines[deadline_index + 2].startswith("- 確定シフト提示")
+
+    timeline_lines = timeline_content.splitlines()
+    timeline_heading_index = next(
+        index
+        for index, line in enumerate(timeline_lines)
+        if line.startswith("### 募集時間") and "4-28" in line
+    )
+    assert timeline_lines[timeline_heading_index + 1].startswith("- 募集締切")
+
+
 @pytest.mark.asyncio
 async def test_render_shift_timeline_messages_uses_language_values(
     monkeypatch: pytest.MonkeyPatch,
@@ -307,7 +359,7 @@ async def test_render_shift_timeline_messages_uses_language_values(
     ) -> str:
         assert "bot" not in values
         captured[language] = values
-        return f"\n{template_key}:{language}\n\nbody\n\n"
+        return f"{template_key}:{language}\nbody\n"
 
     monkeypatch.setattr(
         "utils.shift_register_timeline.get_announcement_languages",
@@ -331,7 +383,7 @@ async def test_render_shift_timeline_messages_uses_language_values(
     )
 
     assert [item.language for item in rendered] == ["ja", "en"]
-    assert rendered[0].content == "shift.timeline:ja\n\nbody"
+    assert rendered[0].content == "shift.timeline:ja\nbody\n"
     assert captured["ja"]["event_date"].weekday == "水"
     assert captured["ja"]["submission_deadline"].weekday == "水"
     assert captured["ja"]["submission_deadline"].hour == 21
