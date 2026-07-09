@@ -4,8 +4,11 @@
 
 ✅ ⇒ 結果は [Google Sheets]({{ sheet_url }}) に記録され、確認できます。
 ⚠️ ⇒ エラーの可能性があります。
-
-### 募集時間（JST）【{{ recruitment_time_range }}】
+{% if event_date %}
+### 募集時間：{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）【{{ recruitment_time_range }}】
+{% else %}
+### 募集時間【{{ recruitment_time_range }}】
+{% endif %}
 {% if submission_deadline %}
 - 募集締切：　　　{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
 {% endif %}

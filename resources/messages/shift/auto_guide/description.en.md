@@ -4,8 +4,11 @@
 
 ✅ ⇒ Results are recorded in [Google Sheets]({{ sheet_url }}) for review.
 ⚠️ ⇒ An error may have occurred.
-
-### Recruitment time (JST)【{{ recruitment_time_range }}】
+{% if event_date %}
+### Recruitment Time: {{ event_date.month_name }} {{ event_date.day }} ({{ event_date.weekday }})【{{ recruitment_time_range }}】
+{% else %}
+### Recruitment Time【{{ recruitment_time_range }}】
+{% endif %}
 {% if submission_deadline %}
 - Submission deadline: {{ submission_deadline.day }} ({{ submission_deadline.weekday }}) {{ submission_deadline.hour }}:00
 {% endif %}

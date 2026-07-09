@@ -63,7 +63,7 @@ def test_render_message_template_injects_values() -> None:
     )
 
     assert "Day 2" in content
-    assert "Recruitment Time【4-28】" in content
+    assert "Recruitment Time: August 12 (Wed)【4-28】" in content
     assert "Submission deadline: 12 (Wed) 21:00" in content
     assert "Draft shift proposal: 13 (Thu) 20:00" in content
     assert "Final shift notice: 14 (Fri) 18:00" in content
@@ -143,17 +143,17 @@ def test_render_message_template_does_not_autoescape_markdown(
     [
         (
             "ja",
-            "## 🗓️ 1日目【7月4日（土）】シフト登録のお知らせ",  # noqa: RUF001
+            "## 🗓️ 1日目｜7月4日（土）シフト登録のお知らせ",  # noqa: RUF001
             "- 募集締切：　　　20日（金）21時",  # noqa: RUF001
         ),
         (
             "zh_tw",
-            "## 🗓️ 第1天【7月4日（六）】班表登記公告",  # noqa: RUF001
+            "## 🗓️ 第1天｜7月4日（六）班表登記公告",  # noqa: RUF001
             "- 募集截止：20日（五）21時",  # noqa: RUF001
         ),
         (
             "en",
-            "## 🗓️ Day 1【Jul 4 (Sat)】Shift Registration Announcement",
+            "## 🗓️ Day 1 | Jul 4 (Sat) Shift Registration Announcement",
             "- Submission deadline: 20 (Fri) 21:00",
         ),
     ],
@@ -208,6 +208,49 @@ def test_guide_templates_render_jinja_values(key: str, locale: str) -> None:
     assert "https://docs.google.com/spreadsheets/d/example" in content
     assert "{bot}" not in content
     assert "{sheet_url}" not in content
+
+
+@pytest.mark.parametrize("feature", ["team", "shift"])
+@pytest.mark.parametrize("part", ["title", "description", "footer"])
+@pytest.mark.parametrize("locale", ["ja", "zh_tw", "en"])
+def test_auto_guide_runtime_templates_render(
+    feature: str,
+    part: str,
+    locale: str,
+) -> None:
+    content = render_message_template(
+        f"{feature}.auto_guide.{part}",
+        locale,
+        bot="@Rhoboto",
+        sheet_url="https://docs.google.com/spreadsheets/d/example#gid=123",
+        day_number=2,
+        event_date=SimpleNamespace(
+            month=8,
+            month_name="Aug",
+            day=12,
+            weekday={"ja": "水", "zh_tw": "三", "en": "Wed"}[locale],
+        ),
+        recruitment_time_range="4-28",
+        submission_deadline=SimpleNamespace(
+            day=12,
+            weekday={"ja": "水", "zh_tw": "三", "en": "Wed"}[locale],
+            hour=21,
+        ),
+        draft_shift_proposal=SimpleNamespace(
+            day=13,
+            weekday={"ja": "木", "zh_tw": "四", "en": "Thu"}[locale],
+            hour=20,
+        ),
+        final_shift_notice=SimpleNamespace(
+            day=14,
+            weekday={"ja": "金", "zh_tw": "五", "en": "Fri"}[locale],
+            hour=18,
+        ),
+    )
+
+    assert content.strip()
+    for token in ("{{", "}}", "{%", "%}"):
+        assert token not in content
 
 
 @pytest.mark.parametrize(

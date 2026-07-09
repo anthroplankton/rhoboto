@@ -3,11 +3,11 @@
 -# - {{ bot }} が自動で登録します。✅ ⇒ 結果は [Google Sheets]({{ sheet_url }}) に記録され、確認できます。⚠️ ⇒ エラーの可能性があります。
 
 {% if day_number and event_date %}
--# ### {{ day_number }}日目【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】シフトの募集時間（JST）【{{ recruitment_time_range }}】
+-# ### {{ day_number }}日目｜{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）シフトの募集時間（JST）【{{ recruitment_time_range }}】
 {% elif day_number %}
--# ### {{ day_number }}日目 シフトの募集時間（JST）【{{ recruitment_time_range }}】
+-# ### {{ day_number }}日目｜シフトの募集時間（JST）【{{ recruitment_time_range }}】
 {% elif event_date %}
--# ### 【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】シフトの募集時間（JST）【{{ recruitment_time_range }}】
+-# ### {{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）シフトの募集時間（JST）【{{ recruitment_time_range }}】
 {% else %}
 -# ### シフトの募集時間（JST）【{{ recruitment_time_range }}】
 {% endif %}

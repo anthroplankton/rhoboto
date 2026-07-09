@@ -3,11 +3,11 @@
 -# - {{ bot }} processes it automatically. ✅ ⇒ Results are recorded in [Google Sheets]({{ sheet_url }}) for review. ⚠️ ⇒ An error may have occurred.
 
 {% if day_number and event_date %}
--# ### Day {{ day_number }}【{{ event_date.month_name }} {{ event_date.day }} ({{ event_date.weekday }})】Shift recruitment time (JST)【{{ recruitment_time_range }}】
+-# ### Day {{ day_number }} | {{ event_date.month_name }} {{ event_date.day }} ({{ event_date.weekday }}) Shift recruitment time (JST)【{{ recruitment_time_range }}】
 {% elif day_number %}
--# ### Day {{ day_number }} Shift recruitment time (JST)【{{ recruitment_time_range }}】
+-# ### Day {{ day_number }} | Shift recruitment time (JST)【{{ recruitment_time_range }}】
 {% elif event_date %}
--# ### 【{{ event_date.month_name }} {{ event_date.day }} ({{ event_date.weekday }})】Shift recruitment time (JST)【{{ recruitment_time_range }}】
+-# ### {{ event_date.month_name }} {{ event_date.day }} ({{ event_date.weekday }}) Shift recruitment time (JST)【{{ recruitment_time_range }}】
 {% else %}
 -# ### Shift recruitment time (JST)【{{ recruitment_time_range }}】
 {% endif %}

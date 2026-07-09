@@ -1,1 +1,1 @@
-Full guide in the replied message
+Full guide in the replied message ⤴️

@@ -11,9 +11,9 @@ You may add labels or notes before or after the values on each line.
 
 Example:
 ```text
-150/740/33.4 Main team
-150/700/39 Encore team
-140/680/35.3 Backup team
+150/740/33.4 optional note
+150/700/39 optional note
+140/680/35.3 optional note
 ```
 - To delete your team registration, use the slash command `/team delete`.
 ### ⚠️ Updating Your Teams

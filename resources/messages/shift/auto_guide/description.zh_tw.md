@@ -4,8 +4,11 @@
 
 ✅ ⇒ 結果會記錄到 [Google Sheets]({{ sheet_url }})，可供確認。
 ⚠️ ⇒ 可能發生錯誤。
-
-### 募集時段（JST）【{{ recruitment_time_range }}】
+{% if event_date %}
+### 募集時段：{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）【{{ recruitment_time_range }}】
+{% else %}
+### 募集時段【{{ recruitment_time_range }}】
+{% endif %}
 {% if submission_deadline %}
 - 募集截止：{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
 {% endif %}

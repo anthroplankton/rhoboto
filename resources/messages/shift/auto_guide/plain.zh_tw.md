@@ -3,11 +3,11 @@
 -# - {{ bot }} 會自動登記。✅ ⇒ 結果會記錄到 [Google Sheets]({{ sheet_url }})，可供確認。⚠️ ⇒ 可能發生錯誤。
 
 {% if day_number and event_date %}
--# ### 第{{ day_number }}天【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】班表募集時段（JST）【{{ recruitment_time_range }}】
+-# ### 第{{ day_number }}天｜{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）班表募集時段（JST）【{{ recruitment_time_range }}】
 {% elif day_number %}
--# ### 第{{ day_number }}天 班表募集時段（JST）【{{ recruitment_time_range }}】
+-# ### 第{{ day_number }}天｜班表募集時段（JST）【{{ recruitment_time_range }}】
 {% elif event_date %}
--# ### 【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】班表募集時段（JST）【{{ recruitment_time_range }}】
+-# ### {{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）班表募集時段（JST）【{{ recruitment_time_range }}】
 {% else %}
 -# ### 班表募集時段（JST）【{{ recruitment_time_range }}】
 {% endif %}

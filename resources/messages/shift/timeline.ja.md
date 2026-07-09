@@ -1,16 +1,19 @@
 {% if day_number and event_date %}
-## 🗓️ {{ day_number }}日目【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】シフト登録のお知らせ
+## 🗓️ {{ day_number }}日目｜{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）シフト登録のお知らせ
 {% elif day_number %}
-## 🗓️ {{ day_number }}日目 シフト登録のお知らせ
+## 🗓️ {{ day_number }}日目｜シフト登録のお知らせ
 {% elif event_date %}
-## 🗓️【{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）】シフト登録のお知らせ
+## 🗓️ {{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）シフト登録のお知らせ
 {% else %}
 ## 🗓️ シフト登録のお知らせ
 {% endif %}
 
 表示時刻はすべて **日本標準時（JST）** です。
+{% if event_date %}
+### 募集時間：{{ event_date.month }}月{{ event_date.day }}日（{{ event_date.weekday }}）【{{ recruitment_time_range }}】
+{% else %}
 ### 募集時間【{{ recruitment_time_range }}】
-
+{% endif %}
 {% if submission_deadline %}
 - 募集締切：　　　{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
 {% endif %}
