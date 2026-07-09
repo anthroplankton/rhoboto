@@ -20,7 +20,7 @@ from utils.structs_base import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
 
 @dataclass
@@ -327,12 +327,25 @@ class Summary(UserInfoWithEncoreRoles):
         ):
             self._summary[isv_title] = team.effective_skill_value if team else ""
             self._summary[power_title] = team.team_power if team else ""
+        self._summary[self.original_message_title()] = self.join_original_messages(
+            team.original_message for team in teams if team is not None
+        )
 
     def __getattr__(self, name: str) -> float | str:
         if name in self._summary:
             return self._summary[name]
         msg = f"{name} not found in summary"
         raise AttributeError(msg)
+
+    @classmethod
+    def original_message_title(cls) -> str:
+        return "original_message"
+
+    @classmethod
+    def join_original_messages(cls, messages: Iterable[object]) -> str:
+        return ORIGINAL_MESSAGE_LINE_SEPARATOR.join(
+            str(message) for message in messages if message
+        )
 
     @classmethod
     def isv_title(cls, title: str) -> str:
@@ -559,7 +572,10 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
         Returns:
             list[str]: List of extended column names.
         """
-        columns = [c for pair in Summary.isv_power_title_pairs(titles) for c in pair]
+        columns = [
+            *[c for pair in Summary.isv_power_title_pairs(titles) for c in pair],
+            Summary.original_message_title(),
+        ]
         return columns, dict.fromkeys(columns, "object")
 
     @classmethod
@@ -609,6 +625,31 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
             extra_columns.extend([isv_col, power_col])
             extra_dtypes[isv_col] = "object"
             extra_dtypes[power_col] = "object"
+
+        message_series = pd.Series("", index=summary_df.index, dtype="object")
+        for df in team_df_by_titles.values():
+            if Summary.original_message_title() not in df.columns:
+                continue
+            messages = (
+                df[Summary.original_message_title()]
+                .reindex(summary_df.index)
+                .fillna("")
+            )
+            message_series = pd.Series(
+                (
+                    Summary.join_original_messages([current, message])
+                    for current, message in zip(
+                        message_series,
+                        messages,
+                        strict=True,
+                    )
+                ),
+                index=summary_df.index,
+                dtype="object",
+            )
+        summary_df[Summary.original_message_title()] = message_series
+        extra_columns.append(Summary.original_message_title())
+        extra_dtypes[Summary.original_message_title()] = "object"
 
         return cls(
             summary_df, extended_columns=extra_columns, extended_dtypes=extra_dtypes

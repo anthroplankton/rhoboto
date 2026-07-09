@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from utils.structs_base import UserInfo
+from utils.structs_base import ORIGINAL_MESSAGE_LINE_SEPARATOR, UserInfo
 from utils.team_register_structs import (
     Summary,
     SummaryWorksheetContent,
@@ -218,14 +218,53 @@ def test_team_classification_handles_two_teams_without_backup() -> None:
     assert classified.as_tuple() == (classified.main, classified.encore)
 
 
+def test_summary_combines_original_messages_from_existing_teams() -> None:
+    user = make_user()
+    main = TeamParser.parse_line(user, "100/100/20.0 main")
+    encore = TeamParser.parse_line(user, "150/700/39.0 encore")
+    backup = TeamParser.parse_line(user, "140/680/35.3 backup")
+    backup.original_message = ""
+
+    summary = Summary(
+        username=user.username,
+        display_name=user.display_name,
+        encore_roles="",
+        titles=["Main Team", "Encore Team", "Backup Team", "Team 4"],
+        teams=[main, None, encore, backup],
+    )
+
+    assert summary.original_message == ORIGINAL_MESSAGE_LINE_SEPARATOR.join(
+        [
+            "100/100/20.0 main",
+            "150/700/39.0 encore",
+        ]
+    )
+
+
 def test_summary_generates_dynamic_team_columns_from_team_dataframes() -> None:
     user = make_user()
-    team = TeamParser.parse_line(user, "150/740/33.4 main")
-    content = TeamWorksheetContent()
-    content.upsert(team)
+    main = TeamParser.parse_line(user, "150/740/33.4 main")
+    encore = TeamParser.parse_line(user, "140/680/35.3 encore")
+    backup = TeamParser.parse_line(user, "130/600/30.0 backup")
+    backup.original_message = ""
+
+    main_content = TeamWorksheetContent()
+    encore_content = TeamWorksheetContent()
+    backup_content = TeamWorksheetContent()
+    legacy_content = TeamWorksheetContent()
+    main_content.upsert(main)
+    encore_content.upsert(encore)
+    backup_content.upsert(backup)
+    legacy_content.upsert(TeamParser.parse_line(user, "120/500/25.0 legacy"))
+    legacy_df = legacy_content.main.drop(columns=["original_message"])
 
     summary = SummaryWorksheetContent.generate_from_team_dataframes(
-        {"Main Team": content.main}
+        {
+            "Main Team": main_content.main,
+            "Encore Team": encore_content.main,
+            "Backup Team": backup_content.main,
+            "Team 4": legacy_df,
+        }
     )
 
     assert list(summary.main.index) == ["alice"]
@@ -233,6 +272,10 @@ def test_summary_generates_dynamic_team_columns_from_team_dataframes() -> None:
     assert summary.main.loc["alice", "encore_roles"] == ""
     assert summary.main.loc["alice", Summary.isv_title("Main Team")] == 268
     assert summary.main.loc["alice", Summary.power_title("Main Team")] == 33.4
+    assert summary.main.loc["alice", "original_message"] == (
+        f"150/740/33.4 main{ORIGINAL_MESSAGE_LINE_SEPARATOR}140/680/35.3 encore"
+    )
+    assert list(summary.to_frame().columns)[-1] == "original_message"
 
 
 def test_summary_generation_handles_no_team_dataframes() -> None:
@@ -240,4 +283,8 @@ def test_summary_generation_handles_no_team_dataframes() -> None:
 
     assert isinstance(summary.main, pd.DataFrame)
     assert summary.main.empty
-    assert list(summary.main.columns) == ["display_name", "encore_roles"]
+    assert list(summary.to_frame().columns) == [
+        "username",
+        "display_name",
+        "encore_roles",
+    ]
