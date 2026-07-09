@@ -57,6 +57,7 @@ from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
 from utils.reactions import add_reaction_if_possible
+from utils.register_i18n import register_user_text
 from utils.storage_errors import (
     StorageError,
     StorageOperationContext,
@@ -158,11 +159,24 @@ class FeatureNotEnabled(commands.CheckFailure, app_commands.CheckFailure):
     Exception raised when a required feature is not enabled in the channel.
 
     Args:
-        feature_display_name (str): Human-facing name of the feature.
+        feature_name (str): Stable feature identifier for i18n lookup.
+        feature_display_name (str): Human-facing fallback feature name.
+        locale (str): Discord locale value. Defaults to English fallback.
     """
 
-    def __init__(self, feature_display_name: str) -> None:
-        msg = f"{feature_display_name} is not enabled in this channel."
+    def __init__(
+        self,
+        feature_name: str,
+        feature_display_name: str,
+        *,
+        locale: str = "en",
+    ) -> None:
+        msg = register_user_text(
+            feature_name,
+            locale,
+            "not_enabled",
+            fallback_display_name=feature_display_name,
+        )
         super().__init__(msg)
 
 
@@ -1377,7 +1391,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                     ),
                 ) from exc
             if not enabled:
-                raise FeatureNotEnabled(feature_display_name)
+                raise FeatureNotEnabled(feature_name, feature_display_name)
             return True
 
         return predicate
@@ -1423,7 +1437,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                     ),
                 ) from exc
             if not enabled:
-                raise FeatureNotEnabled(feature_display_name)
+                raise FeatureNotEnabled(
+                    feature_name,
+                    feature_display_name,
+                    locale=interaction.locale.value,
+                )
             return True
 
         return predicate
@@ -1517,19 +1535,12 @@ class FeatureChannelUserBase[
                 metadata = await manager.fetch_google_sheets_metadata()
                 await self._delete_user_data(manager, user_info, metadata)
 
-            locale = interaction.locale.value
-
-            if locale.startswith("zh"):
-                content = f"✅ 已成功刪除 {self.feature_display_name} 登記的資料。"
-            elif locale.startswith("ja"):
-                content = (
-                    f"✅ {self.feature_display_name} の入力データを正常に削除しました。"
-                )
-            else:
-                content = (
-                    f"✅ Your data for {self.feature_display_name} has been "
-                    f"deleted successfully."
-                )
+            content = register_user_text(
+                self.feature_name,
+                interaction.locale.value,
+                "delete_success",
+                fallback_display_name=self.feature_display_name,
+            )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
                 interaction,

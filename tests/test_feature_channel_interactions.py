@@ -856,7 +856,7 @@ async def test_is_enabled_uses_enabled_feature_channel_lookup(
 
 
 @pytest.mark.asyncio
-async def test_app_command_predicate_uses_lookup_key_and_display_error(
+async def test_app_command_predicate_disabled_uses_interaction_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[int, int, str | None]] = []
@@ -880,9 +880,10 @@ async def test_app_command_predicate_uses_lookup_key_and_display_error(
         "Team Register",
     )
 
-    with pytest.raises(FeatureNotEnabled, match="Team Register is not enabled"):
-        await predicate(FakeInteraction())
+    with pytest.raises(FeatureNotEnabled) as exc_info:
+        await predicate(FakeInteraction(locale="ja"))
 
+    assert str(exc_info.value) == "このチャンネルでは編成登録が有効になっていません。"
     assert calls == [(111, 222, "team_register")]
 
 
@@ -2024,6 +2025,27 @@ async def test_user_guide_uses_followup_for_missing_config(
     message, kwargs = interaction.followup.messages[0]
     assert kwargs["ephemeral"] is True
     assert message == "Team Register is not configured for this channel."
+
+
+@pytest.mark.asyncio
+async def test_user_guide_missing_config_uses_interaction_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction(locale="zh-TW")
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        ManagerType=MissingConfigManager,
+        bot=SimpleNamespace(user=None),
+    )
+
+    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
+
+    assert interaction.response.deferred == [True]
+    message, kwargs = interaction.followup.messages[0]
+    assert kwargs["ephemeral"] is True
+    assert message == "此頻道尚未設定隊伍編成登記。"
 
 
 @pytest.mark.asyncio
@@ -3777,7 +3799,7 @@ async def test_delete_callback_deletes_with_configured_context(
 
 
 @pytest.mark.asyncio
-async def test_delete_callback_uses_feature_display_name_in_zh_copy(
+async def test_delete_callback_uses_feature_catalog_in_zh_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -3798,12 +3820,12 @@ async def test_delete_callback_uses_feature_display_name_in_zh_copy(
     await FeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.followup.messages == [
-        ("✅ 已成功刪除 Team Register 登記的資料。", {"ephemeral": True})
+        ("✅ 已成功刪除您的隊伍編成登記資料。", {"ephemeral": True})
     ]
 
 
 @pytest.mark.asyncio
-async def test_delete_callback_uses_feature_display_name_in_ja_copy(
+async def test_delete_callback_uses_feature_catalog_in_ja_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -3824,7 +3846,7 @@ async def test_delete_callback_uses_feature_display_name_in_ja_copy(
     await FeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.followup.messages == [
-        ("✅ Team Register の入力データを正常に削除しました。", {"ephemeral": True})
+        ("✅ 編成登録の入力データを正常に削除しました。", {"ephemeral": True})
     ]
 
 

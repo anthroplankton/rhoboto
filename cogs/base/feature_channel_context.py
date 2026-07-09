@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from bot import config
 from models.feature_channel import FeatureChannel
 from utils.manager_base import ManagerBase
+from utils.register_i18n import register_user_text
 
 if TYPE_CHECKING:
     from discord import Interaction
@@ -182,6 +183,11 @@ class FeatureChannelContextMixin[TManager: ManagerBase]:
         ephemeral: bool = True,
     ) -> None:
         await interaction.followup.send(
-            content=f"{self.feature_display_name} is not configured for this channel.",
+            content=register_user_text(
+                self.feature_name,
+                interaction.locale.value,
+                "missing_config",
+                fallback_display_name=self.feature_display_name,
+            ),
             ephemeral=ephemeral,
         )
