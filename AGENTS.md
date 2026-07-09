@@ -79,12 +79,14 @@ Use emoji and custom reaction markers consistently by intent, not by feature, in
 | Marker | Meaning | Use when |
 | --- | --- | --- |
 | `‼️` | High-attention destructive guidance or confirmation. | A user-visible action or instruction may overwrite, delete, or replace existing data. |
+| `🗑️` | Delete or remove action. | A button or compact UI affordance starts a delete/remove flow. Use `‼️` in confirmation or guidance copy when the action may overwrite, delete, or replace data. |
 | `config.PROCESSING_EMOJI` | Operation in progress. | The bot has accepted an action and is still processing it. |
 | `✅` | Success. | The requested operation completed successfully. |
 | `✖️` | Cancelled with no changes applied. | A user-visible flow ends before applying changes. |
 | `⚠️` | Blocked, failed, abnormal, or needs correction. | A flow cannot continue, may not have completed, or needs user/admin action. |
 | `🛠️` | External service or repair-needed failure. | A failure likely needs external-service, configuration, or maintainer repair. |
 | `⤴️` | Replied-message reference. | Text points users to the message this bot message replies to. |
+| `👀` | View or verify existing results. | Opening existing content or recorded results so users can review or confirm them without changing data. |
 | `🟢` / `⚫` | Enabled or disabled status. | Showing enabled or disabled state. |
 | `config.CONFUSED_EMOJI` | Invalid-input companion marker. | Pair after `⚠️` when configured user input is invalid. |
 
