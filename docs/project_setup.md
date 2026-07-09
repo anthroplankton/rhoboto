@@ -104,6 +104,38 @@ private identifiers. If diagnostics require runtime/private data, inspect only
 minimum metadata, schema, counts, or sanitized excerpts, and keep production
 Discord channels, production sheets, and real user data out of validation notes.
 
+## Discord Bot Invite
+
+Use this invite URL to add the bot to a Discord server. Replace `CLIENT_ID` with
+the Application Client ID from Discord Developer Portal:
+
+```text
+https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=347200&scope=bot%20applications.commands&integration_type=0
+```
+
+This grants the bot the current recommended permissions for Rhoboto: slash
+commands, reading and sending channel messages, embeds, reactions, external
+emoji, and updating the bot's guide messages.
+
+In Discord Developer Portal, also enable these privileged gateway intents on the
+Bot settings page:
+
+- Server Members Intent
+- Message Content Intent
+
+Do not grant the bot `Administrator` by default.
+
+If a future role-assignment feature is implemented and enabled, use the
+Manage Roles invite variant instead:
+
+```text
+https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=268782656&scope=bot%20applications.commands&integration_type=0
+```
+
+For role assignment, the bot's Discord role must be above every role it should
+assign. Do not use the bot to assign high-risk roles unless that workflow has a
+separate permission review.
+
 ## Heroku Deployment
 
 Deployment is Heroku-oriented:

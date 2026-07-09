@@ -9,9 +9,12 @@ production sheets, or real user data.
 - A Discord development guild with at least two text channels:
   - one channel for `team_register`
   - one channel for `shift_register`
-- A bot installation in that guild with slash commands synced.
+- A bot installation in that guild using the documented invite permissions,
+  with slash commands synced and the required privileged intents enabled.
 - One administrator test user with both `administrator` and `manage_channels`.
 - One non-admin test user for permission checks.
+- If validating role assignment, the bot role is above the test target roles,
+  and the test target roles do not grant high-risk permissions.
 - A disposable Google spreadsheet shared with the service account email.
 - Local environment variables configured in `.env` or the shell:
   - `DISCORD_TOKEN`

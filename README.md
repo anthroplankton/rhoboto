@@ -21,7 +21,10 @@ Rhoboto is a multi-feature Discord bot built with `discord.py` 2.x, supporting t
 3. Configure environment variables (can use a `.env` file):
    - `DISCORD_TOKEN`: Your Discord Bot Token
    - `GOOGLE_SERVICE_ACCOUNT_PATH`: Path to your Google service account JSON
-4. Start the bot:
+4. Invite the bot to your Discord server with the documented permissions and
+   enable the required Discord Developer Portal intents. See
+   `docs/project_setup.md#discord-bot-invite`.
+5. Start the bot:
    ```shell
    uv run python main.py
    ```
