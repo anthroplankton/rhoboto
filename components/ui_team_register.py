@@ -107,11 +107,11 @@ def resolve_encore_roles(
 
 
 def format_role_mentions(roles: Sequence[Role]) -> str:
-    return ", ".join(f"<@&{role.id}>" for role in roles)
+    return " ".join(f"<@&{role.id}>" for role in roles)
 
 
 def format_role_ids(role_ids: Sequence[int]) -> str:
-    return ", ".join(f"`{role_id}`" for role_id in role_ids)
+    return " ".join(f"`{role_id}`" for role_id in role_ids)
 
 
 def is_everyone_role(role: Role, guild_id: int | None) -> bool:
