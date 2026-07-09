@@ -23,7 +23,7 @@ class Config:
 
     DEFAULT_EMBED_COLOR = 0x99CCFF
     WARNING_EMOJI = "⚠️"
-    PROCESSING_EMOJI = "<:haruka_math:1402204882492063825>"
+    PROCESSING_EMOJI = "<a:haruka_math:1402204882492063825>"
     CONFUSED_EMOJI = "<:haruka_confused:1402850801608556574>"
 
     def validate_runtime(self) -> None:
