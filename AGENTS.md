@@ -74,6 +74,22 @@ Settings changes should go through Discord Modal/View flows. All settings/edit c
 
 User-facing public announcement and help content should use `resources/messages/` templates where that template system applies. Slash command names and descriptions are localized through `bot/translator.py` and Discord locale handling; guild-level announcement language settings must not change individual users' command localization.
 
+Use emoji and custom reaction markers consistently by intent, not by feature, in user-visible Team/Shift Register flows. Keep localized text aligned with the same marker meaning.
+
+| Marker | Meaning | Use when |
+| --- | --- | --- |
+| `‼️` | High-attention destructive guidance or confirmation. | A user-visible action or instruction may overwrite, delete, or replace existing data. |
+| `config.PROCESSING_EMOJI` | Operation in progress. | The bot has accepted an action and is still processing it. |
+| `✅` | Success. | The requested operation completed successfully. |
+| `✖️` | Cancelled with no changes applied. | A user-visible flow ends before applying changes. |
+| `⚠️` | Blocked, failed, abnormal, or needs correction. | A flow cannot continue, may not have completed, or needs user/admin action. |
+| `🛠️` | External service or repair-needed failure. | A failure likely needs external-service, configuration, or maintainer repair. |
+| `⤴️` | Replied-message reference. | Text points users to the message this bot message replies to. |
+| `🟢` / `⚫` | Enabled or disabled status. | Showing enabled or disabled state. |
+| `config.CONFUSED_EMOJI` | Invalid-input companion marker. | Pair after `⚠️` when configured user input is invalid. |
+
+The custom markers are configured in `bot/config.py`; do not hard-code their rendered Discord emoji strings in copy or tests when the config constant applies.
+
 For structured user-submitted text that encodes a bot-defined grammar, such as numbers, dates, times, time ranges, and register submission formats, apply Unicode NFKC normalization at the domain parser or helper boundary before applying canonical parsing rules. Keep Discord UI callbacks, managers, and database models from duplicating normalization or parsing concerns; pass the raw field value into the parser/helper that owns the grammar. Preserve raw submitted text when it is stored or rendered as user-authored content. Do not apply compatibility normalization blindly to natural-language content, user display names, identifiers, or localized public copy, because it can change meaning, identity, or stylistic distinctions across writing systems. Regexes that run after normalization should prefer canonical grammar, while intentional non-ASCII semantic tokens should remain direct visible literals when they are part of the accepted language.
 
 When an approved migration plan changes command names, feature names, privileged intents, Tortoise schema, stored worksheet ID semantics, Google Sheets worksheet layout, or worksheet columns, update the corresponding tests, documentation, and manual validation checklist in the same change set.

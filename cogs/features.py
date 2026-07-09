@@ -28,7 +28,7 @@ class Features(commands.Cog):
         if feature_channel:
             lines = []
             for f in feature_channel:
-                status = r"\🟢 enabled" if f.is_enabled else r"\⚪ disabled"
+                status = r"\🟢 enabled" if f.is_enabled else r"\⚫ disabled"
                 lines.append(f"- `{f.feature_name}`: {status}")
             embed.description = "\n".join(lines)
         else:

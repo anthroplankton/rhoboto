@@ -340,8 +340,9 @@ def assert_latest_guide_enabled_panel(
     view = kwargs["view"]
     field_map = {field.name: field.value for field in embed.fields}
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "- `Enabled` : A short guide is automatically kept near the newest messages. "
-        "When a full guide announcement exists, the short guide replies to it."
+        r"- \🟢 `Enabled` : A short guide is automatically kept near the newest "
+        "messages. When a full guide announcement exists, the short guide replies "
+        "to it."
     )
     assert view.children[0].label == "Disable Latest Guide"
     assert view.children[0].style is ButtonStyle.secondary
@@ -353,8 +354,8 @@ def assert_latest_guide_disabled_panel(kwargs: dict[str, object]) -> None:
     view = kwargs["view"]
     field_map = {field.name: field.value for field in embed.fields}
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "- `Disabled` : No short guide is maintained near new messages. Enable this to "
-        "keep registration rules visible as the channel moves."
+        r"- \⚫ `Disabled` : No short guide is maintained near new messages. Enable "
+        "this to keep registration rules visible as the channel moves."
     )
     assert view.children[0].label == "Enable Latest Guide"
     assert view.children[0].style is ButtonStyle.primary
@@ -565,8 +566,9 @@ def test_team_settings_embed_includes_latest_guide_status_after_encore_roles() -
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
-        "- `Enabled` : A short guide is automatically kept near the newest messages. "
-        "When a full guide announcement exists, the short guide replies to it."
+        r"- \🟢 `Enabled` : A short guide is automatically kept near the newest "
+        "messages. When a full guide announcement exists, the short guide replies "
+        "to it."
     )
 
 
@@ -590,8 +592,8 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
-        "- `Disabled` : No short guide is maintained near new messages. Enable this to "
-        "keep registration rules visible as the channel moves."
+        r"- \⚫ `Disabled` : No short guide is maintained near new messages. Enable "
+        "this to keep registration rules visible as the channel moves."
     )
 
 
@@ -1267,8 +1269,9 @@ async def test_edit_encore_roles_too_many_refreshes_latest_guide_state() -> None
         for field in interaction.response.edits[0][1]["embed"].fields
     }
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "- `Enabled` : A short guide is automatically kept near the newest messages. "
-        "When a full guide announcement exists, the short guide replies to it."
+        r"- \🟢 `Enabled` : A short guide is automatically kept near the newest "
+        "messages. When a full guide announcement exists, the short guide replies "
+        "to it."
     )
 
 

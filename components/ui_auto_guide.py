@@ -13,11 +13,11 @@ if TYPE_CHECKING:
 
 LATEST_GUIDE_FIELD_NAME = "Latest Guide Message"
 LATEST_GUIDE_ENABLED_STATUS_VALUE = (
-    "`Enabled` : A short guide is automatically kept near the newest messages. "
+    r"\🟢 `Enabled` : A short guide is automatically kept near the newest messages. "
     "When a full guide announcement exists, the short guide replies to it."
 )
 LATEST_GUIDE_DISABLED_STATUS_VALUE = (
-    "`Disabled` : No short guide is maintained near new messages. Enable this to "
+    r"\⚫ `Disabled` : No short guide is maintained near new messages. Enable this to "
     "keep registration rules visible as the channel moves."
 )
 LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING = (
