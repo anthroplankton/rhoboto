@@ -17,7 +17,7 @@ LATEST_GUIDE_ENABLED_STATUS_VALUE = (
     "When a full guide announcement exists, the short guide replies to it."
 )
 LATEST_GUIDE_DISABLED_STATUS_VALUE = (
-    "`disabled` : No short guide is maintained near new messages. Enable this to "
+    "`Disabled` : No short guide is maintained near new messages. Enable this to "
     "keep registration rules visible as the channel moves."
 )
 LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING = (

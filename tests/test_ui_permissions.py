@@ -353,7 +353,7 @@ def assert_latest_guide_disabled_panel(kwargs: dict[str, object]) -> None:
     view = kwargs["view"]
     field_map = {field.name: field.value for field in embed.fields}
     assert field_map[LATEST_GUIDE_FIELD_NAME] == (
-        "- `disabled` : No short guide is maintained near new messages. Enable this to "
+        "- `Disabled` : No short guide is maintained near new messages. Enable this to "
         "keep registration rules visible as the channel moves."
     )
     assert view.children[0].label == "Enable Latest Guide"
@@ -590,7 +590,7 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
-        "- `disabled` : No short guide is maintained near new messages. Enable this to "
+        "- `Disabled` : No short guide is maintained near new messages. Enable this to "
         "keep registration rules visible as the channel moves."
     )
 
