@@ -27,10 +27,11 @@ def test_team_parser_extracts_embedded_team_values() -> None:
     assert team.team_power == 33.4
     assert team.original_message == "main: 150 / 740 / 33.4 note"
     assert team.effective_skill_value == 268
+    assert not hasattr(team.team, "original_message")
 
 
 def test_team_parser_ignores_invalid_lines_and_raises_for_single_invalid() -> None:
-    teams = TeamParser.parse_lines(
+    result = TeamParser.parse_submission(
         make_user(),
         [
             "not a team",
@@ -39,7 +40,7 @@ def test_team_parser_ignores_invalid_lines_and_raises_for_single_invalid() -> No
         ],
     )
 
-    assert [team.team_power for team in teams] == [33.4, 0.5]
+    assert [team.team_power for team in result.teams] == [33.4, 0.5]
     with pytest.raises(TeamFormatError):
         TeamParser.parse_line(make_user(), "missing separators")
 
@@ -66,20 +67,28 @@ def test_team_parser_accepts_nfkc_compatible_submission_text() -> None:
     assert team.original_message == line
 
 
-def test_team_parser_detects_invalid_attempt_by_numeric_tokens() -> None:
-    assert TeamParser.looks_like_invalid_attempt(["160//600/33"])
-    assert TeamParser.looks_like_invalid_attempt(["160,600,33"])
-    assert TeamParser.looks_like_invalid_attempt(["160 600 33"])
-    assert TeamParser.looks_like_invalid_attempt(
-        [
-            "１６０，６００，３３",  # noqa: RUF001
-        ]
-    )
+@pytest.mark.parametrize(
+    "line",
+    [
+        "160//600/33",
+        "160,600,33",
+        "160 600 33",
+        "１６０，６００，３３",  # noqa: RUF001
+    ],
+)
+def test_team_parser_reports_invalid_attempt_by_numeric_tokens(line: str) -> None:
+    result = TeamParser.parse_submission(make_user(), [line])
+
+    assert result.teams == []
+    assert result.invalid_attempts == [line]
 
 
-def test_team_parser_does_not_flag_general_text_as_invalid_attempt() -> None:
-    assert not TeamParser.looks_like_invalid_attempt(["公告"])
-    assert not TeamParser.looks_like_invalid_attempt(["160/600"])
+@pytest.mark.parametrize("line", ["公告", "160/600"])
+def test_team_parser_does_not_flag_general_text_as_invalid_attempt(line: str) -> None:
+    result = TeamParser.parse_submission(make_user(), [line])
+
+    assert result.teams == []
+    assert result.invalid_attempts == []
 
 
 def test_team_parser_parse_submission_accepts_valid_with_ordinary_text() -> None:
@@ -89,6 +98,8 @@ def test_team_parser_parse_submission_accepts_valid_with_ordinary_text() -> None
     )
 
     assert [team.team_power for team in result.teams] == [33.4]
+    assert result.submission == result.teams
+    assert result.teams[0].original_message == "main team ⏎  150/740/33.4 ⏎  よろしく"
     assert result.invalid_attempts == []
 
 
@@ -99,11 +110,58 @@ def test_team_parser_parse_submission_reports_strict_mixed_invalid_attempts() ->
     )
 
     assert [team.team_power for team in result.teams] == [33.4]
+    assert result.teams[0].original_message == "150/740/33.4 ⏎  160//600/33"
     assert result.invalid_attempts == ["160//600/33"]
 
 
+def test_team_parser_parse_submission_treats_ordinary_text_as_noop() -> None:
+    result = TeamParser.parse_submission(make_user(), ["公告"])
+
+    assert result.teams == []
+    assert result.invalid_attempts == []
+
+
+def test_team_parser_parse_submission_assigns_text_to_team_blocks() -> None:
+    result = TeamParser.parse_submission(
+        make_user(),
+        [
+            "ordinary-0",
+            "100/100/20.0 first valid line becomes main",
+            "ordinary-1",
+            "150/700/39.0 second valid line becomes encore",
+            "ordinary-2",
+            "140/680/35.3 third valid line becomes backup",
+            "ordinary-3",
+        ],
+    )
+
+    assert [team.original_message for team in result.teams] == [
+        "ordinary-0 ⏎  100/100/20.0 first valid line becomes main ⏎  ordinary-1",
+        "150/700/39.0 second valid line becomes encore ⏎  ordinary-2",
+        "140/680/35.3 third valid line becomes backup ⏎  ordinary-3",
+    ]
+    assert result.invalid_attempts == []
+
+
+def test_team_parser_parse_submission_strips_lines() -> None:
+    result = TeamParser.parse_submission(
+        make_user(),
+        [
+            "",
+            "  ",
+            "  100/100/20.0 main  ",
+            "\t",
+            "  note  ",
+        ],
+    )
+
+    assert [team.original_message for team in result.teams] == [
+        "100/100/20.0 main ⏎  note",
+    ]
+
+
 def test_team_classification_uses_valid_submission_order() -> None:
-    teams = TeamParser.parse_lines(
+    result = TeamParser.parse_submission(
         make_user(),
         [
             "announcement text",
@@ -114,13 +172,11 @@ def test_team_classification_uses_valid_submission_order() -> None:
         ],
     )
 
-    classified = TeamParser.classify_teams(teams)
+    classified = TeamParser.classify_teams(result.teams)
 
-    assert classified.main.original_message.endswith("first valid line becomes main")
+    assert "first valid line becomes main" in classified.main.original_message
     assert classified.encore is not None
-    assert classified.encore.original_message.endswith(
-        "second valid line becomes encore"
-    )
+    assert "second valid line becomes encore" in classified.encore.original_message
     assert [team.original_message for team in classified.backup] == [
         "140/680/35.3 third valid line becomes backup"
     ]
@@ -132,9 +188,9 @@ def test_team_classification_uses_valid_submission_order() -> None:
 
 
 def test_team_classification_handles_one_team_as_main_only() -> None:
-    teams = TeamParser.parse_lines(make_user(), ["100/100/20.0 only team"])
+    result = TeamParser.parse_submission(make_user(), ["100/100/20.0 only team"])
 
-    classified = TeamParser.classify_teams(teams)
+    classified = TeamParser.classify_teams(result.teams)
 
     assert classified.main.original_message == "100/100/20.0 only team"
     assert classified.encore is None
@@ -143,7 +199,7 @@ def test_team_classification_handles_one_team_as_main_only() -> None:
 
 
 def test_team_classification_handles_two_teams_without_backup() -> None:
-    teams = TeamParser.parse_lines(
+    result = TeamParser.parse_submission(
         make_user(),
         [
             "100/100/20.0 first valid line becomes main",
@@ -151,7 +207,7 @@ def test_team_classification_handles_two_teams_without_backup() -> None:
         ],
     )
 
-    classified = TeamParser.classify_teams(teams)
+    classified = TeamParser.classify_teams(result.teams)
 
     assert classified.main.original_message.endswith("first valid line becomes main")
     assert classified.encore is not None

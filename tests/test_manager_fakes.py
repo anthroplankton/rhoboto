@@ -116,7 +116,7 @@ async def test_shift_manager_upserts_deletes_user_shift_with_fake_worksheet() ->
         ],
     )
     user = make_user()
-    result = ShiftParser.parse_lines(user, ["15-17"])
+    result = ShiftParser.parse_submission(user, ["15-17"])
     shift = result.shift
     assert shift is not None
 
@@ -150,7 +150,7 @@ async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
         ],
     )
     user = make_user()
-    shift = ShiftParser.parse_lines(user, ["4-8"]).shift
+    shift = ShiftParser.parse_submission(user, ["4-8"]).shift
     assert shift is not None
 
     await manager.upsert_or_delete_user_shift(user, shift, metadata)
@@ -185,7 +185,7 @@ async def test_shift_manager_rejects_old_entry_header_before_update() -> None:
         ],
     )
     user = make_user()
-    shift = ShiftParser.parse_lines(user, ["4-8"]).shift
+    shift = ShiftParser.parse_submission(user, ["4-8"]).shift
     assert shift is not None
 
     with pytest.raises(StorageError) as exc_info:

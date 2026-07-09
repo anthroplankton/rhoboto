@@ -8,8 +8,10 @@ from dataclasses import InitVar, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self, override
 
 from utils.structs_base import (
+    ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
     OriginalMessage,
+    SubmissionParseResult,
     UserInfo,
     WorksheetContentBase,
     WorksheetMetadata,
@@ -227,24 +229,24 @@ class RecruitmentTimeRanges:
 
 @dataclass
 class Shift(OriginalMessage, UserInfo):
-    shifts: InitVar[set[int]]
+    slots: InitVar[set[int]]
 
-    def __post_init__(self, shifts: set[int]) -> None:
+    def __post_init__(self, slots: set[int]) -> None:
         """
-        Post-initialization to set up shifts.
+        Post-initialization to set up slots.
 
         Args:
-            shifts (set[int]): Set of shift numbers.
+            slots (set[int]): Set of slot numbers.
         """
         invalid = [
             slot
-            for slot in shifts
+            for slot in slots
             if slot.__class__ is not int or slot not in ShiftParser.HOUR_SLOTS
         ]
         if invalid:
             msg = f"Invalid shift slots: {invalid!r}"
             raise ValueError(msg)
-        self._shifts = set(shifts)
+        self._slots = set(slots)
 
     def __getattr__(self, name: str) -> int:  # compatible with google sheets
         try:
@@ -254,47 +256,47 @@ class Shift(OriginalMessage, UserInfo):
                 num = ShiftParser.HOUR_SLOTS[ShiftParser.HOUR_LABELS.index(name)]
             else:
                 raise AttributeError(name) from e
-        return int(num in self._shifts)
+        return int(num in self._slots)
 
     def __repr__(self) -> str:
         ranges = self._merge_ranges()
-        shifts = ", ".join(f"{start}-{end + 1}" for start, end in ranges)
-        return f"Shift({self.user}, shifts={shifts})"
+        ranges = ", ".join(f"{start}-{end + 1}" for start, end in ranges)
+        return f"Shift({self.user}, ranges={ranges})"
 
     def __bool__(self) -> bool:
         """
-        Check if the Shift object has any shifts.
+        Check if the Shift object has any slots.
 
         Returns:
-            bool: True if there are shifts, False otherwise.
+            bool: True if there are slots, False otherwise.
         """
-        return bool(self._shifts)
+        return bool(self._slots)
 
-    def __contains__(self, shift: object) -> bool:
+    def __contains__(self, slot: object) -> bool:
         """
-        Check if a shift number is in the set of shifts.
+        Check if a slot number is in the set of slots.
 
         Args:
-            shift (object): The shift number to check.
+            slot (object): The slot number to check.
 
         Returns:
-            bool: True if the shift number is in the set, False otherwise.
+            bool: True if the slot number is in the set, False otherwise.
         """
-        return shift.__class__ is int and shift in self._shifts
+        return slot.__class__ is int and slot in self._slots
 
     def __iter__(self) -> Iterator[int]:
         """
-        Iterate over the shift numbers.
+        Iterate over the slot numbers.
 
         Yields:
-            int: Each shift number in the set.
+            int: Each slot number in the set.
         """
-        yield from self._shifts
+        yield from sorted(self._slots)
 
     def _merge_ranges(self) -> list[tuple[int, int]]:
-        if not self._shifts:
+        if not self._slots:
             return []
-        sorted_nums = sorted(self._shifts)
+        sorted_nums = sorted(self._slots)
         ranges = []
         start = end = sorted_nums[0]
         for n in sorted_nums[1:]:
@@ -318,62 +320,35 @@ class Shift(OriginalMessage, UserInfo):
 
     def items(self) -> list[tuple[int, bool]]:
         """
-        Get a list of tuples with shift numbers and their presence.
+        Get a list of tuples with slot numbers and their presence.
 
         Returns:
-            list[tuple[int, bool]]: List of tuples with shift number and presence.
+            list[tuple[int, bool]]: List of tuples with slot number and presence.
         """
-        return [(n, n in self._shifts) for n in ShiftParser.HOUR_SLOTS]
+        return [(n, n in self._slots) for n in ShiftParser.HOUR_SLOTS]
 
 
 @dataclass(frozen=True)
-class ShiftParseResult:
-    shift: Shift | None
+class ShiftParseResult(SubmissionParseResult[Shift]):
     periods: HourRanges
-    invalid_attempts: list[str]
+
+    @property
+    def shift(self) -> Shift | None:
+        return self.submission
 
 
 class ShiftParser:
-    """
-    Parser for shift info lines.
-
-    Attributes:
-        pattern (Pattern): Regex pattern for parsing shift info lines.
-    """
+    """Parser for shift info lines."""
 
     HOUR_SLOTS: ClassVar[list[int]] = list(range(30))
     HOUR_LABELS: ClassVar[list[str]] = [f"{h}-{h + 1}" for h in HOUR_SLOTS]
 
-    PATTERN: ClassVar[re.Pattern[str]] = HourRanges.RANGE_PATTERN
-    TIME_VALUE_PATTERN: ClassVar[str] = HourRanges.TIME_VALUE_PATTERN
-    INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = (
-        HourRanges.INVALID_ATTEMPT_PATTERN
-    )
-
     @classmethod
-    def standardize(cls, hour: int) -> int:
+    def parse_submission(
+        cls, user_info: UserInfo, lines: list[str]
+    ) -> ShiftParseResult:
         """
-        Validate that an hour is on the linear Shift Register axis.
-
-        Args:
-            hour (int): The hour to validate.
-
-        Returns:
-            int: The validated hour.
-        """
-        if hour.__class__ is not int or hour not in cls.HOUR_SLOTS:
-            msg = f"Invalid shift slot: {hour!r}"
-            raise ValueError(msg)
-        return hour
-
-    @classmethod
-    def looks_like_invalid_attempt(cls, lines: list[str]) -> bool:
-        return bool(cls.parse_lines(UserInfo("", ""), lines).invalid_attempts)
-
-    @classmethod
-    def parse_lines(cls, user_info: UserInfo, lines: list[str]) -> ShiftParseResult:
-        """
-        Parse multiple lines into a Shift object.
+        Parse a full message submission into a Shift object.
 
         Args:
             user_info (UserInfo): The user information.
@@ -382,7 +357,8 @@ class ShiftParser:
         Returns:
             ShiftParseResult: Parsed shift, periods, and invalid attempts.
         """
-        original_message = " / ".join(lines)
+        lines = [stripped for line in lines if (stripped := line.strip())]
+        original_message = ORIGINAL_MESSAGE_LINE_SEPARATOR.join(lines)
         ranges, invalid_attempts = HourRanges.parse_tolerant("\n".join(lines))
         shift = None
         if ranges.ranges:
@@ -390,18 +366,18 @@ class ShiftParser:
                 username=user_info.username,
                 display_name=user_info.display_name,
                 original_message=original_message,
-                shifts=ranges.slots,
+                slots=ranges.slots,
             )
         return ShiftParseResult(
-            shift=shift,
-            periods=ranges,
+            submission=shift,
             invalid_attempts=invalid_attempts,
+            periods=ranges,
         )
 
 
 class EntryWorksheetMetadata(WorksheetMetadata):
     """
-    Represents metadata for the entry worksheet in the team register.
+    Represents metadata for the entry worksheet in the shift register.
 
     Args:
         worksheet_id (int | None): The unique ID of the entry worksheet.
@@ -446,7 +422,7 @@ class EntryWorksheetMetadata(WorksheetMetadata):
 
 class DraftWorksheetMetadata(WorksheetMetadata):
     """
-    Represents metadata for the draft worksheet in the team register.
+    Represents metadata for the draft worksheet in the shift register.
 
     Args:
         worksheet_id (int | None): The unique ID of the draft worksheet.
@@ -491,7 +467,7 @@ class DraftWorksheetMetadata(WorksheetMetadata):
 
 class FinalScheduleWorksheetMetadata(WorksheetMetadata):
     """
-    Represents metadata for the final schedule worksheet in the team register.
+    Represents metadata for the final schedule worksheet in the shift register.
 
     Args:
         worksheet_id (int | None): The unique ID of the final schedule worksheet.

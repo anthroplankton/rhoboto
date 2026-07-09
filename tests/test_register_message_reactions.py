@@ -110,16 +110,19 @@ def make_subject(feature_name: str) -> SimpleNamespace:
         parse_message_submission = TeamRegister._parse_message_submission
         process_configured = TeamRegister._process_configured_message_submission
         manager_type = TeamRegister.ManagerType
+        parser_type = TeamRegister.ParserType
     else:
         parse_message_submission = ShiftRegister._parse_message_submission
         process_configured = ShiftRegister._process_configured_message_submission
         manager_type = ShiftRegister.ManagerType
+        parser_type = ShiftRegister.ParserType
 
     subject = SimpleNamespace(
         feature_name=feature_name,
         logger=FakeLogger(),
         bot=SimpleNamespace(user=object()),
         ManagerType=manager_type,
+        ParserType=parser_type,
         _refresh_auto_guide_if_enabled=noop_refresh_auto_guide,
     )
     subject._parse_message_submission = MethodType(

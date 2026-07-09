@@ -7,10 +7,6 @@ from discord import Interaction, Member, Message, app_commands
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import FeatureChannelBase
-from cogs.base.feature_channel_context import (
-    ConfiguredFeatureChannelContext,
-    MessageParseResult,
-)
 from components.ui_storage_errors import send_storage_error
 from components.ui_team_register import (
     TEAM_REGISTER_DISPLAY_NAME,
@@ -35,6 +31,7 @@ if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
+    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
     from models.team_register import TeamRegisterConfig
     from utils.structs_base import UserInfo
@@ -52,6 +49,7 @@ class TeamRegister(
     auto_guide_lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
+    ParserType = TeamParser
 
     @override
     def _guide_worksheet_id(
@@ -116,22 +114,6 @@ class TeamRegister(
             current_view=current_view,
             feature_config=team_register,
         )
-
-    @override
-    async def _parse_message_submission(
-        self, message: Message
-    ) -> MessageParseResult[list[Team]]:
-        user_info = self._message_user_info(message)
-        lines = message.content.splitlines()
-        parse_result = TeamParser.parse_submission(user_info, lines=lines)
-        if parse_result.invalid_attempts:
-            return MessageParseResult.invalid(user_info=user_info)
-
-        teams = parse_result.teams
-        if not teams:
-            return MessageParseResult.ignored()
-
-        return MessageParseResult.parsed(teams, user_info=user_info)
 
     @override
     async def _process_configured_message_submission(

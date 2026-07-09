@@ -40,6 +40,15 @@ class UserInfo:
     """
 
 
+ORIGINAL_MESSAGE_LINE_SEPARATOR = " ⏎  "
+
+
+@dataclass(frozen=True)
+class SubmissionParseResult[TSubmission]:
+    submission: TSubmission | None
+    invalid_attempts: list[str]
+
+
 @dataclass
 class OriginalMessage:
     """

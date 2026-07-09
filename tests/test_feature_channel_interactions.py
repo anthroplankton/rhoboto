@@ -45,10 +45,10 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.shift_register_structs import Shift as RegisterShift
+from utils.shift_register_structs import Shift as RegisterShift, ShiftParser
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
-from utils.team_register_structs import Team as RegisterTeam
+from utils.team_register_structs import Team as RegisterTeam, TeamParser
 
 PRIVATE_DATABASE_ERROR = "private database"
 
@@ -747,7 +747,7 @@ def shift_register_submission() -> tuple[RegisterShift, UserInfo]:
         username=user_info.username,
         display_name=user_info.display_name,
         original_message="4-8",
-        shifts=set(range(4, 8)),
+        slots=set(range(4, 8)),
     )
     return shift, user_info
 
@@ -3878,8 +3878,10 @@ def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
     assert "process_upsert_from_message" not in ShiftRegister.__dict__
     assert "_process_upsert_from_message_with_outcome" not in TeamRegister.__dict__
     assert "_process_upsert_from_message_with_outcome" not in ShiftRegister.__dict__
-    assert "_parse_message_submission" in TeamRegister.__dict__
-    assert "_parse_message_submission" in ShiftRegister.__dict__
+    assert "_parse_message_submission" not in TeamRegister.__dict__
+    assert "_parse_message_submission" not in ShiftRegister.__dict__
+    assert TeamRegister.ParserType is TeamParser
+    assert ShiftRegister.ParserType is ShiftParser
     assert "_process_configured_message_submission" in TeamRegister.__dict__
     assert "_process_configured_message_submission" in ShiftRegister.__dict__
 

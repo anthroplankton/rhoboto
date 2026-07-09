@@ -4,7 +4,7 @@ import logging
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from discord import (
     Embed,
@@ -64,7 +64,7 @@ from utils.storage_errors import (
     generate_error_reference,
     storage_error_content,
 )
-from utils.structs_base import GoogleSheetsMetadata, UserInfo
+from utils.structs_base import GoogleSheetsMetadata, SubmissionParseResult, UserInfo
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -119,6 +119,15 @@ class _MessageUpsertOutcome[TUpsertResult]:
         result: TUpsertResult | None,
     ) -> _MessageUpsertOutcome[TUpsertResult]:
         return cls(status=_MessageUpsertStatus.PROCESSED, result=result)
+
+
+class _MessageSubmissionParser[TSubmission](Protocol):
+    @classmethod
+    def parse_submission(
+        cls,
+        user_info: UserInfo,
+        lines: list[str],
+    ) -> SubmissionParseResult[TSubmission]: ...
 
 
 async def _send_public_announcement_followups(
@@ -288,6 +297,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
     auto_guide_lock: KeyAsyncLock
 
     ManagerType: type[TManager]  # Type of the manager to use for this feature
+    ParserType: type[_MessageSubmissionParser[TSubmission]]
 
     def __init__(self, bot: Rhoboto) -> None:
         self.bot = bot
@@ -357,13 +367,25 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             require_enabled=True,
         )
 
-    @abstractmethod
     async def _parse_message_submission(
         self,
         message: Message,
     ) -> MessageParseResult[TSubmission]:
-        msg = "Subclasses must implement _parse_message_submission method."
-        raise NotImplementedError(msg)
+        user_info = self._message_user_info(message)
+        parse_result = self.ParserType.parse_submission(
+            user_info,
+            message.content.splitlines(),
+        )
+        if parse_result.invalid_attempts:
+            return MessageParseResult.invalid(user_info=user_info)
+
+        if parse_result.submission is None:
+            return MessageParseResult.ignored()
+
+        return MessageParseResult.parsed(
+            parse_result.submission,
+            user_info=user_info,
+        )
 
     @abstractmethod
     async def _process_configured_message_submission(

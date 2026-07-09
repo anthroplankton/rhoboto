@@ -10,8 +10,10 @@ from typing import TYPE_CHECKING, ClassVar, Self, override
 import pandas as pd
 
 from utils.structs_base import (
+    ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
     OriginalMessage,
+    SubmissionParseResult,
     UserInfo,
     WorksheetContentBase,
     WorksheetMetadata,
@@ -52,7 +54,6 @@ class TeamInfo:
     leader_skill_value: int
     internal_skill_value: int
     team_power: float
-    original_message: str
 
     """
     Team skill values and related information.
@@ -61,7 +62,6 @@ class TeamInfo:
         leader_skill_value (int): Leader skill value.
         internal_skill_value (int): Internal skill value.
         team_power (float): Team power value.
-        original_message (str): Original message string.
     """
 
     def __repr__(self) -> str:
@@ -109,7 +109,6 @@ class Team(OriginalMessage, TeamInfo, UserInfo):
             leader_skill_value=self.leader_skill_value,
             internal_skill_value=self.internal_skill_value,
             team_power=self.team_power,
-            original_message=self.original_message,
         )
 
     def __repr__(self) -> str:
@@ -139,7 +138,8 @@ class Team(OriginalMessage, TeamInfo, UserInfo):
             float: The effective skill value.
         """
         return Team.compute_effective_skill_value(
-            self.team.leader_skill_value, self.team.internal_skill_value
+            self.leader_skill_value,
+            self.internal_skill_value,
         )
 
     @classmethod
@@ -184,38 +184,42 @@ class TeamFormatError(Exception):
 
 
 @dataclass(frozen=True)
-class TeamParseResult:
-    teams: list[Team]
-    invalid_attempts: list[str]
+class TeamParseResult(SubmissionParseResult[list[Team]]):
+    @property
+    def teams(self) -> list[Team]:
+        return self.submission or []
 
 
 class TeamParser:
-    """
-    Parser for team info lines.
+    """Parser for team info lines."""
 
-    Attributes:
-        pattern (Pattern): Regex pattern for parsing team info lines.
-    """
-
-    PATTERN = re.compile(
+    PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"(?P<leader_skill>[0-9]+)\s*/\s*"
         r"(?P<total_skill>[0-9]+)\s*/\s*"
         r"(?P<team_power>([0-9]+(\.[0-9]*)?|\.[0-9]+))"
     )
-    NUMBER_TOKEN_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+")
+    NUMBER_TOKEN_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"[0-9]+(?:\.[0-9]*)?|\.[0-9]+"
+    )
     MIN_INVALID_ATTEMPT_NUMBER_TOKENS: ClassVar[int] = 3
 
-    @staticmethod
-    def _normalize_submission_text(value: str) -> str:
-        return unicodedata.normalize("NFKC", value)
-
     @classmethod
-    def looks_like_invalid_attempt(cls, lines: list[str]) -> bool:
-        return any(
-            not cls.PATTERN.search(normalized_line)
-            and len(cls.NUMBER_TOKEN_PATTERN.findall(normalized_line))
-            >= cls.MIN_INVALID_ATTEMPT_NUMBER_TOKENS
-            for normalized_line in map(cls._normalize_submission_text, lines)
+    def _from_match(
+        cls,
+        user_info: UserInfo,
+        match: re.Match[str],
+        original_message: str,
+    ) -> Team:
+        leader_skill_value = int(match.group("leader_skill"))
+        total_skill_value = int(match.group("total_skill"))
+        team_power = float(match.group("team_power"))
+        return Team(
+            username=user_info.username,
+            display_name=user_info.display_name,
+            leader_skill_value=leader_skill_value,
+            internal_skill_value=total_skill_value,
+            team_power=team_power,
+            original_message=original_message,
         )
 
     @classmethod
@@ -233,20 +237,10 @@ class TeamParser:
         Raises:
             TeamFormatError: If the line does not match the expected format.
         """
-        match = cls.PATTERN.search(cls._normalize_submission_text(line))
+        match = cls.PATTERN.search(unicodedata.normalize("NFKC", line))
         if not match:
             raise TeamFormatError(line)
-        leader_skill_value = int(match.group("leader_skill"))
-        total_skill_value = int(match.group("total_skill"))
-        team_power = float(match.group("team_power"))
-        return Team(
-            username=user_info.username,
-            display_name=user_info.display_name,
-            leader_skill_value=leader_skill_value,
-            internal_skill_value=total_skill_value,
-            team_power=team_power,
-            original_message=line.strip(),
-        )
+        return cls._from_match(user_info, match, line.strip())
 
     @classmethod
     def parse_submission(
@@ -264,29 +258,40 @@ class TeamParser:
         Returns:
             TeamParseResult: Parsed teams and invalid team-like lines.
         """
-        teams: list[Team] = []
         invalid_attempts: list[str] = []
+        pending_lines: list[str] = []
+        team_matches: list[re.Match[str]] = []
+        message_blocks: list[list[str]] = []
         for line in lines:
-            if cls.PATTERN.search(cls._normalize_submission_text(line)):
-                teams.append(cls.parse_line(user_info, line))
+            stripped_line = line.strip()
+            if not stripped_line:
                 continue
-            if cls.looks_like_invalid_attempt([line]):
-                invalid_attempts.append(line)
-        return TeamParseResult(teams=teams, invalid_attempts=invalid_attempts)
-
-    @classmethod
-    def parse_lines(cls, user_info: UserInfo, lines: list[str]) -> list[Team]:
-        """
-        Parse multiple lines into Team objects.
-
-        Args:
-            user_info (UserInfo): The user information.
-            lines (list[str]): List of team info strings.
-
-        Returns:
-            list[Team]: List of successfully parsed Team objects.
-        """
-        return cls.parse_submission(user_info, lines).teams
+            normalized_line = unicodedata.normalize("NFKC", line)
+            match = cls.PATTERN.search(normalized_line)
+            if match:
+                team_matches.append(match)
+                message_blocks.append([*pending_lines, stripped_line])
+                pending_lines = []
+                continue
+            if (
+                len(cls.NUMBER_TOKEN_PATTERN.findall(normalized_line))
+                >= cls.MIN_INVALID_ATTEMPT_NUMBER_TOKENS
+            ):
+                invalid_attempts.append(stripped_line)
+            target = message_blocks[-1] if message_blocks else pending_lines
+            target.append(stripped_line)
+        teams = [
+            cls._from_match(
+                user_info,
+                match,
+                ORIGINAL_MESSAGE_LINE_SEPARATOR.join(block),
+            )
+            for match, block in zip(team_matches, message_blocks, strict=True)
+        ]
+        return TeamParseResult(
+            submission=teams or None,
+            invalid_attempts=invalid_attempts,
+        )
 
     @classmethod
     def classify_teams(cls, teams: list[Team]) -> ClassifiedTeams:

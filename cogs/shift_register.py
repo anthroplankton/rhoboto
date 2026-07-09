@@ -10,10 +10,6 @@ from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     _send_public_announcement_followups,
 )
-from cogs.base.feature_channel_context import (
-    ConfiguredFeatureChannelContext,
-    MessageParseResult,
-)
 from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
     ShiftRegisterView,
@@ -37,6 +33,7 @@ if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
+    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
     from models.shift_register import ShiftRegisterConfig
     from utils.structs_base import UserInfo
@@ -55,6 +52,7 @@ class ShiftRegister(
     auto_guide_lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
+    ParserType = ShiftParser
 
     @override
     def _guide_worksheet_id(
@@ -154,23 +152,6 @@ class ShiftRegister(
             current_view=current_view,
             feature_config=shift_register,
         )
-
-    @override
-    async def _parse_message_submission(
-        self,
-        message: Message,
-    ) -> MessageParseResult[Shift]:
-        user_info = self._message_user_info(message)
-        lines = message.content.splitlines()
-        parse_result = ShiftParser.parse_lines(user_info, lines)
-        if parse_result.invalid_attempts:
-            return MessageParseResult.invalid(user_info=user_info)
-
-        shift = parse_result.shift
-        if shift is None:
-            return MessageParseResult.ignored()
-
-        return MessageParseResult.parsed(shift, user_info=user_info)
 
     @override
     async def _process_configured_message_submission(

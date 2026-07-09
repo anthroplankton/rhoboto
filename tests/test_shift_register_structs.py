@@ -156,18 +156,19 @@ def test_recruitment_time_ranges_contains_canonical_slots() -> None:
 
 
 def test_shift_parser_accepts_linear_0_30_ranges_and_notes() -> None:
-    result = ShiftParser.parse_lines(
+    result = ShiftParser.parse_submission(
         make_user(),
         [
-            "希望 4-12 可以",
-            "20-28 備註文字",
+            "  希望 4-12 可以  ",
+            "  20-28 備註文字  ",
         ],
     )
 
     assert result.invalid_attempts == []
     assert result.shift is not None
+    assert result.submission is result.shift
     assert set(result.shift) == {*range(4, 12), *range(20, 28)}
-    assert result.shift.original_message == "希望 4-12 可以 / 20-28 備註文字"
+    assert result.shift.original_message == "希望 4-12 可以 ⏎  20-28 備註文字"
     assert result.periods.display() == "4-12, 20-28"
 
 
@@ -184,7 +185,7 @@ def test_shift_parser_reports_invalid_attempts_for_strict_mixed(
     line: str,
     expected_invalid: str,
 ) -> None:
-    result = ShiftParser.parse_lines(make_user(), line.splitlines())
+    result = ShiftParser.parse_submission(make_user(), line.splitlines())
 
     assert expected_invalid in result.invalid_attempts
     assert result.shift is not None
@@ -193,7 +194,7 @@ def test_shift_parser_reports_invalid_attempts_for_strict_mixed(
 
 @pytest.mark.parametrize("line", ["公告", "20:00", "20點前"])
 def test_shift_parser_treats_ordinary_text_as_noop(line: str) -> None:
-    result = ShiftParser.parse_lines(make_user(), [line])
+    result = ShiftParser.parse_submission(make_user(), [line])
 
     assert result.shift is None
     assert result.invalid_attempts == []
@@ -212,15 +213,11 @@ def test_shift_parser_treats_ordinary_text_as_noop(line: str) -> None:
         "-20",
     ],
 )
-def test_shift_parser_detects_invalid_attempts(line: str) -> None:
-    assert ShiftParser.looks_like_invalid_attempt([line])
+def test_shift_parser_reports_invalid_attempts_without_valid_range(line: str) -> None:
+    result = ShiftParser.parse_submission(make_user(), [line])
 
-
-@pytest.mark.parametrize("line", ["20:00", "20點前", "公告"])
-def test_shift_parser_does_not_flag_general_text_as_invalid_attempt(
-    line: str,
-) -> None:
-    assert not ShiftParser.looks_like_invalid_attempt([line])
+    assert result.shift is None
+    assert result.invalid_attempts == [line]
 
 
 def test_shift_google_sheet_compatible_attributes_and_items() -> None:
@@ -228,7 +225,7 @@ def test_shift_google_sheet_compatible_attributes_and_items() -> None:
         username="alice",
         display_name="Alice",
         original_message="0-2, 29-30",
-        shifts={0, 1, 29},
+        slots={0, 1, 29},
     )
 
     assert getattr(shift, "0-1") == 1
@@ -245,7 +242,7 @@ def test_shift_contains_requires_exact_int_slots() -> None:
         username="alice",
         display_name="Alice",
         original_message="1-2",
-        shifts={1},
+        slots={1},
     )
 
     assert 1 in shift
