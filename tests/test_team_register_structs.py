@@ -278,6 +278,177 @@ def test_summary_generates_dynamic_team_columns_from_team_dataframes() -> None:
     assert list(summary.to_frame().columns)[-1] == "original_message"
 
 
+def test_summary_standardizes_stale_wider_header_after_team_count_shrinks() -> None:
+    extended_columns, extended_dtypes = (
+        SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+            ["Main Team", "Encore Team", "Backup Team"]
+        )
+    )
+    stale_frame = pd.DataFrame(
+        [
+            [
+                "alice",
+                "Alice",
+                "",
+                268,
+                33.4,
+                248,
+                35.3,
+                224,
+                30.0,
+                216,
+                25.0,
+                "150/740/33.4 main",
+            ]
+        ],
+        columns=[
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "Backup Team ISV",
+            "Backup Team Power",
+            "Team 4 ISV",
+            "Team 4 Power",
+            "original_message",
+        ],
+    )
+
+    summary, extra = SummaryWorksheetContent.standardize_dataframe(
+        stale_frame,
+        extended_columns=extended_columns,
+        extended_dtypes=extended_dtypes,
+    )
+
+    assert extra.empty
+    assert list(summary.reset_index().columns) == [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Encore Team ISV",
+        "Encore Team Power",
+        "Backup Team ISV",
+        "Backup Team Power",
+        "original_message",
+    ]
+    assert summary.loc["alice", "original_message"] == "150/740/33.4 main"
+
+
+def test_summary_standardizes_stale_wider_legacy_header_positionally() -> None:
+    extended_columns, extended_dtypes = (
+        SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+            ["Main Team", "Encore Team", "Backup Team"]
+        )
+    )
+    stale_frame = pd.DataFrame(
+        [
+            [
+                "alice",
+                "Alice",
+                "",
+                268,
+                33.4,
+                248,
+                35.3,
+                224,
+                30.0,
+                216,
+                25.0,
+                "150/740/33.4 main",
+            ]
+        ],
+        columns=[
+            "username",
+            "display_name",
+            "encore_roles",
+            "Old Main ISV",
+            "Old Main Power",
+            "Old Encore ISV",
+            "Old Encore Power",
+            "Old Backup ISV",
+            "Old Backup Power",
+            "Old Team 4 ISV",
+            "Old Team 4 Power",
+            "original_message",
+        ],
+    )
+
+    summary, extra = SummaryWorksheetContent.standardize_dataframe(
+        stale_frame,
+        extended_columns=extended_columns,
+        extended_dtypes=extended_dtypes,
+    )
+
+    assert extra.empty
+    assert list(summary.reset_index().columns) == [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Encore Team ISV",
+        "Encore Team Power",
+        "Backup Team ISV",
+        "Backup Team Power",
+        "original_message",
+    ]
+    assert summary.loc["alice", "Main Team ISV"] == 268
+    assert summary.loc["alice", "Main Team Power"] == 33.4
+    assert summary.loc["alice", "original_message"] == "150/740/33.4 main"
+
+
+def test_summary_standardizes_same_width_legacy_header_positionally() -> None:
+    extended_columns, extended_dtypes = (
+        SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+            ["Main Team", "Encore Team", "Backup Team"]
+        )
+    )
+    legacy_frame = pd.DataFrame(
+        [
+            [
+                "alice",
+                "Alice",
+                "",
+                268,
+                33.4,
+                248,
+                35.3,
+                224,
+                30.0,
+                "150/740/33.4 main",
+            ]
+        ],
+        columns=[
+            "username",
+            "display_name",
+            "encore_roles",
+            "Old Main ISV",
+            "Old Main Power",
+            "Old Encore ISV",
+            "Old Encore Power",
+            "Old Backup ISV",
+            "Old Backup Power",
+            "original_message",
+        ],
+    )
+
+    summary, extra = SummaryWorksheetContent.standardize_dataframe(
+        legacy_frame,
+        extended_columns=extended_columns,
+        extended_dtypes=extended_dtypes,
+    )
+
+    assert extra.empty
+    assert summary.loc["alice", "Main Team ISV"] == 268
+    assert summary.loc["alice", "Main Team Power"] == 33.4
+    assert summary.loc["alice", "original_message"] == "150/740/33.4 main"
+
+
 def test_summary_generation_handles_no_team_dataframes() -> None:
     summary = SummaryWorksheetContent.generate_from_team_dataframes({})
 
@@ -287,4 +458,5 @@ def test_summary_generation_handles_no_team_dataframes() -> None:
         "username",
         "display_name",
         "encore_roles",
+        "original_message",
     ]

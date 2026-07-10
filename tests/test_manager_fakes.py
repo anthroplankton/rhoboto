@@ -18,7 +18,14 @@ from utils.shift_register_structs import (
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 from utils.team_register_manager import TeamRegisterManager
-from utils.team_register_structs import TeamParser
+from utils.team_register_structs import (
+    Summary,
+    SummaryWorksheetMetadata,
+    TeamParser,
+    TeamRegisterGoogleSheetsMetadata,
+    TeamWorksheetContent,
+    TeamWorksheetMetadata,
+)
 
 
 def make_feature_channel(feature_name: str) -> SimpleNamespace:
@@ -218,6 +225,42 @@ async def test_manager_skips_missing_worksheets_without_updates() -> None:
     await shift_manager.upsert_or_delete_user_shift(make_user(), None, metadata)
 
     assert isinstance(metadata.sheet_url, str)
+
+
+@pytest.mark.asyncio
+async def test_team_summary_refresh_uses_title_for_each_existing_sheet() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    manager._sheet_config = SimpleNamespace(encore_role_ids=[])  # noqa: SLF001
+    user = make_user()
+
+    main_content = TeamWorksheetContent()
+    backup_content = TeamWorksheetContent()
+    main_content.upsert(TeamParser.parse_line(user, "150/740/33.4 main"))
+    backup_content.upsert(TeamParser.parse_line(user, "130/600/30.0 backup"))
+
+    summary_worksheet = FakeWorksheet(title="Team Summary")
+    metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        "https://sheet.example",
+        [
+            TeamWorksheetMetadata(
+                1, "Main Team", FakeWorksheet(frame=main_content.main)
+            ),
+            TeamWorksheetMetadata(2, "Encore Team", None),
+            TeamWorksheetMetadata(
+                3,
+                "Backup Team",
+                FakeWorksheet(frame=backup_content.main),
+            ),
+            SummaryWorksheetMetadata(4, "Team Summary", summary_worksheet),
+        ],
+    )
+
+    await manager.refresh_summary_worksheet(metadata, {})
+
+    refreshed = summary_worksheet.updated_frames[-1]
+    assert Summary.isv_title("Backup Team") in refreshed.columns
+    assert Summary.isv_title("Encore Team") not in refreshed.columns
+    assert refreshed.loc[0, Summary.isv_title("Backup Team")] == 224
 
 
 def test_fake_worksheet_returns_copies() -> None:

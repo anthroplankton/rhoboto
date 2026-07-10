@@ -1,5 +1,5 @@
 {% if day_number %}
-Day {{ day_number }} | Shift Registration is open and processed automatically 🙇
+Day {{ day_number }} | Automated shift registration is now open 🙇
 {% else %}
-Shift registration is open and processed automatically 🙇
+Automated shift registration is now open 🙇
 {% endif %}

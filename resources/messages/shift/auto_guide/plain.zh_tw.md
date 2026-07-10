@@ -1,4 +1,4 @@
--# - **開始-結束**（JST、30 小時制）請送出想登記的時段。一則訊息可以包含多個時段。
+-# - **開始-結束**（JST，30 小時制）請依此將所有想登記的時段整理在一則訊息並傳送到這個頻道。每個時段旁也可以加上備註。
 -# - ‼️ 更新時，**請用新訊息送出所有想保留的時段**；先前登記會被覆蓋，只編輯舊訊息不會更新。
 -# - {{ bot }} 會自動登記。✅ ⇒ 結果會記錄到 [Google Sheets]({{ sheet_url }})，可供確認。⚠️ ⇒ 可能發生錯誤。
 
@@ -12,11 +12,11 @@
 -# ### 班表募集時段（JST）【{{ recruitment_time_range }}】
 {% endif %}
 {% if submission_deadline %}
--# - 募集截止：{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
+-# - 募集截止：　　{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
 {% endif %}
 {% if draft_shift_proposal %}
--# - 暫定班表：{{ draft_shift_proposal.day }}日（{{ draft_shift_proposal.weekday }}）{{ draft_shift_proposal.hour }}時
+-# - 暫定班表公布：{{ draft_shift_proposal.day }}日（{{ draft_shift_proposal.weekday }}）{{ draft_shift_proposal.hour }}時
 {% endif %}
 {% if final_shift_notice %}
--# - 確定班表：{{ final_shift_notice.day }}日（{{ final_shift_notice.weekday }}）{{ final_shift_notice.hour }}時
+-# - 確定班表公布：{{ final_shift_notice.day }}日（{{ final_shift_notice.weekday }}）{{ final_shift_notice.hour }}時
 {% endif %}

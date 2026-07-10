@@ -149,7 +149,7 @@ def test_render_message_template_does_not_autoescape_markdown(
         (
             "zh_tw",
             "## 🗓️ 第1天｜7月4日（六）班表登記公告",  # noqa: RUF001
-            "- 募集截止：20日（五）21時",  # noqa: RUF001
+            "- 募集截止：　　20日（五）21時",  # noqa: RUF001
         ),
         (
             "en",
@@ -192,6 +192,51 @@ def test_shift_timeline_templates_render_announcement_values(
     assert "注意事項" not in content
     assert "Draft shift proposal" not in content
     assert "{%" not in content
+
+
+@pytest.mark.parametrize(
+    ("locale", "weekday", "expected_event", "expected_milestone"),
+    [
+        ("ja", "土", "8月4日（土）", "08日（土）09時"),  # noqa: RUF001
+        ("zh_tw", "六", "8月4日（六）", "08日（六）09時"),  # noqa: RUF001
+        ("en", "Sat", "Aug 4 (Sat)", "08 (Sat) 09:00"),
+    ],
+)
+@pytest.mark.parametrize(
+    "template_key",
+    ["shift.timeline", "shift.auto_guide.description", "shift.auto_guide.plain"],
+)
+def test_shift_templates_pad_only_milestone_day_and_hour(
+    template_key: str,
+    locale: str,
+    weekday: str,
+    expected_event: str,
+    expected_milestone: str,
+) -> None:
+    content = render_message_template(
+        template_key,
+        locale,
+        bot="@Rhoboto",
+        sheet_url="https://docs.google.com/spreadsheets/d/example#gid=123",
+        day_number=1,
+        event_date=SimpleNamespace(
+            month=8,
+            month_name="Aug",
+            day=4,
+            weekday=weekday,
+        ),
+        recruitment_time_range="4-28",
+        submission_deadline=SimpleNamespace(
+            day="08",
+            weekday=weekday,
+            hour="09",
+        ),
+        draft_shift_proposal=None,
+        final_shift_notice=None,
+    )
+
+    assert expected_event in content
+    assert expected_milestone in content
 
 
 @pytest.mark.parametrize("key", ["shift.guide", "team.guide"])
@@ -259,26 +304,26 @@ def test_auto_guide_runtime_templates_render(
         (
             "ja",
             (
-                "成功すると ✅ を付けて結果を "
+                "メッセージに ✅ が付けば、結果は "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
-                "に記録します。⚠️ が付いた場合は、登録が正常に完了していない"
+                "に記録され、確認できます。⚠️ が付いた場合は、登録が正常に完了していない"
                 "可能性があります。"
             ),
         ),
         (
             "zh_tw",
             (
-                "成功時會加上 ✅，並將結果記錄在 "  # noqa: RUF001
+                "若訊息上出現 ✅，代表結果已記錄到 "  # noqa: RUF001
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example)"
-                "，提供查看與確認。若訊息上出現 ⚠️，代表登記可能沒有正常完成。"  # noqa: RUF001
+                "，可供查看與確認。若出現 ⚠️，代表登記可能未正常完成。"  # noqa: RUF001
             ),
         ),
         (
             "en",
             (
-                "A ✅ means the result was recorded in "
+                "If the message receives ✅, the result has been recorded in "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
-                "for you to view and confirm. If ⚠️ appears on your message, "
+                "for you to view and confirm. If it receives ⚠️, "
                 "the registration may not have completed successfully."
             ),
         ),

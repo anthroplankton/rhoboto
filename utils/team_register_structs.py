@@ -579,6 +579,38 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
         return columns, dict.fromkeys(columns, "object")
 
     @classmethod
+    @override
+    def standardize_dataframe(
+        cls,
+        df: pd.DataFrame,
+        *,
+        extended_columns: list[str] | None = None,
+        extended_dtypes: dict[str, str] | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        columns, _ = cls._merge_columns_dtypes(
+            cls.COLUMNS, cls.DTYPES, extended_columns, extended_dtypes
+        )
+        if Summary.original_message_title() in df.columns:
+            message_column_position = df.columns.get_loc(
+                Summary.original_message_title()
+            )
+            if isinstance(message_column_position, int) and (
+                message_column_position >= len(columns)
+            ):
+                df = pd.concat(
+                    [
+                        df.iloc[:, : len(columns) - 1],
+                        df[[Summary.original_message_title()]],
+                    ],
+                    axis=1,
+                )
+        return super().standardize_dataframe(
+            df,
+            extended_columns=extended_columns,
+            extended_dtypes=extended_dtypes,
+        )
+
+    @classmethod
     def generate_from_team_dataframes(
         cls, team_df_by_titles: dict[str, pd.DataFrame]
     ) -> Self:
@@ -595,9 +627,8 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
         """
         if not team_df_by_titles:
             return cls(
-                pd.DataFrame(columns=cls.COLUMNS)
-                .astype(cls.DTYPES)
-                .set_index(cls.INDEX_NAME)
+                extended_columns=[Summary.original_message_title()],
+                extended_dtypes={Summary.original_message_title(): "object"},
             )
 
         all_users = pd.concat(

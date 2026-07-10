@@ -3033,9 +3033,9 @@ def test_shift_auto_guide_template_values_include_timeline_values() -> None:
     assert values["sheet_url"].endswith("#gid=444")
     assert values["recruitment_time_range"] == "4-28"
     assert values["event_date"].weekday == "Wed"
-    assert values["submission_deadline"].hour == 21
-    assert values["draft_shift_proposal"].hour == 20
-    assert values["final_shift_notice"].hour == 18
+    assert values["submission_deadline"].hour == "21"
+    assert values["draft_shift_proposal"].hour == "20"
+    assert values["final_shift_notice"].hour == "18"
 
 
 @pytest.mark.asyncio
@@ -3867,7 +3867,8 @@ async def test_delete_callback_sends_confirmation_without_touching_storage(
     assert len(interaction.response.messages) == 1
     content, kwargs = interaction.response.messages[0]
     assert content == (
-        "‼️ Are you sure you want to delete your data for Team Register in this channel?"
+        "‼️ Are you sure you want to delete your data for Team Register in this "
+        "channel? This will only delete the data from Google Sheets."
     )
     assert kwargs["ephemeral"] is True
     assert kwargs["view"] is created_views[0]
@@ -3979,7 +3980,11 @@ async def test_delete_after_confirmation_deletes_with_configured_context(
     assert user_info.username == "alice"
     assert user_info.display_name == "Alice"
     assert metadata is manager.metadata
-    assert result == "✅ Your data for Team Register has been deleted successfully."
+    assert result == (
+        "✅ Your data for Team Register has been deleted from Google Sheets. If "
+        "you also want to remove your original registration message from Discord, "
+        "you'll need to delete it yourself."
+    )
     assert interaction.followup.messages == []
 
 
@@ -4203,7 +4208,11 @@ async def test_delete_callback_uses_feature_catalog_in_zh_copy(
         source,
     )
 
-    assert result == "✅ 已成功刪除您的隊伍編成登記資料。"
+    assert result == (
+        "✅ 已成功刪除您在 Google Sheets 中的隊伍編成登記資料。"
+        "若也想移除 Discord 上的原始登記訊息，"  # noqa: RUF001
+        "請記得自行刪除。"
+    )
     assert interaction.followup.messages == []
 
 
@@ -4236,7 +4245,11 @@ async def test_delete_callback_uses_feature_catalog_in_ja_copy(
         source,
     )
 
-    assert result == "✅ 編成登録の入力データを正常に削除しました。"
+    assert result == (
+        "✅ Google Sheets 上の編成登録の入力データを正常に削除しました。"
+        "Discord 上の元の登録メッセージも削除したい場合は、"
+        "ご自身で削除してください。"
+    )
     assert interaction.followup.messages == []
 
 
