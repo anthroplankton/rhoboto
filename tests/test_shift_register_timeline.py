@@ -35,6 +35,25 @@ def test_parse_shift_timeline_accepts_full_values_as_jst_and_stores_utc() -> Non
     assert result.final_shift_notice_at == datetime(2026, 8, 14, 9, tzinfo=UTC)
 
 
+@pytest.mark.parametrize("separator", ["-", "/"])
+def test_parse_shift_timeline_accepts_unpadded_full_dates(separator: str) -> None:
+    result = parse_shift_timeline_input(
+        ShiftTimelineInput(
+            day_number="",
+            event_date=f"2026{separator}8{separator}2",
+            submission_deadline_at=f"2026{separator}8{separator}2 9",
+            draft_shift_proposal_at=f"2026{separator}8{separator}3 10",
+            final_shift_notice_at=f"2026{separator}8{separator}4 11",
+        ),
+        existing_event_date=None,
+    )
+
+    assert result.event_date == date(2026, 8, 2)
+    assert result.submission_deadline_at == datetime(2026, 8, 2, 0, tzinfo=UTC)
+    assert result.draft_shift_proposal_at == datetime(2026, 8, 3, 1, tzinfo=UTC)
+    assert result.final_shift_notice_at == datetime(2026, 8, 4, 2, tzinfo=UTC)
+
+
 def test_parse_shift_timeline_infers_shorthand_year_before_event_date() -> None:
     result = parse_shift_timeline_input(
         ShiftTimelineInput(

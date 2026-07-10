@@ -71,11 +71,11 @@ WEEKDAYS: dict[str, tuple[str, ...]] = {
 
 
 FULL_DATE_PATTERN = re.compile(
-    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{2})(?P=sep)(?P<day>\d{2})$"
+    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})$"
 )
 FULL_DATETIME_PATTERN = re.compile(
-    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{2})(?P=sep)"
-    r"(?P<day>\d{2})\s+(?P<hour>\d{1,2})$"
+    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)"
+    r"(?P<day>\d{1,2})\s+(?P<hour>\d{1,2})$"
 )
 SHORT_DATETIME_PATTERN = re.compile(
     r"^(?P<month>\d{1,2})/(?P<day>\d{1,2})\s+(?P<hour>\d{1,2})$"
@@ -146,7 +146,7 @@ def _parse_event_date(raw_value: str, errors: list[str]) -> date | None:
         return None
     match = FULL_DATE_PATTERN.fullmatch(value)
     if match is None:
-        errors.append("Event Date must use YYYY-MM-DD or YYYY/MM/DD.")
+        errors.append("Event Date must use YYYY-M-D or YYYY/M/D.")
         return None
     try:
         return date(
@@ -177,7 +177,7 @@ def _parse_milestone(
             errors.append(f"{label} shorthand M/D HH requires Event Date.")
             return None
         return _datetime_from_short_match(label, short_match, event_date, errors)
-    errors.append(f"{label} must use YYYY-MM-DD HH, YYYY/MM/DD HH, or M/D HH.")
+    errors.append(f"{label} must use YYYY-M-D HH, YYYY/M/D HH, or M/D HH.")
     return None
 
 

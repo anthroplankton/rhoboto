@@ -455,28 +455,28 @@ class ShiftTimelineModal(Modal):
         )
         self.event_date: TextInput = TextInput(
             label="Event Date",
-            placeholder="YYYY-MM-DD or YYYY/MM/DD. Leave blank to clear.",
+            placeholder="YYYY-M-D or YYYY/M/D. Leave blank to clear.",
             default=event_date,
             required=False,
             style=TextStyle.short,
         )
         self.submission_deadline_at: TextInput = TextInput(
             label="Submission Deadline (JST)",
-            placeholder="e.g. 2026-08-12 21 or 8/12 21. Leave blank to clear.",
+            placeholder="YYYY-M-D HH or M/D HH. Leave blank to clear.",
             default=submission_deadline_at,
             required=False,
             style=TextStyle.short,
         )
         self.draft_shift_proposal_at: TextInput = TextInput(
             label="Draft Shift Proposal (JST)",
-            placeholder="e.g. 2026-08-13 20 or 8/13 20. Leave blank to clear.",
+            placeholder="YYYY-M-D HH or M/D HH. Leave blank to clear.",
             default=draft_shift_proposal_at,
             required=False,
             style=TextStyle.short,
         )
         self.final_shift_notice_at: TextInput = TextInput(
             label="Final Shift Notice (JST)",
-            placeholder="e.g. 2026-08-14 18 or 8/14 18. Leave blank to clear.",
+            placeholder="YYYY-M-D HH or M/D HH. Leave blank to clear.",
             default=final_shift_notice_at,
             required=False,
             style=TextStyle.short,
