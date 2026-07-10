@@ -15,11 +15,11 @@
 ### 募集時段【{{ recruitment_time_range }}】
 {% endif %}
 {% if submission_deadline %}
-- 募集截止：{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
+- 募集截止：　　{{ submission_deadline.day }}日（{{ submission_deadline.weekday }}）{{ submission_deadline.hour }}時
 {% endif %}
 {% if draft_shift_proposal %}
-- 暫定班表：{{ draft_shift_proposal.day }}日（{{ draft_shift_proposal.weekday }}）{{ draft_shift_proposal.hour }}時
+- 暫定班表公布：{{ draft_shift_proposal.day }}日（{{ draft_shift_proposal.weekday }}）{{ draft_shift_proposal.hour }}時
 {% endif %}
 {% if final_shift_notice %}
-- 確定班表：{{ final_shift_notice.day }}日（{{ final_shift_notice.weekday }}）{{ final_shift_notice.hour }}時
+- 確定班表公布：{{ final_shift_notice.day }}日（{{ final_shift_notice.weekday }}）{{ final_shift_notice.hour }}時
 {% endif %}

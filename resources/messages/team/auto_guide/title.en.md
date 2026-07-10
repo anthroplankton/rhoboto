@@ -1,1 +1,1 @@
-Team registration is open and processed automatically 🙇
+Automated team registration is now open 🙇
