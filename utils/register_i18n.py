@@ -29,19 +29,36 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
         "zh_tw": "⚠️ 此頻道尚未設定{feature_label}。",
     },
     "delete_success": {
-        "en": "✅ Your data for {feature_label} has been deleted successfully.",
-        "ja": "✅ {feature_label}の入力データを正常に削除しました。",
-        "zh_tw": "✅ 已成功刪除您的{feature_label}資料。",
+        "en": (
+            "✅ Your data for {feature_label} has been deleted from Google Sheets. "
+            "If you also want to remove your original registration message from "
+            "Discord, you'll need to delete it yourself."
+        ),
+        "ja": (
+            "✅ Google Sheets 上の{feature_label}の入力データを正常に削除しました。"
+            "Discord 上の元の登録メッセージも削除したい場合は、"
+            "ご自身で削除してください。"
+        ),
+        "zh_tw": (
+            "✅ 已成功刪除您在 Google Sheets 中的{feature_label}資料。"
+            "若也想移除 Discord 上的原始登記訊息，"  # noqa: RUF001
+            "請記得自行刪除。"
+        ),
     },
     "delete_confirm_prompt": {
         "en": (
             "‼️ Are you sure you want to delete your data for "
-            "{feature_label} in this channel?"
+            "{feature_label} in this channel? This will only delete the data from "
+            "Google Sheets."
         ),
         "ja": (
             "‼️ このチャンネルの{feature_label}の入力データを削除してもよろしいですか？"  # noqa: RUF001
+            "削除されるのは Google Sheets 上のデータのみです。"
         ),
-        "zh_tw": "‼️ 確定要刪除您在此頻道的{feature_label}資料嗎？",  # noqa: RUF001
+        "zh_tw": (
+            "‼️ 確定要刪除您在此頻道的{feature_label}資料嗎？"  # noqa: RUF001
+            "這只會刪除 Google Sheets 中的資料。"
+        ),
     },
     "delete_in_progress": {
         "en": "{processing_emoji} Deleting your data...",
