@@ -58,9 +58,9 @@ class ShiftTimelineEventDateParts:
 
 @dataclass(frozen=True)
 class ShiftTimelineMilestoneParts:
-    day: int
+    day: str
     weekday: str
-    hour: int
+    hour: str
 
 
 WEEKDAYS: dict[str, tuple[str, ...]] = {
@@ -270,9 +270,9 @@ def _build_milestone_parts(
         return None
     local_value = as_jst(value)
     return ShiftTimelineMilestoneParts(
-        day=local_value.day,
+        day=f"{local_value.day:02d}",
         weekday=_weekday_token(language, local_value.date().weekday()),
-        hour=local_value.hour,
+        hour=f"{local_value.hour:02d}",
     )
 
 

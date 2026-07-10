@@ -194,6 +194,51 @@ def test_shift_timeline_templates_render_announcement_values(
     assert "{%" not in content
 
 
+@pytest.mark.parametrize(
+    ("locale", "weekday", "expected_event", "expected_milestone"),
+    [
+        ("ja", "土", "8月4日（土）", "08日（土）09時"),  # noqa: RUF001
+        ("zh_tw", "六", "8月4日（六）", "08日（六）09時"),  # noqa: RUF001
+        ("en", "Sat", "Aug 4 (Sat)", "08 (Sat) 09:00"),
+    ],
+)
+@pytest.mark.parametrize(
+    "template_key",
+    ["shift.timeline", "shift.auto_guide.description", "shift.auto_guide.plain"],
+)
+def test_shift_templates_pad_only_milestone_day_and_hour(
+    template_key: str,
+    locale: str,
+    weekday: str,
+    expected_event: str,
+    expected_milestone: str,
+) -> None:
+    content = render_message_template(
+        template_key,
+        locale,
+        bot="@Rhoboto",
+        sheet_url="https://docs.google.com/spreadsheets/d/example#gid=123",
+        day_number=1,
+        event_date=SimpleNamespace(
+            month=8,
+            month_name="Aug",
+            day=4,
+            weekday=weekday,
+        ),
+        recruitment_time_range="4-28",
+        submission_deadline=SimpleNamespace(
+            day="08",
+            weekday=weekday,
+            hour="09",
+        ),
+        draft_shift_proposal=None,
+        final_shift_notice=None,
+    )
+
+    assert expected_event in content
+    assert expected_milestone in content
+
+
 @pytest.mark.parametrize("key", ["shift.guide", "team.guide"])
 @pytest.mark.parametrize("locale", ["ja", "zh_tw", "en"])
 def test_guide_templates_render_jinja_values(key: str, locale: str) -> None:

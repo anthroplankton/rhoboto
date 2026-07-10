@@ -215,15 +215,15 @@ def test_build_shift_timeline_template_values_formats_ja_structured_values() -> 
     assert values["event_date"].month == 8
     assert values["event_date"].day == 12
     assert values["event_date"].weekday == "水"
-    assert values["submission_deadline"].day == 12
+    assert values["submission_deadline"].day == "12"
     assert values["submission_deadline"].weekday == "水"
-    assert values["submission_deadline"].hour == 21
-    assert values["draft_shift_proposal"].day == 13
+    assert values["submission_deadline"].hour == "21"
+    assert values["draft_shift_proposal"].day == "13"
     assert values["draft_shift_proposal"].weekday == "木"
-    assert values["draft_shift_proposal"].hour == 20
-    assert values["final_shift_notice"].day == 14
+    assert values["draft_shift_proposal"].hour == "20"
+    assert values["final_shift_notice"].day == "14"
     assert values["final_shift_notice"].weekday == "金"
-    assert values["final_shift_notice"].hour == 18
+    assert values["final_shift_notice"].hour == "18"
     assert "title" not in values
     assert "deadline_processing_note" not in values
 
@@ -242,9 +242,9 @@ def test_build_shift_timeline_template_values_formats_zh_tw_structured_values() 
     assert values["event_date"].month == 7
     assert values["event_date"].day == 4
     assert values["event_date"].weekday == "六"
-    assert values["submission_deadline"].day == 20
+    assert values["submission_deadline"].day == "20"
     assert values["submission_deadline"].weekday == "一"
-    assert values["submission_deadline"].hour == 21
+    assert values["submission_deadline"].hour == "21"
     assert values["draft_shift_proposal"] is None
     assert values["final_shift_notice"] is None
 
@@ -266,28 +266,29 @@ def test_build_shift_timeline_template_values_formats_en_structured_values() -> 
     assert values["event_date"].weekday == "Wed"
     assert values["submission_deadline"] is None
     assert values["draft_shift_proposal"] is None
-    assert values["final_shift_notice"].day == 14
+    assert values["final_shift_notice"].day == "14"
     assert values["final_shift_notice"].weekday == "Fri"
-    assert values["final_shift_notice"].hour == 18
+    assert values["final_shift_notice"].hour == "18"
 
 
-def test_build_shift_timeline_template_values_uses_jst_date_for_milestone_weekday() -> (
+def test_build_shift_timeline_template_values_pads_only_milestone_day_and_hour() -> (
     None
 ):
     values = build_shift_timeline_template_values(
         "ja",
         day_number=None,
-        event_date=None,
+        event_date=date(2026, 8, 4),
         recruitment_time_range="4-28",
-        submission_deadline_at=datetime(2026, 8, 12, 16, tzinfo=UTC),
+        submission_deadline_at=datetime(2026, 8, 7, 16, tzinfo=UTC),
         draft_shift_proposal_at=None,
         final_shift_notice_at=None,
     )
 
-    assert values["event_date"] is None
-    assert values["submission_deadline"].day == 13
-    assert values["submission_deadline"].weekday == "木"
-    assert values["submission_deadline"].hour == 1
+    assert values["event_date"].month == 8
+    assert values["event_date"].day == 4
+    assert values["submission_deadline"].day == "08"
+    assert values["submission_deadline"].weekday == "土"
+    assert values["submission_deadline"].hour == "01"
 
 
 def test_shift_runtime_templates_trim_jinja_block_lines() -> None:
@@ -386,10 +387,10 @@ async def test_render_shift_timeline_messages_uses_language_values(
     assert rendered[0].content == "shift.timeline:ja\nbody\n"
     assert captured["ja"]["event_date"].weekday == "水"
     assert captured["ja"]["submission_deadline"].weekday == "水"
-    assert captured["ja"]["submission_deadline"].hour == 21
+    assert captured["ja"]["submission_deadline"].hour == "21"
     assert captured["en"]["event_date"].weekday == "Wed"
     assert captured["en"]["event_date"].month_name == "Aug"
     assert captured["en"]["submission_deadline"].weekday == "Wed"
-    assert captured["en"]["submission_deadline"].hour == 21
+    assert captured["en"]["submission_deadline"].hour == "21"
     assert captured["en"]["draft_shift_proposal"] is None
     assert "\n\n\n" not in rendered[1].content

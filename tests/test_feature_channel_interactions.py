@@ -3033,9 +3033,9 @@ def test_shift_auto_guide_template_values_include_timeline_values() -> None:
     assert values["sheet_url"].endswith("#gid=444")
     assert values["recruitment_time_range"] == "4-28"
     assert values["event_date"].weekday == "Wed"
-    assert values["submission_deadline"].hour == 21
-    assert values["draft_shift_proposal"].hour == 20
-    assert values["final_shift_notice"].hour == 18
+    assert values["submission_deadline"].hour == "21"
+    assert values["draft_shift_proposal"].hour == "20"
+    assert values["final_shift_notice"].hour == "18"
 
 
 @pytest.mark.asyncio
