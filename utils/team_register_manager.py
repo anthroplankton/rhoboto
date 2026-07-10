@@ -310,12 +310,11 @@ class TeamRegisterManager(
             )
             return None
 
+        worksheet_sources = [
+            ws for ws in metadata.team_worksheets if ws.worksheet is not None
+        ]
         team_dfs = await asyncio.gather(
-            *(
-                ws.worksheet.to_frame()
-                for ws in metadata.team_worksheets
-                if ws.worksheet is not None
-            )
+            *(ws.worksheet.to_frame() for ws in worksheet_sources)
         )
 
         team_dfs = [
@@ -327,7 +326,7 @@ class TeamRegisterManager(
         new = SummaryWorksheetContent.generate_from_team_dataframes(
             team_df_by_titles={
                 ws.title: df
-                for ws, df in zip(metadata.team_worksheets, team_dfs, strict=False)
+                for ws, df in zip(worksheet_sources, team_dfs, strict=True)
                 if ws.title is not None
             }
         )
