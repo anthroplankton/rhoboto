@@ -7,16 +7,19 @@ from utils.structs_base import validate_anchor_cell
 if TYPE_CHECKING:
     from datetime import date, datetime
 
+    from utils.shift_scheduler import DraftSchedule
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
+    DraftWorksheetContent,
     EntryWorksheetContent,
     RecruitmentTimeRanges,
     Shift,
     ShiftRegisterGoogleSheetsMetadata,
 )
+from utils.shift_scheduler import ShiftScheduler
 from utils.storage_errors import StorageError, StorageErrorKind
 
 
@@ -179,3 +182,61 @@ class ShiftRegisterManager(
             worksheet.title,
             updated_shift_df,
         )
+
+    async def generate_draft(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        runner: str | None = None,
+    ) -> DraftSchedule:
+        """Build the draft schedule from entries and overwrite the draft worksheet.
+
+        Reads availability from the entry worksheet, assigns people into the
+        runner/encore/main/standby lanes for each recruitment hour, and writes the
+        result to the draft worksheet, replacing whatever was there.
+
+        Args:
+            metadata (ShiftRegisterGoogleSheetsMetadata): Resolved worksheets.
+            runner (str | None): Runner nickname pinned to every hour.
+
+        Returns:
+            DraftSchedule: The schedule that was written, for reporting.
+
+        Raises:
+            StorageError: If a required worksheet is missing or the entry
+                worksheet header is malformed.
+        """
+        entry_worksheet = metadata.entry_worksheets.worksheet
+        draft_worksheet = metadata.draft_worksheet.worksheet
+        if entry_worksheet is None or draft_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+
+        df = await entry_worksheet.to_frame()
+        try:
+            EntryWorksheetContent.validate_core_header(df)
+        except ValueError as exc:
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
+
+        shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(df)
+        content = EntryWorksheetContent(shift_df, plain_df)
+        shifts = content.to_shifts()
+
+        shift_register_config = await self.get_sheet_config()
+        recruitment_ranges = RecruitmentTimeRanges.from_json(
+            shift_register_config.recruitment_time_ranges
+        )
+        hours = sorted(recruitment_ranges.ranges.slots)
+
+        schedule = ShiftScheduler.assign(shifts, hours, runner=runner)
+        draft_df = DraftWorksheetContent.from_schedule(schedule)
+        await draft_worksheet.update_from_dataframe(draft_df)
+
+        self.logger.info(
+            "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
+            draft_worksheet.title,
+            len(schedule.hours),
+            schedule.total_shortage,
+        )
+        return schedule

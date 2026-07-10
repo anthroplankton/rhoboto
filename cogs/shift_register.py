@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
     from models.shift_register import ShiftRegisterConfig
+    from utils.shift_scheduler import DraftSchedule
     from utils.structs_base import UserInfo
 
 
@@ -322,6 +323,86 @@ class ShiftRegister(
     )
     async def announce_guide(self, interaction: Interaction) -> None:
         await self.send_guide_message(interaction)
+
+    @app_commands.command(
+        name="generate_draft",
+        description=(
+            "Build the draft shift schedule from entries into the draft worksheet."
+        ),
+    )
+    @app_commands.describe(
+        runner="Nickname pinned to the runner (ランナー) lane for every hour.",
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
+    )
+    async def generate_draft(
+        self,
+        interaction: Interaction,
+        runner: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        source = require_guild_channel_source(
+            interaction,
+            action="generate shift draft schedule",
+        )
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+
+            async with self.sheet_write_lock(source.channel.id):
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                context.manager.log_missing_worksheet_warnings(metadata)
+                metadata = (
+                    await context.manager.ensure_worksheets_and_upsert_sheet_config(
+                        metadata
+                    )
+                )
+                schedule = await context.manager.generate_draft(metadata, runner=runner)
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_generate_draft",
+            )
+            return
+
+        await interaction.followup.send(
+            self._format_draft_report(schedule),
+            ephemeral=True,
+        )
+
+    @staticmethod
+    def _format_draft_report(schedule: DraftSchedule) -> str:
+        lines = [
+            "## 班表草稿已產生",
+            f"- Runner（ランナー）：{schedule.runner or '—'}",  # noqa: RUF001
+            (
+                f"- 已寫入招募時段共 {len(schedule.hours)} 個小時"
+                "（已覆蓋 Shift Draft 既有內容）。"  # noqa: RUF001
+            ),
+        ]
+        shortage_labels = schedule.shortage_labels()
+        if shortage_labels:
+            lines.append(f"- ⚠️ 缺人位置：{'　'.join(shortage_labels)}")  # noqa: RUF001
+        else:
+            lines.append("- 每個小時的位置都已填滿。")
+        unassigned_labels = schedule.unassigned_labels()
+        if unassigned_labels:
+            lines.append(
+                f"- 未排入（人數多於座位）：{'　'.join(unassigned_labels)}"  # noqa: RUF001
+            )
+        return "\n".join(lines)
 
 
 async def setup(bot: Rhoboto) -> None:

@@ -7,6 +7,9 @@ import unicodedata
 from dataclasses import InitVar, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self, override
 
+import pandas as pd
+
+from utils.shift_scheduler import ENCORE_LANE, HASHIRI_LANES, STANDBY_LANE
 from utils.structs_base import (
     ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
@@ -19,6 +22,8 @@ from utils.structs_base import (
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
+
+    from utils.shift_scheduler import DraftSchedule
 
 
 class HourRangeFormatError(ValueError):
@@ -627,3 +632,79 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
                 f"{expected!r}, got {actual_core!r}."
             )
             raise ValueError(msg)
+
+    def to_shifts(self) -> list[Shift]:
+        """Rebuild Shift entries from the standardized worksheet rows.
+
+        Returns:
+            list[Shift]: One Shift per registered user, carrying the hour slots
+            they marked as available.
+        """
+        shifts: list[Shift] = []
+        for username, row in self.main.iterrows():
+            slots = {
+                index
+                for index, label in enumerate(ShiftParser.HOUR_LABELS)
+                if int(row[label]) == 1
+            }
+            shifts.append(
+                Shift(
+                    username=str(username),
+                    display_name=str(row["display_name"]),
+                    original_message=str(row["original_message"]),
+                    slots=slots,
+                )
+            )
+        return shifts
+
+
+class DraftWorksheetContent:
+    """Builds the Shift Draft worksheet grid from a DraftSchedule.
+
+    The draft worksheet is regenerated in full on each run, so it only renders
+    values; unlike the entry worksheet it is never read back or header-validated.
+    """
+
+    JST_COLUMN: ClassVar[str] = "JST"
+    RUNNER_COLUMN: ClassVar[str] = "ランナー"
+    ENCORE_COLUMN: ClassVar[str] = "アンコ"
+    HASHIRI_COLUMNS: ClassVar[tuple[str, str, str]] = ("本走①", "本走②", "本走③")
+    STANDBY_COLUMN: ClassVar[str] = "待機"
+
+    COLUMNS: ClassVar[list[str]] = [
+        JST_COLUMN,
+        RUNNER_COLUMN,
+        ENCORE_COLUMN,
+        *HASHIRI_COLUMNS,
+        STANDBY_COLUMN,
+    ]
+
+    LANE_COLUMNS: ClassVar[dict[str, str]] = {
+        ENCORE_LANE: ENCORE_COLUMN,
+        HASHIRI_LANES[0]: HASHIRI_COLUMNS[0],
+        HASHIRI_LANES[1]: HASHIRI_COLUMNS[1],
+        HASHIRI_LANES[2]: HASHIRI_COLUMNS[2],
+        STANDBY_LANE: STANDBY_COLUMN,
+    }
+
+    @classmethod
+    def from_schedule(cls, schedule: DraftSchedule) -> pd.DataFrame:
+        """Render the draft schedule into a worksheet-shaped DataFrame.
+
+        Args:
+            schedule (DraftSchedule): The assignments to render.
+
+        Returns:
+            pd.DataFrame: Columns match ``COLUMNS``; one row per recruitment hour.
+        """
+        runner = schedule.runner or ""
+        rows: list[dict[str, str]] = []
+        for assignment in schedule.assignments:
+            row = {
+                cls.JST_COLUMN: ShiftParser.HOUR_LABELS[assignment.hour],
+                cls.RUNNER_COLUMN: runner,
+            }
+            for lane, column in cls.LANE_COLUMNS.items():
+                row[column] = schedule.display_for(assignment, lane)
+            rows.append(row)
+        return pd.DataFrame(rows, columns=cls.COLUMNS)
