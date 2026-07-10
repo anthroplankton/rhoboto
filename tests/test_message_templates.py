@@ -149,7 +149,7 @@ def test_render_message_template_does_not_autoescape_markdown(
         (
             "zh_tw",
             "## 🗓️ 第1天｜7月4日（六）班表登記公告",  # noqa: RUF001
-            "- 募集截止：20日（五）21時",  # noqa: RUF001
+            "- 募集截止：　　20日（五）21時",  # noqa: RUF001
         ),
         (
             "en",
@@ -259,26 +259,26 @@ def test_auto_guide_runtime_templates_render(
         (
             "ja",
             (
-                "成功すると ✅ を付けて結果を "
+                "メッセージに ✅ が付けば、結果は "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
-                "に記録します。⚠️ が付いた場合は、登録が正常に完了していない"
+                "に記録され、確認できます。⚠️ が付いた場合は、登録が正常に完了していない"
                 "可能性があります。"
             ),
         ),
         (
             "zh_tw",
             (
-                "成功時會加上 ✅，並將結果記錄在 "  # noqa: RUF001
+                "若訊息上出現 ✅，代表結果已記錄到 "  # noqa: RUF001
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example)"
-                "，提供查看與確認。若訊息上出現 ⚠️，代表登記可能沒有正常完成。"  # noqa: RUF001
+                "，可供查看與確認。若出現 ⚠️，代表登記可能未正常完成。"  # noqa: RUF001
             ),
         ),
         (
             "en",
             (
-                "A ✅ means the result was recorded in "
+                "If the message receives ✅, the result has been recorded in "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
-                "for you to view and confirm. If ⚠️ appears on your message, "
+                "for you to view and confirm. If it receives ⚠️, "
                 "the registration may not have completed successfully."
             ),
         ),
