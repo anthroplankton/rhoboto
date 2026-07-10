@@ -279,6 +279,84 @@ async def test_shift_message_strict_mixed_rejects_with_confused(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("content", ["4-12-20", "4-12 4-12-20"])
+async def test_shift_message_malformed_range_rejects_before_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    content: str,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredDummyManager)
+    subject = make_subject("shift_register")
+
+    async def fail_if_processed(*_: object) -> None:
+        msg = "malformed Shift message reached processing"
+        raise AssertionError(msg)
+
+    subject._process_configured_message_submission = fail_if_processed
+    message = FakeMessage(content)
+
+    result = await message_upsert_result(subject, message)
+
+    assert result is None
+    assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
+
+
+@pytest.mark.asyncio
+async def test_shift_message_date_only_is_ignored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", DummyManager)
+    subject = make_subject("shift_register")
+    message = FakeMessage("2026-8-12")
+
+    result = await message_upsert_result(subject, message)
+
+    assert result is None
+    assert message.added_reactions == []
+
+
+@pytest.mark.asyncio
+async def test_shift_message_valid_range_with_date_reaches_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredDummyManager)
+    subject = make_subject("shift_register")
+    processed: list[object] = []
+
+    async def record_submission(
+        _message: object,
+        _context: object,
+        submission: object,
+        _user_info: object,
+    ) -> object:
+        processed.append(submission)
+        return submission
+
+    subject._process_configured_message_submission = record_submission
+    message = FakeMessage("4-12 2026-8-12")
+
+    result = await message_upsert_result(subject, message)
+
+    assert result is processed[0]
+    assert set(result) == set(range(4, 12))
+    assert message.added_reactions == []
+
+
+@pytest.mark.asyncio
 async def test_shift_message_invalid_missing_config_stays_silent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -29,6 +29,9 @@ def make_user(username: str = "alice", display_name: str = "Alice") -> UserInfo:
         ("4－12", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
         ("4～12", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
         ("４-１２", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
+        ("4-12、20-28", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),
+        ("4-12・20-28", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),
+        ("４－１２，２０－２８", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),  # noqa: RUF001
     ],
 )
 def test_hour_ranges_parse_valid_ranges(
@@ -176,9 +179,13 @@ def test_shift_parser_accepts_linear_0_30_ranges_and_notes() -> None:
     ("line", "expected_invalid"),
     [
         ("4-12 18:00-20:00", "18:00-20:00"),
+        ("4-12 18.00-20.00", "18.00-20.00"),
         ("4-12,30-31", "30-31"),
         ("4-12,28-4", "28-4"),
         ("4-12\n18-", "18-"),
+        ("4-12 4--12", "4--12"),
+        ("4-12 4-12-20", "4-12-20"),
+        ("4-12 99-100", "99-100"),
     ],
 )
 def test_shift_parser_reports_invalid_attempts_for_strict_mixed(
@@ -192,7 +199,10 @@ def test_shift_parser_reports_invalid_attempts_for_strict_mixed(
     assert set(result.shift) == set(range(4, 12))
 
 
-@pytest.mark.parametrize("line", ["公告", "20:00", "20點前"])
+@pytest.mark.parametrize(
+    "line",
+    ["公告", "20:00", "20點前", "2026-8-12", "18至20", "18 to 20", "18時から20時"],
+)
 def test_shift_parser_treats_ordinary_text_as_noop(line: str) -> None:
     result = ShiftParser.parse_submission(make_user(), [line])
 
@@ -209,8 +219,13 @@ def test_shift_parser_treats_ordinary_text_as_noop(line: str) -> None:
         "18點到",
         "到20點",
         "18時-20時",
+        "18.00-20.00",
         "18-",
         "-20",
+        "4--12",
+        "4-12-20",
+        "26-8-12",
+        "99-100",
     ],
 )
 def test_shift_parser_reports_invalid_attempts_without_valid_range(line: str) -> None:
@@ -218,6 +233,21 @@ def test_shift_parser_reports_invalid_attempts_without_valid_range(line: str) ->
 
     assert result.shift is None
     assert result.invalid_attempts == [line]
+
+
+def test_shift_parser_reports_invalid_attempts_in_source_order() -> None:
+    result = ShiftParser.parse_submission(make_user(), ["4--12 18:00-20:00"])
+
+    assert result.invalid_attempts == ["4--12", "18:00-20:00"]
+
+
+@pytest.mark.parametrize("line", ["文字.4-12", "4-12.備註"])
+def test_shift_parser_accepts_ranges_next_to_sentence_punctuation(line: str) -> None:
+    result = ShiftParser.parse_submission(make_user(), [line])
+
+    assert result.invalid_attempts == []
+    assert result.shift is not None
+    assert set(result.shift) == set(range(4, 12))
 
 
 def test_shift_google_sheet_compatible_attributes_and_items() -> None:

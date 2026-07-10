@@ -53,17 +53,26 @@ class HourRange:
 class HourRanges:
     RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         r"(?<![\d:/\-~點点時时])"
+        r"(?<!\d\.)"
         r"(?P<start>\d{1,2})\s*[-~]\s*"
         r"(?P<end>\d{1,2})"
+        r"(?!\.\d)"
         r"(?![\d:/\-~點点時时])"
     )
-    TIME_VALUE_PATTERN: ClassVar[str] = r"\d{1,2}(?:\s*:\s*\d{2}|\s*[點点時时])?"
+    TIME_VALUE_PATTERN: ClassVar[str] = r"\d{1,2}(?:\s*[.:]\s*\d{2}|\s*[點点時时])?"
     INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         rf"(?<![\d:/\-~])(?:"
         rf"{TIME_VALUE_PATTERN}\s*(?:[-~]|到)\s*"
         rf"(?:{TIME_VALUE_PATTERN})?"
         rf"|(?:[-~]|到)\s*{TIME_VALUE_PATTERN}"
         rf")(?![\d:/\-~])"
+    )
+    MALFORMED_RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"(?<![\d:/\-~])(?:"
+        r"\d{1,2}(?:\s*[-~]\s*){2,}\d{1,2}"
+        r"|\d{1,2}(?:\s*[-~]\s*\d{1,2}){2,}"
+        r"|(?:\d{3}\s*[-~]\s*\d{1,3}|\d{1,2}\s*[-~]\s*\d{3})"
+        r")(?![\d:/\-~])"
     )
 
     def __init__(self, ranges: list[HourRange]) -> None:
@@ -95,7 +104,14 @@ class HourRanges:
                 invalid_attempts.append(value)
 
         valid_spans = [match.span() for match in matches]
-        for invalid_match in cls.INVALID_ATTEMPT_PATTERN.finditer(normalized):
+        invalid_matches = sorted(
+            it.chain(
+                cls.INVALID_ATTEMPT_PATTERN.finditer(normalized),
+                cls.MALFORMED_RANGE_PATTERN.finditer(normalized),
+            ),
+            key=lambda match: match.start(),
+        )
+        for invalid_match in invalid_matches:
             if any(
                 invalid_match.start() >= start and invalid_match.end() <= end
                 for start, end in valid_spans
@@ -141,7 +157,7 @@ class HourRanges:
 
     @staticmethod
     def _raise_if_invalid_separator(original: str, value: str) -> None:
-        if value.strip(" \t\r\n,"):
+        if value.strip(" \t\r\n,、・"):
             raise HourRangeFormatError(original)
 
     @staticmethod
