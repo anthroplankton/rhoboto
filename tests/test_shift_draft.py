@@ -29,6 +29,21 @@ def make_feature_channel() -> SimpleNamespace:
     return SimpleNamespace(guild_id=1, channel_id=2, feature_name="shift_register")
 
 
+class RawDataFakeWorksheet(FakeWorksheet):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.raw_data_calls: list[bool] = []
+
+    async def update_from_dataframe(
+        self,
+        dataframe: pd.DataFrame,
+        *,
+        raw_data: bool = False,
+    ) -> None:
+        self.raw_data_calls.append(raw_data)
+        await super().update_from_dataframe(dataframe)
+
+
 def build_entry_frame(rows: list[tuple[str, str, set[int]]]) -> pd.DataFrame:
     records = []
     for username, display_name, slots in rows:
@@ -108,7 +123,7 @@ async def test_generate_draft_writes_draft_worksheet() -> None:
             ]
         ),
     )
-    draft_worksheet = FakeWorksheet(title="Shift Draft")
+    draft_worksheet = RawDataFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
@@ -125,6 +140,7 @@ async def test_generate_draft_writes_draft_worksheet() -> None:
     # Recruitment range 4-7 -> slots 4, 5, 6.
     assert list(written["JST"]) == ["4-5", "5-6", "6-7"]
     assert (written["ランナー"] == "Run").all()
+    assert draft_worksheet.raw_data_calls == [True]
     assert schedule.hours == [4, 5, 6]
 
 

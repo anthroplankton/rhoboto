@@ -231,7 +231,7 @@ class ShiftRegisterManager(
 
         schedule = ShiftScheduler.assign(shifts, hours, runner=runner)
         draft_df = DraftWorksheetContent.from_schedule(schedule)
-        await draft_worksheet.update_from_dataframe(draft_df)
+        await draft_worksheet.update_from_dataframe(draft_df, raw_data=True)
 
         self.logger.info(
             "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
