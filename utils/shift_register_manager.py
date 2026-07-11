@@ -192,7 +192,7 @@ class ShiftRegisterManager(
         """Build the draft schedule from entries and overwrite the draft worksheet.
 
         Reads availability from the entry worksheet, assigns people into the
-        runner/encore/main/standby lanes for each recruitment hour, and writes the
+        runner/encore/本走/standby slots for each recruitment hour, and writes the
         result to the draft worksheet, replacing whatever was there.
 
         Args:

@@ -8,15 +8,19 @@ if TYPE_CHECKING:
 
     from utils.shift_register_structs import Shift
 
-ENCORE_LANE = "encore"
-HASHIRI_LANES: tuple[str, str, str] = ("hashiri_1", "hashiri_2", "hashiri_3")
-STANDBY_LANE = "standby"
+ENCORE_SUPPORTER_SLOT = "encore"
+HONSO_SUPPORTER_SLOTS: tuple[str, str, str] = ("honso_1", "honso_2", "honso_3")
+STANDBY_SUPPORTER_SLOT = "standby"
 
-# Fill priority for the non-runner seats each hour: Encore first, then the three
-# main (本走) seats, then standby. When fewer people are available than seats, the
-# lower-priority lanes (standby first) are the ones that stay empty.
-PRIORITY_LANES: tuple[str, ...] = (ENCORE_LANE, *HASHIRI_LANES, STANDBY_LANE)
-NON_RUNNER_CAPACITY = len(PRIORITY_LANES)
+# Fill priority for the supporter slots each hour: Encore first, then the three
+# 本走 slots, then standby. When fewer people are available than slots, the
+# lower-priority slots (standby first) are the ones that stay empty.
+SUPPORTER_SLOT_PRIORITY: tuple[str, ...] = (
+    ENCORE_SUPPORTER_SLOT,
+    *HONSO_SUPPORTER_SLOTS,
+    STANDBY_SUPPORTER_SLOT,
+)
+SUPPORTER_CAPACITY = len(SUPPORTER_SLOT_PRIORITY)
 
 
 def hour_label(hour: int) -> str:
@@ -26,29 +30,29 @@ def hour_label(hour: int) -> str:
 
 @dataclass
 class HourShiftAssignment:
-    """The people assigned to each lane for a single recruitment hour.
+    """The supporters assigned to each slot for a single recruitment hour.
 
     Attributes:
         hour (int): The 30-hour slot index this assignment covers.
-        lane_usernames (dict[str, str]): Lane key -> assigned username. Lanes that
-            could not be filled are absent from the mapping.
+        supporter_usernames_by_slot (dict[str, str]): Supporter slot -> assigned
+            username. Slots that could not be filled are absent from the mapping.
         unassigned_usernames (list[str]): Usernames that were available this hour
             but had no seat left (more people than seats).
     """
 
     hour: int
-    lane_usernames: dict[str, str] = field(default_factory=dict)
+    supporter_usernames_by_slot: dict[str, str] = field(default_factory=dict)
     unassigned_usernames: list[str] = field(default_factory=list)
 
     @property
     def filled(self) -> int:
         """Number of seats actually filled this hour."""
-        return len(self.lane_usernames)
+        return len(self.supporter_usernames_by_slot)
 
     @property
     def shortage(self) -> int:
         """Number of non-runner seats left empty this hour."""
-        return NON_RUNNER_CAPACITY - self.filled
+        return SUPPORTER_CAPACITY - self.filled
 
 
 @dataclass
@@ -58,7 +62,7 @@ class DraftSchedule:
     Attributes:
         runner (str | None): The runner nickname pinned to every hour, or None.
         hours (list[int]): The recruitment hour slots covered, in order.
-        assignments (list[HourShiftAssignment]): Per-hour lane assignments.
+        assignments (list[HourShiftAssignment]): Per-hour supporter assignments.
         display_names (dict[str, str]): Username -> display name for the pool.
     """
 
@@ -67,9 +71,13 @@ class DraftSchedule:
     assignments: list[HourShiftAssignment]
     display_names: dict[str, str]
 
-    def display_for(self, assignment: HourShiftAssignment, lane: str) -> str:
-        """Return the display name filling ``lane`` this hour, or ``""`` if empty."""
-        username = assignment.lane_usernames.get(lane)
+    def display_for(
+        self,
+        assignment: HourShiftAssignment,
+        supporter_slot: str,
+    ) -> str:
+        """Return the display name in ``supporter_slot``, or ``""`` if empty."""
+        username = assignment.supporter_usernames_by_slot.get(supporter_slot)
         if username is None:
             return ""
         return self.display_names.get(username, username)
@@ -102,7 +110,7 @@ class DraftSchedule:
 
 
 class ShiftScheduler:
-    """Assign shift entries into runner/encore/main/standby lanes per hour."""
+    """Assign entries into runner and supporter slots for each hour."""
 
     @staticmethod
     def assign(
@@ -114,9 +122,9 @@ class ShiftScheduler:
         """Build a draft schedule from availability.
 
         Only people available in a given hour are eligible for that hour. The
-        runner nickname is pinned to its own lane and never competes for a seat.
-        For each hour, whoever held a lane the previous hour keeps it when still
-        available (continuity), then remaining lanes are filled least-loaded (and
+        runner nickname is pinned separately and never competes for a supporter
+        slot. For each hour, whoever held a slot the previous hour keeps it when still
+        available (continuity), then remaining slots are filled least-loaded (and
         scarcest) first so total hours stay balanced. Ties break on username, so
         the same input always yields the same schedule.
 
@@ -135,25 +143,30 @@ class ShiftScheduler:
             for shift in candidates
         }
         load = dict.fromkeys(display_names, 0)
-        previous: dict[str, str | None] = dict.fromkeys(PRIORITY_LANES, None)
+        previous_supporters_by_slot: dict[str, str | None] = dict.fromkeys(
+            SUPPORTER_SLOT_PRIORITY,
+            None,
+        )
 
         assignments: list[HourShiftAssignment] = []
         for hour in hours:
             available = [shift for shift in candidates if hour in shift]
             available_usernames = {shift.username for shift in available}
-            active_lanes = PRIORITY_LANES[: min(len(available), NON_RUNNER_CAPACITY)]
+            fillable_supporter_slots = SUPPORTER_SLOT_PRIORITY[
+                : min(len(available), SUPPORTER_CAPACITY)
+            ]
 
-            lane_usernames: dict[str, str] = {}
+            supporter_usernames_by_slot: dict[str, str] = {}
             used: set[str] = set()
 
             # 1) Continuity: keep last hour's holder when still available.
-            for lane in active_lanes:
-                holder = previous[lane]
+            for supporter_slot in fillable_supporter_slots:
+                holder = previous_supporters_by_slot[supporter_slot]
                 if holder in available_usernames and holder not in used:
-                    lane_usernames[lane] = holder
+                    supporter_usernames_by_slot[supporter_slot] = holder
                     used.add(holder)
 
-            # 2) Fill remaining lanes, least-loaded then scarcest first.
+            # 2) Fill remaining slots, least-loaded then scarcest first.
             remaining = sorted(
                 (shift for shift in available if shift.username not in used),
                 key=lambda shift: (
@@ -163,23 +176,25 @@ class ShiftScheduler:
                 ),
             )
             fill = iter(remaining)
-            for lane in active_lanes:
-                if lane not in lane_usernames:
+            for supporter_slot in fillable_supporter_slots:
+                if supporter_slot not in supporter_usernames_by_slot:
                     chosen = next(fill)
-                    lane_usernames[lane] = chosen.username
+                    supporter_usernames_by_slot[supporter_slot] = chosen.username
                     used.add(chosen.username)
 
-            # 3) Update load and lane history for the next hour.
-            for lane in PRIORITY_LANES:
-                holder = lane_usernames.get(lane)
-                previous[lane] = holder
+            # 3) Update load and slot history for the next hour.
+            for supporter_slot in SUPPORTER_SLOT_PRIORITY:
+                holder = supporter_usernames_by_slot.get(supporter_slot)
+                previous_supporters_by_slot[supporter_slot] = holder
                 if holder is not None:
                     load[holder] += 1
 
             unassigned = [
                 shift.username for shift in available if shift.username not in used
             ]
-            assignments.append(HourShiftAssignment(hour, lane_usernames, unassigned))
+            assignments.append(
+                HourShiftAssignment(hour, supporter_usernames_by_slot, unassigned)
+            )
 
         return DraftSchedule(
             runner=runner,

@@ -26,7 +26,12 @@ from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
     render_shift_timeline_announcement_messages,
 )
-from utils.shift_scheduler import ENCORE_LANE, HASHIRI_LANES, STANDBY_LANE, hour_label
+from utils.shift_scheduler import (
+    ENCORE_SUPPORTER_SLOT,
+    HONSO_SUPPORTER_SLOTS,
+    STANDBY_SUPPORTER_SLOT,
+    hour_label,
+)
 from utils.storage_errors import partial_success_storage_error
 
 if TYPE_CHECKING:
@@ -415,10 +420,10 @@ class ShiftRegister(
     ) -> str:
         """Format the generated draft report.
 
-        Assigned lanes use a full-width vertical bar between encore and hashiri,
+        Assigned slots use a full-width vertical bar between encore and 本走,
         a full-width semicolon before standby, and ``、`` between users in the
-        same lane group. Missing groups omit their separator; ``No encore``
-        appears only when another lane is assigned.
+        same supporter group. Missing groups omit their separator; ``No encore``
+        appears only when another supporter is assigned.
         """
         lines = [
             "### ✅ 班表草稿已產生",
@@ -430,7 +435,9 @@ class ShiftRegister(
         ]
         lines.append("- 已排入：")  # noqa: RUF001
         for assignment in schedule.assignments:
-            encore_username = assignment.lane_usernames.get(ENCORE_LANE)
+            encore_username = assignment.supporter_usernames_by_slot.get(
+                ENCORE_SUPPORTER_SLOT
+            )
             encore_name = (
                 _format_draft_username(encore_username, schedule, member_mentions)
                 if encore_username is not None
@@ -438,12 +445,16 @@ class ShiftRegister(
             )
             main_names = "、".join(
                 _format_draft_username(
-                    assignment.lane_usernames[lane], schedule, member_mentions
+                    assignment.supporter_usernames_by_slot[supporter_slot],
+                    schedule,
+                    member_mentions,
                 )
-                for lane in HASHIRI_LANES
-                if lane in assignment.lane_usernames
+                for supporter_slot in HONSO_SUPPORTER_SLOTS
+                if supporter_slot in assignment.supporter_usernames_by_slot
             )
-            standby_username = assignment.lane_usernames.get(STANDBY_LANE)
+            standby_username = assignment.supporter_usernames_by_slot.get(
+                STANDBY_SUPPORTER_SLOT
+            )
             standby_name = (
                 _format_draft_username(standby_username, schedule, member_mentions)
                 if standby_username is not None

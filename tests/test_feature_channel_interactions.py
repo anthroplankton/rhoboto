@@ -65,34 +65,40 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         assignments=[
             HourShiftAssignment(
                 hour=4,
-                lane_usernames={"encore": "alice"},
+                supporter_usernames_by_slot={"encore": "alice"},
                 unassigned_usernames=["carol", "dave"],
             ),
             HourShiftAssignment(
                 hour=5,
-                lane_usernames={"hashiri_1": "bob", "encore": "alice"},
+                supporter_usernames_by_slot={"honso_1": "bob", "encore": "alice"},
             ),
             HourShiftAssignment(
                 hour=6,
-                lane_usernames={
+                supporter_usernames_by_slot={
                     "encore": "alice",
-                    "hashiri_1": "bob",
-                    "hashiri_2": "eve",
-                    "hashiri_3": "frank",
+                    "honso_1": "bob",
+                    "honso_2": "eve",
+                    "honso_3": "frank",
                     "standby": "grace",
                 },
             ),
-            HourShiftAssignment(hour=7, lane_usernames={"hashiri_1": "bob"}),
+            HourShiftAssignment(
+                hour=7,
+                supporter_usernames_by_slot={"honso_1": "bob"},
+            ),
             HourShiftAssignment(hour=8),
             HourShiftAssignment(
                 hour=9,
-                lane_usernames={"encore": "alice", "standby": "grace"},
+                supporter_usernames_by_slot={"encore": "alice", "standby": "grace"},
             ),
             HourShiftAssignment(
                 hour=10,
-                lane_usernames={"standby": "grace", "hashiri_1": "bob"},
+                supporter_usernames_by_slot={"standby": "grace", "honso_1": "bob"},
             ),
-            HourShiftAssignment(hour=11, lane_usernames={"standby": "grace"}),
+            HourShiftAssignment(
+                hour=11,
+                supporter_usernames_by_slot={"standby": "grace"},
+            ),
         ],
         display_names={
             "alice": "Alice",
