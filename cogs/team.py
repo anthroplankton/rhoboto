@@ -13,7 +13,6 @@ from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
-    from models.team_register import TeamRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -29,13 +28,6 @@ class Team(
     FeatureChannelType = TeamRegister
     ManagerType = TeamRegisterManager
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
-
-    @override
-    def _guide_worksheet_id(
-        self,
-        feature_config: TeamRegisterConfig,
-    ) -> int:
-        return feature_config.summary_worksheet_id
 
     @override
     async def _delete_user_data(

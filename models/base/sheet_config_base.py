@@ -17,6 +17,11 @@ class SheetConfigBase(models.Model, TimestampMixin):
     class Meta:
         abstract = True
 
+    @property
+    @abstractmethod
+    def landing_worksheet_id(self) -> int:
+        """Return the default user-facing worksheet destination ID."""
+
     @abstractmethod
     def get_worksheet_ids(self) -> list[int]:
         """Returns all worksheet ids relevant to this config."""

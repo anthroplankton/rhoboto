@@ -53,10 +53,49 @@ from components.ui_team_register import (
 from tests.fakes import FakeInteraction, FakeRole
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
-    TeamSummaryFormulaSource,
-    TeamSummarySourceResolution,
-    TeamSummarySourceStatus,
+    TeamSource,
+    TeamSourceResolution,
+    TeamSourceStatus,
+    TeamSummaryColumns,
 )
+from utils.team_register_structs import (
+    SummaryWorksheetMetadata,
+    TeamRegisterGoogleSheetsMetadata,
+    TeamWorksheetMetadata,
+)
+
+
+def team_source_resolution(
+    *,
+    landing_worksheet_id: int = 201,
+) -> TeamSourceResolution:
+    config = SimpleNamespace(
+        sheet_url="https://team.sheet.example",
+        landing_worksheet_id=landing_worksheet_id,
+        feature_channel=SimpleNamespace(channel_id=22),
+    )
+    metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", None),
+            TeamWorksheetMetadata(102, "Encore Team", None),
+            SummaryWorksheetMetadata(201, "Renamed Summary", None),
+        ],
+    )
+    return TeamSourceResolution(
+        TeamSourceStatus.AVAILABLE,
+        TeamSource(
+            config=config,
+            metadata=metadata,
+            summary_columns=TeamSummaryColumns(
+                username=1,
+                roles=3,
+                main_isv=4,
+                encore_isv=6,
+                import_last_column="G",
+            ),
+        ),
+    )
 
 
 class RecordingTeamRegisterManager:
@@ -159,9 +198,7 @@ class RecordingShiftRegisterManager:
         self.fresh_config_error: Exception | None = None
         self.refresh_error: Exception | None = None
         self.metadata_error: GoogleSheetsError | None = None
-        self.team_summary_source = TeamSummarySourceResolution(
-            TeamSummarySourceStatus.MISSING
-        )
+        self.team_source = TeamSourceResolution(TeamSourceStatus.MISSING)
 
     async def upsert_sheet_config_and_worksheets(
         self,
@@ -260,8 +297,8 @@ class RecordingShiftRegisterManager:
             raise self.metadata_error
         return self.metadata
 
-    async def resolve_team_summary_source(self) -> TeamSummarySourceResolution:
-        return self.team_summary_source
+    async def resolve_team_source(self) -> TeamSourceResolution:
+        return self.team_source
 
 
 class FailingTeamRegisterManager(RecordingTeamRegisterManager):
@@ -601,7 +638,7 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
         shift_register=manager,
         color=0,
         latest_guide_enabled=False,
-        team_summary_source=manager.team_summary_source,
+        team_source=manager.team_source,
     )
     field_names = [field.name for field in embed.fields]
 
@@ -622,27 +659,27 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     ("status", "expected"),
     [
         (
-            TeamSummarySourceStatus.MISSING,
+            TeamSourceStatus.MISSING,
             "- No configured Team Register exists in this server.",
         ),
         (
-            TeamSummarySourceStatus.AMBIGUOUS,
+            TeamSourceStatus.AMBIGUOUS,
             "- Multiple Team Registers are configured; source selection is not "
             "supported yet.",
         ),
         (
-            TeamSummarySourceStatus.INVALID,
-            "- The configured Team Summary source is invalid. Repair its worksheet "
+            TeamSourceStatus.INVALID,
+            "- The configured Team source is invalid. Repair its worksheet "
             "settings or header.",
         ),
         (
-            TeamSummarySourceStatus.UNRESOLVED,
-            "- The Team Summary source could not be read at this time.",
+            TeamSourceStatus.UNRESOLVED,
+            "- The Team source could not be read at this time.",
         ),
     ],
 )
 def test_shift_settings_embed_formats_unavailable_team_source(
-    status: TeamSummarySourceStatus,
+    status: TeamSourceStatus,
     expected: str,
 ) -> None:
     manager = RecordingShiftRegisterManager()
@@ -653,30 +690,17 @@ def test_shift_settings_embed_formats_unavailable_team_source(
         final_schedule_anchor_cell=manager.final_schedule_anchor_cell,
         shift_register=manager,
         color=0,
-        team_summary_source=TeamSummarySourceResolution(status),
+        team_source=TeamSourceResolution(status),
     )
 
     field_map = {field.name: field.value for field in embed.fields}
-    assert field_map["Team Summary Source"] == expected
+    assert field_map["Team Source"] == expected
 
 
 @pytest.mark.asyncio
-async def test_shift_settings_panel_lists_unique_team_summary_source() -> None:
+async def test_shift_settings_panel_lists_unique_team_source() -> None:
     manager = RecordingShiftRegisterManager()
-    manager.team_summary_source = TeamSummarySourceResolution(
-        TeamSummarySourceStatus.AVAILABLE,
-        TeamSummaryFormulaSource(
-            channel_id=22,
-            sheet_url="https://team.sheet.example",
-            worksheet_id=201,
-            worksheet_title="Renamed Summary",
-            username_column=1,
-            roles_column=3,
-            main_isv_column=4,
-            encore_isv_column=6,
-            import_last_column="G",
-        ),
-    )
+    manager.team_source = team_source_resolution()
     interaction = FakeInteraction()
     button = ShiftRegisterButton("Set Up Shift Register", manager)
 
@@ -685,12 +709,12 @@ async def test_shift_settings_panel_lists_unique_team_summary_source() -> None:
     embed = interaction.followup.messages[0][1]["embed"]
     field_map = {field.name: field.value for field in embed.fields}
     field_names = [field.name for field in embed.fields]
-    assert field_map["Team Summary Source"] == (
+    assert field_map["Team Source"] == (
         "- **Channel** = <#22>\n"
-        "- **Worksheet** = [Renamed Summary]"
-        "(https://team.sheet.example#gid=201) : `201`"
+        "- **Google Sheet** = [Open Team Register Sheet]"
+        "(https://team.sheet.example#gid=201)"
     )
-    assert field_names.index("Team Summary Source") == (
+    assert field_names.index("Team Source") == (
         field_names.index("Worksheets & IDs") + 1
     )
     view = interaction.followup.messages[0][1]["view"]
@@ -699,6 +723,26 @@ async def test_shift_settings_panel_lists_unique_team_summary_source() -> None:
         "Edit Shift Timeline",
         "Edit Recruitment Time Range",
     ]
+
+
+def test_shift_settings_embed_uses_team_landing_worksheet() -> None:
+    manager = RecordingShiftRegisterManager()
+
+    embed = build_shift_current_settings_embed(
+        sheet_url=manager.sheet_url,
+        metadata=manager.metadata,
+        final_schedule_anchor_cell=manager.final_schedule_anchor_cell,
+        shift_register=manager,
+        color=0,
+        team_source=team_source_resolution(landing_worksheet_id=101),
+    )
+
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map["Team Source"] == (
+        "- **Channel** = <#22>\n"
+        "- **Google Sheet** = [Open Team Register Sheet]"
+        "(https://team.sheet.example#gid=101)"
+    )
 
 
 @pytest.mark.asyncio

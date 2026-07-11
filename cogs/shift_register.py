@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from bot import Rhoboto
     from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
-    from models.shift_register import ShiftRegisterConfig
     from utils.structs_base import UserInfo
 
 
@@ -53,13 +52,6 @@ class ShiftRegister(
 
     ManagerType = ShiftRegisterManager
     ParserType = ShiftParser
-
-    @override
-    def _guide_worksheet_id(
-        self,
-        feature_config: ShiftRegisterConfig,
-    ) -> int:
-        return feature_config.entry_worksheet_id
 
     @override
     def _auto_guide_template_values(

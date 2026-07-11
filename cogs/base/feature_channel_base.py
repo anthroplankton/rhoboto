@@ -933,19 +933,13 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
     guide_template_key: str
     auto_guide_template_key: str
 
-    def _guide_worksheet_id(
-        self,
-        _feature_config: SheetConfigBase,
-    ) -> int | None:
-        return None
-
     def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._guide_worksheet_id(feature_config),
+            feature_config.landing_worksheet_id,
         )
 
     def _auto_guide_template_values(
@@ -1551,19 +1545,13 @@ class FeatureChannelUserBase[
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
-    def _guide_worksheet_id(
-        self,
-        _feature_config: SheetConfigBase,
-    ) -> int | None:
-        return None
-
     def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._guide_worksheet_id(feature_config),
+            feature_config.landing_worksheet_id,
         )
 
     async def delete_callback(self, interaction: Interaction) -> None:

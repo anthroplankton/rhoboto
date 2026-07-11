@@ -67,6 +67,8 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert language_settings.announcement_languages == ["ja"]
         assert team_config.get_worksheet_ids() == [101, 102, 199]
         assert shift_config.get_worksheet_ids() == [201, 202, 203]
+        assert team_config.landing_worksheet_id == 199
+        assert shift_config.landing_worksheet_id == 201
         assert shift_config.day_number is None
         assert shift_config.event_date is None
         assert shift_config.submission_deadline_at is None

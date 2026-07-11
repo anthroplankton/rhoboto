@@ -32,8 +32,8 @@ from components.ui_settings_flow import (
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.shift_register_manager import (
-    TeamSummarySourceResolution,
-    TeamSummarySourceStatus,
+    TeamSourceResolution,
+    TeamSourceStatus,
 )
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -123,7 +123,7 @@ async def build_shift_register_settings_panel(
         enabled=latest_guide_enabled,
         state_resolver=latest_guide_state_resolver,
     )
-    team_summary_source = await shift_register_manager.resolve_team_summary_source()
+    team_source = await shift_register_manager.resolve_team_source()
     embed = build_current_settings_embed(
         sheet_url=shift_register.sheet_url,
         metadata=active_metadata,
@@ -132,7 +132,7 @@ async def build_shift_register_settings_panel(
         color=config.DEFAULT_EMBED_COLOR,
         is_save_action=is_save_action,
         latest_guide_enabled=latest_guide_enabled,
-        team_summary_source=team_summary_source,
+        team_source=team_source,
     )
     view = ShiftRegisterView(
         shift_register_manager=shift_register_manager,
@@ -180,33 +180,45 @@ def _format_settings_datetime(value: datetime | None) -> str:
     return format_iso_hour(value)
 
 
-def _format_team_summary_source(
-    resolution: TeamSummarySourceResolution,
+def _format_team_source(
+    resolution: TeamSourceResolution,
 ) -> str:
     source = resolution.source
-    if resolution.status is TeamSummarySourceStatus.AVAILABLE and source is not None:
+    if resolution.status is TeamSourceStatus.AVAILABLE and source is not None:
+        worksheet = next(
+            (
+                worksheet
+                for worksheet in source.metadata
+                if worksheet.id == source.config.landing_worksheet_id
+            ),
+            None,
+        )
+        if worksheet is None or worksheet.id is None:
+            return (
+                "- The configured Team source is invalid. Repair its worksheet "
+                "settings."
+            )
         worksheet_url = google_sheet_url_with_gid(
-            source.sheet_url,
-            source.worksheet_id,
+            source.config.sheet_url,
+            worksheet.id,
         )
         return (
-            f"- **Channel** = <#{source.channel_id}>\n"
-            f"- **Worksheet** = [{source.worksheet_title}]"
-            f"({worksheet_url}) : `{source.worksheet_id}`"
+            f"- **Channel** = <#{source.config.feature_channel.channel_id}>\n"
+            f"- **Google Sheet** = [Open Team Register Sheet]({worksheet_url})"
         )
-    if resolution.status is TeamSummarySourceStatus.MISSING:
+    if resolution.status is TeamSourceStatus.MISSING:
         return "- No configured Team Register exists in this server."
-    if resolution.status is TeamSummarySourceStatus.AMBIGUOUS:
+    if resolution.status is TeamSourceStatus.AMBIGUOUS:
         return (
             "- Multiple Team Registers are configured; source selection is not "
             "supported yet."
         )
-    if resolution.status is TeamSummarySourceStatus.INVALID:
+    if resolution.status is TeamSourceStatus.INVALID:
         return (
-            "- The configured Team Summary source is invalid. Repair its worksheet "
+            "- The configured Team source is invalid. Repair its worksheet "
             "settings or header."
         )
-    return "- The Team Summary source could not be read at this time."
+    return "- The Team source could not be read at this time."
 
 
 def _timeline_defaults_from_config(shift_register: object) -> dict[str, str]:
@@ -1102,7 +1114,7 @@ def build_current_settings_embed(
     *,
     is_save_action: bool = False,
     latest_guide_enabled: bool = False,
-    team_summary_source: TeamSummarySourceResolution,
+    team_source: TeamSourceResolution,
 ) -> Embed:
     """
     Build an embed showing the current shift register settings.
@@ -1118,8 +1130,8 @@ def build_current_settings_embed(
         color (int): Embed color.
         is_save_action (bool):
             If True, this is a settings save, otherwise a settings query (view).
-        team_summary_source (TeamSummarySourceResolution):
-            Resolved same-guild Team Summary source status.
+        team_source (TeamSourceResolution):
+            Resolved same-guild Team source status.
 
     Returns:
         Embed: The constructed embed.
@@ -1160,8 +1172,8 @@ def build_current_settings_embed(
         inline=False,
     )
     embed.add_field(
-        name="Team Summary Source",
-        value=_format_team_summary_source(team_summary_source),
+        name="Team Source",
+        value=_format_team_source(team_source),
         inline=False,
     )
 

@@ -107,8 +107,8 @@ After database and sheet migration:
 2. Confirm the panel shows:
    - Google Sheet link.
    - Entry, draft, and final worksheet titles and IDs.
-   - Team Summary Source status and, when uniquely resolved, its channel and
-     Summary worksheet link/ID.
+   - Team Source status and, when uniquely resolved, its channel and Team Register
+     Google Sheet link.
    - Final schedule anchor cell.
    - Shift Timeline.
    - Recruitment Time Range.

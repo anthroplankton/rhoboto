@@ -8,7 +8,7 @@ from models.team_register import TeamRegisterConfig
 from utils.google_sheets import GoogleSheet
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.structs_base import validate_anchor_cell
-from utils.team_register_structs import Summary
+from utils.team_register_structs import Summary, TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -31,7 +31,7 @@ from utils.storage_errors import StorageError, StorageErrorKind
 ENTRY_READ_RANGES = ["1:2", "A3:C"]
 
 
-class TeamSummarySourceStatus(StrEnum):
+class TeamSourceStatus(StrEnum):
     AVAILABLE = "available"
     MISSING = "missing"
     AMBIGUOUS = "ambiguous"
@@ -40,22 +40,25 @@ class TeamSummarySourceStatus(StrEnum):
 
 
 @dataclass(frozen=True)
-class TeamSummaryFormulaSource:
-    channel_id: int
-    sheet_url: str
-    worksheet_id: int
-    worksheet_title: str
-    username_column: int
-    roles_column: int
-    main_isv_column: int
-    encore_isv_column: int | None
+class TeamSummaryColumns:
+    username: int
+    roles: int
+    main_isv: int
+    encore_isv: int | None
     import_last_column: str
 
 
 @dataclass(frozen=True)
-class TeamSummarySourceResolution:
-    status: TeamSummarySourceStatus
-    source: TeamSummaryFormulaSource | None = None
+class TeamSource:
+    config: TeamRegisterConfig
+    metadata: TeamRegisterGoogleSheetsMetadata
+    summary_columns: TeamSummaryColumns
+
+
+@dataclass(frozen=True)
+class TeamSourceResolution:
+    status: TeamSourceStatus
+    source: TeamSource | None = None
 
 
 class ShiftRegisterManager(
@@ -64,96 +67,101 @@ class ShiftRegisterManager(
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 
-    async def resolve_team_summary_source(self) -> TeamSummarySourceResolution:
-        """Resolve the sole configured Team Summary source in this guild."""
+    async def resolve_team_source(self) -> TeamSourceResolution:
+        """Resolve the sole configured Team source in this guild."""
         configs = await TeamRegisterConfig.filter(
             feature_channel__guild_id=self.feature_channel.guild_id
         ).select_related("feature_channel")
         if not configs:
-            return TeamSummarySourceResolution(TeamSummarySourceStatus.MISSING)
+            return TeamSourceResolution(TeamSourceStatus.MISSING)
         if len(configs) > 1:
-            return TeamSummarySourceResolution(TeamSummarySourceStatus.AMBIGUOUS)
+            return TeamSourceResolution(TeamSourceStatus.AMBIGUOUS)
 
         config = configs[0]
-        worksheet_ids = [
-            *config.team_worksheet_ids,
-            config.summary_worksheet_id,
-        ]
         try:
             sheet = GoogleSheet(config.sheet_url, self.service_account_path)
-            worksheets = await sheet.get_worksheets(worksheet_ids)
-            return await self._resolve_team_summary_worksheets(config, worksheets)
+            worksheets = await sheet.get_worksheets(config.get_worksheet_ids())
+            metadata = TeamRegisterGoogleSheetsMetadata.from_id_mapping(
+                config.sheet_url,
+                worksheets,
+            )
+            return await self._build_team_source(config, metadata)
         except GoogleSheetsError as exc:
             status = (
-                TeamSummarySourceStatus.INVALID
+                TeamSourceStatus.INVALID
                 if exc.kind
                 in {
                     GoogleSheetsErrorKind.INVALID_URL,
                     GoogleSheetsErrorKind.MISSING_WORKSHEET,
                 }
-                else TeamSummarySourceStatus.UNRESOLVED
+                else TeamSourceStatus.UNRESOLVED
             )
             self.logger.warning(
-                "Could not resolve auxiliary Team Summary source: %s",
+                "Could not resolve auxiliary Team source: %s",
                 exc.kind,
             )
-            return TeamSummarySourceResolution(status)
+            return TeamSourceResolution(status)
 
-    async def _resolve_team_summary_worksheets(
+    async def _build_team_source(
         self,
         config: TeamRegisterConfig,
-        worksheets: dict[int, object | None],
-    ) -> TeamSummarySourceResolution:
-        team_worksheets = [
-            worksheets.get(worksheet_id) for worksheet_id in config.team_worksheet_ids
-        ]
-        summary_worksheet = worksheets.get(config.summary_worksheet_id)
+        metadata: TeamRegisterGoogleSheetsMetadata,
+    ) -> TeamSourceResolution:
+        landing_worksheet = next(
+            (
+                worksheet
+                for worksheet in metadata
+                if worksheet.id == config.landing_worksheet_id
+            ),
+            None,
+        )
         if (
-            not team_worksheets
-            or any(worksheet is None for worksheet in team_worksheets)
-            or summary_worksheet is None
+            not metadata.team_worksheets
+            or any(worksheet.is_missing() for worksheet in metadata)
+            or landing_worksheet is None
         ):
-            return TeamSummarySourceResolution(TeamSummarySourceStatus.INVALID)
+            return TeamSourceResolution(TeamSourceStatus.INVALID)
 
+        summary_worksheet = metadata.summary_worksheet.worksheet
+        if summary_worksheet is None:
+            return TeamSourceResolution(TeamSourceStatus.INVALID)
         summary_values = await summary_worksheet.batch_get_values(["1:1"])
         header = summary_values[0][0] if summary_values and summary_values[0] else []
         if not isinstance(header, list):
-            return TeamSummarySourceResolution(TeamSummarySourceStatus.INVALID)
+            return TeamSourceResolution(TeamSourceStatus.INVALID)
 
-        main_worksheet = team_worksheets[0]
-        encore_worksheet = team_worksheets[1] if len(team_worksheets) > 1 else None
+        main_worksheet = metadata.team_worksheets[0]
+        encore_worksheet = (
+            metadata.team_worksheets[1] if len(metadata.team_worksheets) > 1 else None
+        )
         try:
-            username_column = _unique_header_column(header, "username")
-            roles_column = _unique_header_column(header, "encore_roles")
-            main_isv_column = _unique_header_column(
-                header,
-                Summary.isv_title(main_worksheet.title),
-            )
-            encore_isv_column = (
-                _unique_header_column(
+            columns = TeamSummaryColumns(
+                username=_unique_header_column(header, "username"),
+                roles=_unique_header_column(header, "encore_roles"),
+                main_isv=_unique_header_column(
                     header,
-                    Summary.isv_title(encore_worksheet.title),
-                )
-                if encore_worksheet is not None
-                else None
+                    Summary.isv_title(main_worksheet.title),
+                ),
+                encore_isv=(
+                    _unique_header_column(
+                        header,
+                        Summary.isv_title(encore_worksheet.title),
+                    )
+                    if encore_worksheet is not None
+                    else None
+                ),
+                import_last_column=column_letter(len(header)),
             )
         except ValueError:
-            return TeamSummarySourceResolution(TeamSummarySourceStatus.INVALID)
+            return TeamSourceResolution(TeamSourceStatus.INVALID)
 
-        source = TeamSummaryFormulaSource(
-            channel_id=config.feature_channel.channel_id,
-            sheet_url=config.sheet_url,
-            worksheet_id=config.summary_worksheet_id,
-            worksheet_title=summary_worksheet.title,
-            username_column=username_column,
-            roles_column=roles_column,
-            main_isv_column=main_isv_column,
-            encore_isv_column=encore_isv_column,
-            import_last_column=column_letter(len(header)),
-        )
-        return TeamSummarySourceResolution(
-            TeamSummarySourceStatus.AVAILABLE,
-            source,
+        return TeamSourceResolution(
+            TeamSourceStatus.AVAILABLE,
+            TeamSource(
+                config=config,
+                metadata=metadata,
+                summary_columns=columns,
+            ),
         )
 
     @overload
@@ -312,7 +320,7 @@ class ShiftRegisterManager(
             EntryWorksheetContent.FIRST_DATA_ROW + len(participant_values),
         )
         current_formulas = {row: formula for row, _username, formula in participants}
-        resolution = await self.resolve_team_summary_source()
+        resolution = await self.resolve_team_source()
 
         updates = list(layout_updates)
         for row, username, current_formula in participants:
@@ -452,22 +460,26 @@ def _entry_participants(
 
 def _entry_team_formula(
     row: int,
-    resolution: TeamSummarySourceResolution,
+    resolution: TeamSourceResolution,
 ) -> str | None:
-    if resolution.status is TeamSummarySourceStatus.UNRESOLVED:
+    if resolution.status is TeamSourceStatus.UNRESOLVED:
         return None
     source = resolution.source
-    if resolution.status is not TeamSummarySourceStatus.AVAILABLE or source is None:
+    if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
         return ""
+    summary = source.metadata.summary_worksheet
+    if summary.title is None:
+        return ""
+    columns = source.summary_columns
     return build_team_summary_formula(
         row=row,
-        sheet_url=source.sheet_url,
-        worksheet_title=source.worksheet_title,
-        username_column=source.username_column,
-        roles_column=source.roles_column,
-        main_isv_column=source.main_isv_column,
-        encore_isv_column=source.encore_isv_column,
-        import_last_column=source.import_last_column,
+        sheet_url=source.config.sheet_url,
+        worksheet_title=summary.title,
+        username_column=columns.username,
+        roles_column=columns.roles,
+        main_isv_column=columns.main_isv,
+        encore_isv_column=columns.encore_isv,
+        import_last_column=columns.import_last_column,
     )
 
 

@@ -131,12 +131,16 @@ def configure_team_source_query(
 def make_team_source_config(
     *,
     team_worksheet_ids: list[int] | None = None,
+    landing_worksheet_id: int = 201,
 ) -> SimpleNamespace:
+    worksheet_ids = [*(team_worksheet_ids or [101, 102]), 201]
     return SimpleNamespace(
         sheet_url="https://team.sheet.example",
         team_worksheet_ids=team_worksheet_ids or [101, 102],
         summary_worksheet_id=201,
+        landing_worksheet_id=landing_worksheet_id,
         feature_channel=SimpleNamespace(channel_id=22),
+        get_worksheet_ids=lambda: worksheet_ids,
     )
 
 
@@ -256,31 +260,40 @@ def make_shift_metadata(
     )
 
 
-def available_team_source() -> shift_register_manager.TeamSummarySourceResolution:
-    return shift_register_manager.TeamSummarySourceResolution(
-        shift_register_manager.TeamSummarySourceStatus.AVAILABLE,
-        shift_register_manager.TeamSummaryFormulaSource(
-            channel_id=22,
-            sheet_url="https://team.sheet.example",
-            worksheet_id=201,
-            worksheet_title="Team Summary",
-            username_column=1,
-            roles_column=3,
-            main_isv_column=4,
-            encore_isv_column=6,
-            import_last_column="G",
+def available_team_source() -> shift_register_manager.TeamSourceResolution:
+    config = make_team_source_config()
+    metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", None),
+            TeamWorksheetMetadata(102, "Encore Team", None),
+            SummaryWorksheetMetadata(201, "Team Summary", None),
+        ],
+    )
+    return shift_register_manager.TeamSourceResolution(
+        shift_register_manager.TeamSourceStatus.AVAILABLE,
+        shift_register_manager.TeamSource(
+            config=config,
+            metadata=metadata,
+            summary_columns=shift_register_manager.TeamSummaryColumns(
+                username=1,
+                roles=3,
+                main_isv=4,
+                encore_isv=6,
+                import_last_column="G",
+            ),
         ),
     )
 
 
 def configure_row_source(
     manager: ShiftRegisterManager,
-    resolution: shift_register_manager.TeamSummarySourceResolution,
+    resolution: shift_register_manager.TeamSourceResolution,
 ) -> None:
-    async def resolve() -> shift_register_manager.TeamSummarySourceResolution:
+    async def resolve() -> shift_register_manager.TeamSourceResolution:
         return resolution
 
-    manager.resolve_team_summary_source = resolve  # type: ignore[method-assign]
+    manager.resolve_team_source = resolve  # type: ignore[method-assign]
 
 
 def current_entry_rows(*participant_rows: list[object]) -> list[list[object]]:
@@ -294,15 +307,18 @@ def current_entry_rows(*participant_rows: list[object]) -> list[list[object]]:
 def expected_formula(row: int) -> str:
     source = available_team_source().source
     assert source is not None
+    summary = source.metadata.summary_worksheet
+    columns = source.summary_columns
+    assert summary.title is not None
     return build_team_summary_formula(
         row=row,
-        sheet_url=source.sheet_url,
-        worksheet_title=source.worksheet_title,
-        username_column=source.username_column,
-        roles_column=source.roles_column,
-        main_isv_column=source.main_isv_column,
-        encore_isv_column=source.encore_isv_column,
-        import_last_column=source.import_last_column,
+        sheet_url=source.config.sheet_url,
+        worksheet_title=summary.title,
+        username_column=columns.username,
+        roles_column=columns.roles,
+        main_isv_column=columns.main_isv,
+        encore_isv_column=columns.encore_isv,
+        import_last_column=columns.import_last_column,
     )
 
 
@@ -408,15 +424,17 @@ async def test_shift_manager_selects_only_same_guild_team_register(
         source_sheet=source_sheet,
     )
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert resolution.status is shift_register_manager.TeamSummarySourceStatus.AVAILABLE
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
     assert resolution.source is not None
-    assert resolution.source.channel_id == 22
-    assert resolution.source.worksheet_title == "Renamed Summary"
-    assert resolution.source.main_isv_column == 4
-    assert resolution.source.encore_isv_column == 6
-    assert resolution.source.import_last_column == "G"
+    assert resolution.source.config is config
+    assert resolution.source.config.feature_channel.channel_id == 22
+    assert resolution.source.metadata.summary_worksheet.title == "Renamed Summary"
+    assert [ws.id for ws in resolution.source.metadata.team_worksheets] == [101, 102]
+    assert resolution.source.summary_columns.main_isv == 4
+    assert resolution.source.summary_columns.encore_isv == 6
+    assert resolution.source.summary_columns.import_last_column == "G"
     assert query.selected_related == ("feature_channel",)
 
 
@@ -451,12 +469,12 @@ async def test_shift_manager_resolves_main_only_team_source(
         source_sheet=source_sheet,
     )
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert resolution.status is shift_register_manager.TeamSummarySourceStatus.AVAILABLE
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
     assert resolution.source is not None
-    assert resolution.source.encore_isv_column is None
-    assert resolution.source.import_last_column == "E"
+    assert resolution.source.summary_columns.encore_isv is None
+    assert resolution.source.summary_columns.import_last_column == "E"
 
 
 @pytest.mark.asyncio
@@ -468,9 +486,9 @@ async def test_shift_manager_reports_missing_team_source(
     )
     configure_team_source_query(monkeypatch, manager=manager, configs=[])
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert resolution.status is shift_register_manager.TeamSummarySourceStatus.MISSING
+    assert resolution.status is shift_register_manager.TeamSourceStatus.MISSING
     assert resolution.source is None
 
 
@@ -487,9 +505,9 @@ async def test_shift_manager_reports_ambiguous_team_source(
         configs=[make_team_source_config(), make_team_source_config()],
     )
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert resolution.status is shift_register_manager.TeamSummarySourceStatus.AMBIGUOUS
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AMBIGUOUS
     assert resolution.source is None
 
 
@@ -524,9 +542,49 @@ async def test_shift_manager_reports_invalid_team_source(
         source_sheet=FakeTeamSourceSheet(worksheets),
     )
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert resolution.status is shift_register_manager.TeamSummarySourceStatus.INVALID
+    assert resolution.status is shift_register_manager.TeamSourceStatus.INVALID
+    assert resolution.source is None
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_rejects_missing_team_landing_worksheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    config = make_team_source_config(landing_worksheet_id=999)
+    source_sheet = FakeTeamSourceSheet(
+        [
+            FakeTeamSourceWorksheet(101, "Main"),
+            FakeTeamSourceWorksheet(102, "Encore"),
+            FakeTeamSourceWorksheet(
+                201,
+                "Summary",
+                [
+                    "username",
+                    "display_name",
+                    "encore_roles",
+                    "Main ISV",
+                    "Main Power",
+                    "Encore ISV",
+                    "Encore Power",
+                ],
+            ),
+        ]
+    )
+    configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[config],
+        source_sheet=source_sheet,
+    )
+
+    resolution = await manager.resolve_team_source()
+
+    assert resolution.status is shift_register_manager.TeamSourceStatus.INVALID
     assert resolution.source is None
 
 
@@ -548,11 +606,9 @@ async def test_shift_manager_reports_transient_team_source_as_unresolved(
         source_sheet=FakeTeamSourceSheet([], error=error),
     )
 
-    resolution = await manager.resolve_team_summary_source()
+    resolution = await manager.resolve_team_source()
 
-    assert (
-        resolution.status is shift_register_manager.TeamSummarySourceStatus.UNRESOLVED
-    )
+    assert resolution.status is shift_register_manager.TeamSourceStatus.UNRESOLVED
     assert resolution.source is None
 
 
@@ -582,8 +638,8 @@ async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
     )
     configure_row_source(
         manager,
-        shift_register_manager.TeamSummarySourceResolution(
-            shift_register_manager.TeamSummarySourceStatus.MISSING
+        shift_register_manager.TeamSourceResolution(
+            shift_register_manager.TeamSourceStatus.MISSING
         ),
     )
     worksheet = FakeEntryWorksheet(rows=[], row_count=2, col_count=20)
@@ -670,8 +726,8 @@ async def test_missing_team_source_saves_shift_and_clears_stale_anchor() -> None
     )
     configure_row_source(
         manager,
-        shift_register_manager.TeamSummarySourceResolution(
-            shift_register_manager.TeamSummarySourceStatus.MISSING
+        shift_register_manager.TeamSourceResolution(
+            shift_register_manager.TeamSourceStatus.MISSING
         ),
     )
     worksheet = FakeEntryWorksheet(
@@ -695,8 +751,8 @@ async def test_transient_team_source_preserves_existing_formula() -> None:
     )
     configure_row_source(
         manager,
-        shift_register_manager.TeamSummarySourceResolution(
-            shift_register_manager.TeamSummarySourceStatus.UNRESOLVED
+        shift_register_manager.TeamSourceResolution(
+            shift_register_manager.TeamSourceStatus.UNRESOLVED
         ),
     )
     worksheet = FakeEntryWorksheet(
@@ -790,8 +846,8 @@ async def test_shift_manager_repairs_migration_ready_header_and_count() -> None:
     )
     configure_row_source(
         manager,
-        shift_register_manager.TeamSummarySourceResolution(
-            shift_register_manager.TeamSummarySourceStatus.MISSING
+        shift_register_manager.TeamSourceResolution(
+            shift_register_manager.TeamSourceStatus.MISSING
         ),
     )
     count_row = EntryWorksheetContent.count_row()

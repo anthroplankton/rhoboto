@@ -200,7 +200,15 @@ class ConfiguredHelpUrlManager(ConfiguredManager):
             ),
             summary_worksheet_id=333,
             entry_worksheet_id=444,
+            landing_worksheet_id=333,
         )
+
+
+class ConfiguredShiftHelpUrlManager(ConfiguredHelpUrlManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        config = await super().get_sheet_config_or_none()
+        config.landing_worksheet_id = config.entry_worksheet_id
+        return config
 
 
 class AutoGuideMessage:
@@ -299,6 +307,7 @@ def shift_auto_guide_config() -> SimpleNamespace:
     return SimpleNamespace(
         sheet_url="https://docs.google.com/spreadsheets/d/abc/edit?usp=sharing#gid=999",
         entry_worksheet_id=444,
+        landing_worksheet_id=444,
         day_number=2,
         event_date=dt.date(2026, 8, 12),
         submission_deadline_at=dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
@@ -677,7 +686,6 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_send_missing_config_followup",
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
-        "_guide_worksheet_id",
         "_guide_sheet_url",
         "_auto_guide_is_enabled",
         "_auto_guide_template_values",
@@ -709,7 +717,10 @@ def ordered_team_upsert_context(
             feature_name="team_register",
         ),
         manager=manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
 
 
@@ -2569,7 +2580,10 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     old_message = AutoGuideMessage(1234)
     channel = AutoGuideChannel(old_messages=[old_message])
@@ -2684,7 +2698,10 @@ async def test_auto_guide_delete_failure_logs_and_keeps_new_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     old_message = AutoGuideMessage(1234, delete_error=fake_http_exception())
     channel = AutoGuideChannel(old_messages=[old_message])
@@ -2775,7 +2792,10 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel(send_errors=[fake_http_exception()])
     auto_state = SaveableAutoGuideState()
@@ -2870,7 +2890,10 @@ async def test_auto_guide_buttons_use_first_announcement_language(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel()
     auto_state = SaveableAutoGuideState()
@@ -2952,7 +2975,10 @@ async def test_auto_guide_save_id_failure_keeps_new_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel()
     auto_state = SaveableAutoGuideState(save_error=RuntimeError("save failed"))
@@ -3116,7 +3142,7 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
-    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredHelpUrlManager)
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredShiftHelpUrlManager)
     captured_sheet_urls: list[object] = []
 
     async def fake_render_announcement_messages(
@@ -3196,7 +3222,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
-    monkeypatch.setattr(Shift, "ManagerType", ConfiguredHelpUrlManager)
+    monkeypatch.setattr(Shift, "ManagerType", ConfiguredShiftHelpUrlManager)
     captured_values: dict[str, object] = {}
 
     def fake_render_message_template(

@@ -59,6 +59,10 @@ class ShiftRegisterConfig(SheetConfigBase):
     class Meta:
         table = "shift_register"
 
+    @property
+    def landing_worksheet_id(self) -> int:
+        return self.entry_worksheet_id
+
     def get_worksheet_ids(self) -> list[int]:
         return [
             self.entry_worksheet_id,
