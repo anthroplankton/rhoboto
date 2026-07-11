@@ -364,15 +364,15 @@ def test_auto_guide_runtime_templates_render(
         (
             "zh_tw",
             (
-                "若訊息上出現 ✅，代表結果已記錄到 "  # noqa: RUF001
+                "若訊息出現 ✅，結果就會記錄在 "  # noqa: RUF001
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example)"
-                "，可供查看與確認。若出現 ⚠️，代表登記可能未正常完成。"  # noqa: RUF001
+                " 中，可前往確認。若出現 ⚠️，表示登錄可能未正常完成。"  # noqa: RUF001
             ),
         ),
         (
             "en",
             (
-                "If the message receives ✅, the result has been recorded in "
+                "If the message receives a ✅, the results have been recorded in "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
                 "for you to view and confirm. If it receives ⚠️, "
                 "the registration may not have completed successfully."
