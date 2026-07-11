@@ -45,12 +45,147 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.shift_register_structs import Shift as RegisterShift, ShiftParser
+from utils.shift_register_structs import (
+    DraftWorksheetMetadata,
+    Shift as RegisterShift,
+    ShiftParser,
+)
+from utils.shift_scheduler import DraftSchedule, HourShiftAssignment
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 from utils.team_register_structs import Team as RegisterTeam, TeamParser
 
 PRIVATE_DATABASE_ERROR = "private database"
+
+
+def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4, 5, 6, 7, 8, 9, 10, 11],
+        assignments=[
+            HourShiftAssignment(
+                hour=4,
+                lane_usernames={"encore": "alice"},
+                unassigned_usernames=["carol", "dave"],
+            ),
+            HourShiftAssignment(
+                hour=5,
+                lane_usernames={"hashiri_1": "bob", "encore": "alice"},
+            ),
+            HourShiftAssignment(
+                hour=6,
+                lane_usernames={
+                    "encore": "alice",
+                    "hashiri_1": "bob",
+                    "hashiri_2": "eve",
+                    "hashiri_3": "frank",
+                    "standby": "grace",
+                },
+            ),
+            HourShiftAssignment(hour=7, lane_usernames={"hashiri_1": "bob"}),
+            HourShiftAssignment(hour=8),
+            HourShiftAssignment(
+                hour=9,
+                lane_usernames={"encore": "alice", "standby": "grace"},
+            ),
+            HourShiftAssignment(
+                hour=10,
+                lane_usernames={"standby": "grace", "hashiri_1": "bob"},
+            ),
+            HourShiftAssignment(hour=11, lane_usernames={"standby": "grace"}),
+        ],
+        display_names={
+            "alice": "Alice",
+            "bob": "Bob",
+            "carol": "Carol",
+            "dave": "Dave",
+            "eve": "E`ve",
+            "frank": "Frank",
+            "grace": "Grace",
+        },
+    )
+
+    assert ShiftRegister._format_draft_report(
+        schedule,
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {"alice": "<@111>", "bob": "<@222>", "carol": "<@333>"},
+    ) == (
+        "### ✅ 班表草稿已產生\n"
+        "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
+        "- ‼️ 已將 `8` 個小時的班表寫入 "
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        "，並覆蓋原有內容。\n"  # noqa: RUF001
+        "- 已排入：\n"  # noqa: RUF001
+        "  - -# `4-5`（缺 `4`）：<@111>\n"  # noqa: RUF001
+        "  - -# `5-6`（缺 `3`）：<@111> ｜ <@222>\n"  # noqa: RUF001
+        "  - -# `6-7`：<@111> ｜ <@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
+        "  - -# `7-8`（缺 `4`）：`No encore` ｜ <@222>\n"  # noqa: RUF001
+        "  - -# `8-9`（缺 `5`）\n"  # noqa: RUF001
+        "  - -# `9-10`（缺 `3`）：<@111>；`Grace`\n"  # noqa: RUF001
+        "  - -# `10-11`（缺 `3`）：`No encore` ｜ <@222>；`Grace`\n"  # noqa: RUF001
+        "  - -# `11-12`（缺 `4`）：`No encore`；`Grace`\n"  # noqa: RUF001
+        "- 未排入（位置已滿）：\n"  # noqa: RUF001
+        "  - -# `4-5`：<@333>、`Dave`"  # noqa: RUF001
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
+    schedule = DraftSchedule(
+        None,
+        [4],
+        [HourShiftAssignment(4, unassigned_usernames=["carol"])],
+        {"carol": "Carol"},
+    )
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+    )
+
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            _metadata: object,
+        ) -> SimpleNamespace:
+            return metadata
+
+        async def generate_draft(
+            self,
+            _metadata: object,
+            *,
+            runner: str | None,
+        ) -> DraftSchedule:
+            assert runner is None
+            return schedule
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager())
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    interaction = FakeInteraction(
+        guild=SimpleNamespace(
+            id=111,
+            members=[SimpleNamespace(name="carol", mention="<@333>")],
+        )
+    )
+
+    await ShiftRegister.generate_draft.callback(subject, interaction)
+
+    assert "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)" in (
+        interaction.followup.messages[0][0] or ""
+    )
+    assert "<@333>" in (interaction.followup.messages[0][0] or "")
 
 
 async def fake_feature_channel_get(
