@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from io import BytesIO
 from typing import TYPE_CHECKING, override
 
-from discord import app_commands
+from discord import File, app_commands
 from discord.utils import escape_markdown
 
 from bot import config
@@ -360,6 +361,9 @@ class ShiftRegister(
         ),
     )
     @app_commands.describe(
+        encore_power_threshold=(
+            "Minimum Team Power required for Encore; Power must be greater than it."
+        ),
         runner="Nickname pinned to the runner (ランナー) lane for every hour.",
     )
     @app_commands.check(
@@ -371,6 +375,7 @@ class ShiftRegister(
     async def generate_draft(
         self,
         interaction: Interaction,
+        encore_power_threshold: app_commands.Range[float, 0],
         runner: str | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
@@ -396,7 +401,12 @@ class ShiftRegister(
                         metadata
                     )
                 )
-                schedule = await context.manager.generate_draft(metadata, runner=runner)
+                result = await context.manager.generate_draft(
+                    metadata,
+                    encore_power_threshold=float(encore_power_threshold),
+                    runner=runner,
+                )
+                schedule = result.schedule
                 draft_sheet_url = google_sheet_url_with_gid(
                     metadata.sheet_url,
                     metadata.draft_worksheet.id,
@@ -414,7 +424,19 @@ class ShiftRegister(
             return
 
         await interaction.followup.send(
-            self._format_draft_report(schedule, draft_sheet_url, member_mentions),
+            self._format_draft_report(
+                schedule,
+                draft_sheet_url,
+                member_mentions,
+                encore_power_threshold=float(encore_power_threshold),
+                recruitment_ranges=result.recruitment_ranges,
+                team_source_warning=result.team_source_warning,
+                unregistered_usernames=result.unregistered_usernames,
+            ),
+            file=File(
+                BytesIO(result.notes_snapshot.encode("utf-8")),
+                filename="shift-draft-notes.txt",
+            ),
             ephemeral=True,
         )
 
@@ -423,22 +445,43 @@ class ShiftRegister(
         schedule: DraftSchedule,
         draft_sheet_url: str,
         member_mentions: dict[str, str],
+        *,
+        encore_power_threshold: float,
+        recruitment_ranges: RecruitmentTimeRanges,
+        team_source_warning: str | None,
+        unregistered_usernames: tuple[str, ...] = (),
     ) -> str:
         """Format the generated draft report.
 
         The report always shows encore, 本走, and standby in that order. Empty
         slots display their per-group shortage so each role remains visible.
         """
+        report_assignments = [
+            assignment
+            for assignment in schedule.assignments
+            if recruitment_ranges.contains_slots({assignment.hour})
+        ]
         lines = [
             "### ✅ 班表草稿已產生",
             f"- Runner（ランナー）：{schedule.runner or '`Not set`'}",  # noqa: RUF001
+            f"- 安可綜合力閾值：{encore_power_threshold:g}",  # noqa: RUF001
             (
-                f"- ‼️ 已將 `{len(schedule.hours)}` 個小時的班表寫入 "
-                f"[Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
+                f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
             ),
         ]
+        if team_source_warning is not None:
+            lines.append(team_source_warning)
+        if unregistered_usernames:
+            lines.append(
+                "⚠️ 編成未登録："  # noqa: RUF001
+                + "、".join(
+                    _format_draft_username(username, schedule, member_mentions)
+                    for username in unregistered_usernames
+                )
+            )
+        lines.append(f"- 募集時間【{recruitment_ranges.announcement_display()}】")
         lines.append("- 已排入（安可｜本走；待機）：")  # noqa: RUF001
-        for assignment in schedule.assignments:
+        for assignment in report_assignments:
             encore_username = assignment.supporter_usernames_by_slot.get(
                 ENCORE_SUPPORTER_SLOT
             )
@@ -474,7 +517,7 @@ class ShiftRegister(
             )
         unassigned_assignments = [
             assignment
-            for assignment in schedule.assignments
+            for assignment in report_assignments
             if assignment.unassigned_usernames
         ]
         if unassigned_assignments:
@@ -487,6 +530,9 @@ class ShiftRegister(
                 )
                 for assignment in unassigned_assignments
             )
+        lines.append(
+            "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
+        )
         return "\n".join(lines)
 
 

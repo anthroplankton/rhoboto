@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, overload, override
@@ -22,6 +23,7 @@ from models.shift_register import ShiftRegisterConfig
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
+    DraftNotesTeamSource,
     DraftWorksheetContent,
     EntryWorksheetContent,
     RecruitmentTimeRanges,
@@ -30,7 +32,7 @@ from utils.shift_register_structs import (
     build_team_summary_formula,
     column_letter,
 )
-from utils.shift_scheduler import ShiftScheduler
+from utils.shift_scheduler import DraftTeamProfile, ShiftScheduler
 from utils.storage_errors import (
     StorageError,
     StorageErrorKind,
@@ -55,7 +57,9 @@ class TeamSummaryColumns:
     username: int
     roles: int
     main_isv: int
+    main_power: int | None
     encore_isv: int | None
+    encore_power: int | None
     import_last_column: str
 
 
@@ -70,6 +74,32 @@ class TeamSource:
 class TeamSourceResolution:
     status: TeamSourceStatus
     source: TeamSource | None = None
+
+
+@dataclass(frozen=True)
+class DraftTeamProfileResolution:
+    status: TeamSourceStatus
+    profiles: dict[str, DraftTeamProfile]
+    notes_team_source: DraftNotesTeamSource | None = None
+
+
+@dataclass(frozen=True)
+class DraftGenerationResult:
+    schedule: DraftSchedule
+    team_source_status: TeamSourceStatus
+    team_source_warning: str | None
+    recruitment_ranges: RecruitmentTimeRanges
+    notes_snapshot: str
+    unregistered_usernames: tuple[str, ...] = ()
+
+
+TEAM_SOURCE_UNSET_DRAFT_WARNING = (
+    "⚠️ Team Sourceが未設定のため、今回はISVを使用せず、アンコを空欄にしています。"
+)
+TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING = (
+    "⚠️🛠️ Team Sourceを読み取れなかったため、今回はISVを使用せず、"
+    "アンコを空欄にしています。"
+)
 
 
 class ShiftRegisterManager(
@@ -121,6 +151,62 @@ class ShiftRegisterManager(
             return TeamSourceResolution(TeamSourceStatus.AMBIGUOUS)
 
         return await self._resolve_team_source_config(configs[0])
+
+    async def resolve_draft_team_profiles(self) -> DraftTeamProfileResolution:
+        """Read Draft scheduling values from the configured Team Summary."""
+        resolution = await self.resolve_team_source()
+        source = resolution.source
+        if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
+            return DraftTeamProfileResolution(resolution.status, {})
+
+        columns = source.summary_columns
+        if columns.main_power is None or (
+            columns.encore_isv is not None and columns.encore_power is None
+        ):
+            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
+
+        worksheet = source.metadata.summary_worksheet.worksheet
+        if worksheet is None:
+            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
+        try:
+            value_ranges = await worksheet.batch_get_values(
+                [f"A:{columns.import_last_column}"]
+            )
+            profiles = _draft_profiles_from_summary(value_ranges[0], columns)
+        except GoogleSheetsError as exc:
+            self.logger.warning("Could not read Draft Team profiles: %s", exc.kind)
+            return DraftTeamProfileResolution(TeamSourceStatus.UNRESOLVED, {})
+        except (IndexError, ValueError):
+            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
+        summary_title = source.metadata.summary_worksheet.title
+        main_title = source.metadata.team_worksheets[0].title
+        if summary_title is None or main_title is None:
+            msg = "Resolved Team Source is missing a worksheet title."
+            raise ValueError(msg)
+        encore_title = (
+            source.metadata.team_worksheets[1].title
+            if len(source.metadata.team_worksheets) > 1
+            else None
+        )
+        notes_team_source = DraftNotesTeamSource(
+            sheet_url=source.config.sheet_url,
+            worksheet_title=summary_title,
+            import_last_column=columns.import_last_column,
+            username_header="username",
+            main_isv_header=Summary.isv_title(main_title),
+            main_power_header=Summary.power_title(main_title),
+            encore_isv_header=(
+                Summary.isv_title(encore_title) if encore_title is not None else None
+            ),
+            encore_power_header=(
+                Summary.power_title(encore_title) if encore_title is not None else None
+            ),
+        )
+        return DraftTeamProfileResolution(
+            TeamSourceStatus.AVAILABLE,
+            profiles,
+            notes_team_source,
+        )
 
     async def get_team_source_candidate_channel_ids(self) -> tuple[int, ...]:
         """Return same-guild Team Register channels available for UI selection."""
@@ -259,10 +345,22 @@ class ShiftRegisterManager(
                     header,
                     Summary.isv_title(main_worksheet.title),
                 ),
+                main_power=_optional_unique_header_column(
+                    header,
+                    Summary.power_title(main_worksheet.title),
+                ),
                 encore_isv=(
                     _unique_header_column(
                         header,
                         Summary.isv_title(encore_worksheet.title),
+                    )
+                    if encore_worksheet is not None
+                    else None
+                ),
+                encore_power=(
+                    _optional_unique_header_column(
+                        header,
+                        Summary.power_title(encore_worksheet.title),
                     )
                     if encore_worksheet is not None
                     else None
@@ -489,8 +587,9 @@ class ShiftRegisterManager(
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
+        encore_power_threshold: float,
         runner: str | None = None,
-    ) -> DraftSchedule:
+    ) -> DraftGenerationResult:
         """Build the draft schedule and overwrite the draft worksheet."""
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet
@@ -517,20 +616,88 @@ class ShiftRegisterManager(
         recruitment_ranges = RecruitmentTimeRanges.from_json(
             shift_register_config.recruitment_time_ranges
         )
+        recruitment_time_range = recruitment_ranges.announcement_display()
+        normalized_ranges = recruitment_ranges.ranges.ranges
+        draft_hours = range(normalized_ranges[0].start, normalized_ranges[-1].end)
+        active_slots = recruitment_ranges.ranges.slots
+        shifts = [
+            Shift(
+                username=shift.username,
+                display_name=shift.display_name,
+                original_message=shift.original_message,
+                slots=set(shift) & active_slots,
+            )
+            for shift in shifts
+        ]
+        profile_resolution = await self.resolve_draft_team_profiles()
+        profiles = profile_resolution.profiles
         schedule = ShiftScheduler.assign(
             shifts,
-            sorted(recruitment_ranges.ranges.slots),
+            draft_hours,
+            team_profiles=profiles,
+            encore_power_threshold=encore_power_threshold,
             runner=runner,
         )
+        unregistered_usernames = (
+            tuple(
+                username
+                for username in schedule.display_names
+                if (profile := profiles.get(username)) is None
+                or profile.main_isv is None
+            )
+            if profile_resolution.status is TeamSourceStatus.AVAILABLE
+            else ()
+        )
         draft_df = DraftWorksheetContent.from_schedule(schedule)
-        await draft_worksheet.update_from_dataframe(draft_df, raw_data=True)
+        team_source_warning = _draft_team_source_warning(profile_resolution.status)
+        notes_formula = DraftWorksheetContent.notes_formula(
+            schedule,
+            entry_worksheet_title=entry_worksheet.title,
+            recruitment_time_range=recruitment_time_range,
+            team_source=profile_resolution.notes_team_source,
+            team_source_warning=team_source_warning,
+        )
+        notes_snapshot = DraftWorksheetContent.notes_snapshot(
+            schedule,
+            shifts=shifts,
+            recruitment_time_range=recruitment_time_range,
+            team_profiles=(
+                profiles
+                if profile_resolution.status is TeamSourceStatus.AVAILABLE
+                else None
+            ),
+            team_source_warning=team_source_warning,
+        )
+        notes_row = len(schedule.assignments) + 3
+        notes_cell = f"A{notes_row}"
+        await draft_worksheet.batch_update_typed_values(
+            [
+                {
+                    "range": "A:G",
+                    "values": [
+                        DraftWorksheetContent.COLUMNS,
+                        *draft_df.fillna("").to_numpy().tolist(),
+                    ],
+                },
+                {"range": f"H{notes_row}:H", "values": []},
+                {"range": notes_cell, "values": [[notes_formula]]},
+            ],
+            formula_ranges={notes_cell},
+        )
         self.logger.info(
             "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
             draft_worksheet.title,
             len(schedule.hours),
             schedule.total_shortage,
         )
-        return schedule
+        return DraftGenerationResult(
+            schedule=schedule,
+            team_source_status=profile_resolution.status,
+            team_source_warning=team_source_warning,
+            recruitment_ranges=recruitment_ranges,
+            notes_snapshot=notes_snapshot,
+            unregistered_usernames=unregistered_usernames,
+        )
 
 
 async def _read_entry_state(
@@ -655,9 +822,64 @@ def _is_blank(value: object) -> bool:
     return value in ("", None)
 
 
+def _draft_team_source_warning(status: TeamSourceStatus) -> str | None:
+    if status is TeamSourceStatus.AVAILABLE:
+        return None
+    if status is TeamSourceStatus.UNSET:
+        return TEAM_SOURCE_UNSET_DRAFT_WARNING
+    return TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING
+
+
+def _optional_float(value: object) -> float | None:
+    if value in ("", None) or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def _summary_value(row: list[object], column: int | None) -> object:
+    if column is None or column > len(row):
+        return ""
+    return row[column - 1]
+
+
+def _draft_profiles_from_summary(
+    rows: list[list[object]],
+    columns: TeamSummaryColumns,
+) -> dict[str, DraftTeamProfile]:
+    if not rows:
+        msg = "Team Summary returned no header row."
+        raise ValueError(msg)
+
+    profiles: dict[str, DraftTeamProfile] = {}
+    for row in rows[1:]:
+        username = str(_summary_value(row, columns.username)).strip()
+        if not username:
+            continue
+        if username in profiles:
+            msg = f"Duplicate Team Summary username: {username!r}."
+            raise ValueError(msg)
+        profiles[username] = DraftTeamProfile(
+            main_isv=_optional_float(_summary_value(row, columns.main_isv)),
+            main_power=_optional_float(_summary_value(row, columns.main_power)),
+            encore_isv=_optional_float(_summary_value(row, columns.encore_isv)),
+            encore_power=_optional_float(_summary_value(row, columns.encore_power)),
+            has_encore_role=bool(str(_summary_value(row, columns.roles)).strip()),
+        )
+    return profiles
+
+
 def _unique_header_column(header: list[object], name: str) -> int:
     matches = [index for index, value in enumerate(header, start=1) if value == name]
     if len(matches) != 1:
         msg = f"Expected one Summary header {name!r}, found {len(matches)}."
         raise ValueError(msg)
     return matches[0]
+
+
+def _optional_unique_header_column(header: list[object], name: str) -> int | None:
+    matches = [index for index, value in enumerate(header, start=1) if value == name]
+    return matches[0] if len(matches) == 1 else None

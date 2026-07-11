@@ -4,6 +4,7 @@ import copy
 import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
@@ -22,6 +23,7 @@ from utils.shift_register_structs import (
     ShiftRegisterGoogleSheetsMetadata,
     build_team_summary_formula,
 )
+from utils.shift_scheduler import DraftTeamProfile
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 from utils.team_register_manager import TeamRegisterManager
@@ -81,14 +83,19 @@ class FakeTeamSourceWorksheet:
         worksheet_id: int,
         title: str,
         header: list[object] | None = None,
+        rows: list[list[object]] | None = None,
     ) -> None:
         self.id = worksheet_id
         self.title = title
         self.header = header
+        self.rows = rows or []
+        self.batch_gets: list[list[str]] = []
 
     async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        assert ranges == ["1:1"]
-        return [[self.header]] if self.header is not None else [[]]
+        self.batch_gets.append(ranges)
+        if ranges == ["1:1"]:
+            return [[self.header]] if self.header is not None else [[]]
+        return [[[*(self.header or [])], *self.rows]]
 
 
 class FakeTeamSourceSheet:
@@ -166,6 +173,17 @@ def make_team_source_config(
         ),
         get_worksheet_ids=lambda: worksheet_ids,
     )
+
+
+TEAM_SUMMARY_HEADER = [
+    "username",
+    "display_name",
+    "encore_roles",
+    "Main Team ISV",
+    "Main Team Power",
+    "Encore Team ISV",
+    "Encore Team Power",
+]
 
 
 class FakeEntryWorksheet:
@@ -303,7 +321,9 @@ def available_team_source() -> shift_register_manager.TeamSourceResolution:
                 username=1,
                 roles=3,
                 main_isv=4,
+                main_power=5,
                 encore_isv=6,
+                encore_power=7,
                 import_last_column="G",
             ),
         ),
@@ -505,6 +525,177 @@ async def test_shift_manager_prefers_saved_team_source(
     assert resolution.source is not None
     assert resolution.source.config.feature_channel.channel_id == 33
     assert query.filter_kwargs == {"feature_channel_id": 23}
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_reads_draft_profiles_from_selected_team_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
+    )
+    summary = FakeTeamSourceWorksheet(
+        201,
+        "Team Summary",
+        TEAM_SUMMARY_HEADER,
+        [
+            ["alice", "Alice", "Encore", 200, 40, 250, 50],
+            ["bob", "Bob", "Encore", 190, 45, "", ""],
+            ["carol", "Carol", "", 210, 55, 260, 60],
+        ],
+    )
+    configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[make_team_source_config()],
+        source_sheet=FakeTeamSourceSheet(
+            [
+                FakeTeamSourceWorksheet(101, "Main Team"),
+                FakeTeamSourceWorksheet(102, "Encore Team"),
+                summary,
+            ]
+        ),
+    )
+
+    resolution = await manager.resolve_draft_team_profiles()
+
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
+    assert resolution.profiles["alice"] == DraftTeamProfile(
+        main_isv=200,
+        main_power=40,
+        encore_isv=250,
+        encore_power=50,
+        has_encore_role=True,
+    )
+    assert resolution.profiles["bob"].has_encore_team is False
+    assert resolution.profiles["carol"].has_encore_role is False
+    assert resolution.notes_team_source == shift_register_manager.DraftNotesTeamSource(
+        sheet_url="https://team.sheet.example",
+        worksheet_title="Team Summary",
+        import_last_column="G",
+        username_header="username",
+        main_isv_header="Main Team ISV",
+        main_power_header="Main Team Power",
+        encore_isv_header="Encore Team ISV",
+        encore_power_header="Encore Team Power",
+    )
+    assert summary.batch_gets == [["1:1"], ["A:G"]]
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_rejects_duplicate_draft_profile_usernames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
+    )
+    summary = FakeTeamSourceWorksheet(
+        201,
+        "Team Summary",
+        TEAM_SUMMARY_HEADER,
+        [
+            ["alice", "Alice", "Encore", 200, 40, 250, 50],
+            ["alice", "Alice 2", "Encore", 190, 45, "", ""],
+        ],
+    )
+    configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[make_team_source_config()],
+        source_sheet=FakeTeamSourceSheet(
+            [
+                FakeTeamSourceWorksheet(101, "Main Team"),
+                FakeTeamSourceWorksheet(102, "Encore Team"),
+                summary,
+            ]
+        ),
+    )
+
+    resolution = await manager.resolve_draft_team_profiles()
+
+    assert resolution == shift_register_manager.DraftTeamProfileResolution(
+        shift_register_manager.TeamSourceStatus.INVALID,
+        {},
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_keeps_entry_source_without_power_but_rejects_profiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
+    )
+    configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[make_team_source_config(team_worksheet_ids=[101])],
+        source_sheet=FakeTeamSourceSheet(
+            [
+                FakeTeamSourceWorksheet(101, "Only Main"),
+                FakeTeamSourceWorksheet(
+                    201,
+                    "Team Summary",
+                    [
+                        "username",
+                        "display_name",
+                        "encore_roles",
+                        "Only Main ISV",
+                    ],
+                ),
+            ]
+        ),
+    )
+
+    source = await manager.resolve_team_source()
+    profiles = await manager.resolve_draft_team_profiles()
+
+    assert source.status is shift_register_manager.TeamSourceStatus.AVAILABLE
+    assert profiles == shift_register_manager.DraftTeamProfileResolution(
+        shift_register_manager.TeamSourceStatus.INVALID,
+        {},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        shift_register_manager.TeamSourceStatus.UNSET,
+        shift_register_manager.TeamSourceStatus.MISSING,
+        shift_register_manager.TeamSourceStatus.AMBIGUOUS,
+        shift_register_manager.TeamSourceStatus.INVALID,
+        shift_register_manager.TeamSourceStatus.UNRESOLVED,
+    ],
+)
+async def test_draft_profiles_preserve_unavailable_team_source_status(
+    monkeypatch: pytest.MonkeyPatch,
+    status: shift_register_manager.TeamSourceStatus,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    monkeypatch.setattr(
+        manager,
+        "resolve_team_source",
+        AsyncMock(return_value=shift_register_manager.TeamSourceResolution(status)),
+    )
+
+    resolution = await manager.resolve_draft_team_profiles()
+
+    assert resolution == shift_register_manager.DraftTeamProfileResolution(
+        status,
+        {},
+    )
 
 
 @pytest.mark.asyncio

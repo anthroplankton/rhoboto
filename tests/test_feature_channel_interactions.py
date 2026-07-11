@@ -8,7 +8,7 @@ import re
 from types import SimpleNamespace
 
 import pytest
-from discord import Embed, HTTPException, NotFound
+from discord import Embed, File, HTTPException, NotFound
 from tortoise.exceptions import DBConnectionError
 
 from bot import config
@@ -45,8 +45,15 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.shift_register_manager import (
+    TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING,
+    TEAM_SOURCE_UNSET_DRAFT_WARNING,
+    DraftGenerationResult,
+    TeamSourceStatus,
+)
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
+    RecruitmentTimeRanges,
     Shift as RegisterShift,
     ShiftParser,
 )
@@ -56,6 +63,18 @@ from utils.structs_base import UserInfo
 from utils.team_register_structs import Team as RegisterTeam, TeamParser
 
 PRIVATE_DATABASE_ERROR = "private database"
+
+
+def test_generate_draft_requires_non_negative_power_threshold() -> None:
+    parameters = {
+        parameter.name: parameter
+        for parameter in ShiftRegister.generate_draft.parameters
+    }
+
+    threshold = parameters["encore_power_threshold"]
+    assert threshold.required is True
+    assert threshold.min_value == 0
+    assert parameters["runner"].required is False
 
 
 def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
@@ -111,28 +130,63 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         },
     )
 
-    assert ShiftRegister._format_draft_report(
+    report = ShiftRegister._format_draft_report(
         schedule,
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
         {"alice": "<@111>", "bob": "<@222>", "carol": "<@333>"},
-    ) == (
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.from_json(
+            [{"start": 4, "end": 8}, {"start": 9, "end": 12}]
+        ),
+        team_source_warning=None,
+        unregistered_usernames=("carol", "eve"),
+    )
+
+    assert report == (
         "### ✅ 班表草稿已產生\n"
         "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
-        "- ‼️ 已將 `8` 個小時的班表寫入 "
+        "- 安可綜合力閾值：35\n"  # noqa: RUF001
+        "‼️ 已將班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
         "，並覆蓋原有內容。\n"  # noqa: RUF001
+        "⚠️ 編成未登録：<@333>、E\\`ve\n"  # noqa: RUF001
+        "- 募集時間【4-8・9-12】\n"
         "- 已排入（安可｜本走；待機）：\n"  # noqa: RUF001
         "  - -# `4-5`：<@111>｜缺 `3`；缺\n"  # noqa: RUF001
         "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
         "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
         "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
-        "  - -# `8-9`：缺｜缺 `3`；缺\n"  # noqa: RUF001
         "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"  # noqa: RUF001
         "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"  # noqa: RUF001
         "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"  # noqa: RUF001
         "- 未排入（位置已滿）：\n"  # noqa: RUF001
-        "  - -# `4-5`：<@333>、`Dave`"  # noqa: RUF001
+        "  - -# `4-5`：<@333>、`Dave`\n"  # noqa: RUF001
+        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
     )
+    assert "`8-9`" not in report
+    assert "`7-8`" in report
+    assert "`9-10`" in report
+    assert "`8` 個小時" not in report
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [TEAM_SOURCE_UNSET_DRAFT_WARNING, TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING],
+)
+def test_format_shift_draft_report_places_team_warning_before_assignments(
+    warning: str,
+) -> None:
+    report = ShiftRegister._format_draft_report(
+        DraftSchedule(None, [], [], {}),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {},
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.default(),
+        team_source_warning=warning,
+    )
+
+    assert report.index(warning) < report.index("募集時間") < report.index("已排入")
+    assert report.index("已排入") < report.index("附件是生成時資料")
 
 
 @pytest.mark.asyncio
@@ -147,6 +201,8 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
         sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
         draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
     )
+    ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
+    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
 
     class Manager:
         async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
@@ -165,10 +221,19 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
             self,
             _metadata: object,
             *,
+            encore_power_threshold: float,
             runner: str | None,
-        ) -> DraftSchedule:
+        ) -> DraftGenerationResult:
+            assert encore_power_threshold == 35
             assert runner is None
-            return schedule
+            return DraftGenerationResult(
+                schedule=schedule,
+                team_source_status=TeamSourceStatus.AVAILABLE,
+                team_source_warning=None,
+                recruitment_ranges=ranges,
+                notes_snapshot=notes_snapshot,
+                unregistered_usernames=("carol",),
+            )
 
     async def get_feature_channel_context(_source: object) -> object:
         return object()
@@ -186,12 +251,21 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
         )
     )
 
-    await ShiftRegister.generate_draft.callback(subject, interaction)
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
 
+    content, kwargs = interaction.followup.messages[0]
     assert "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)" in (
-        interaction.followup.messages[0][0] or ""
+        content or ""
     )
-    assert "<@333>" in (interaction.followup.messages[0][0] or "")
+    assert "<@333>" in (content or "")
+    assert "募集時間【4-5】" in (content or "")
+    assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
+    attachment = kwargs["file"]
+    assert isinstance(attachment, File)
+    assert attachment.filename == "shift-draft-notes.txt"
+    attachment.fp.seek(0)
+    assert attachment.fp.read().decode("utf-8") == notes_snapshot
+    assert kwargs["ephemeral"] is True
 
 
 async def fake_feature_channel_get(

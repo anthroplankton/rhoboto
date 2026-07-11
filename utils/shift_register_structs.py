@@ -24,9 +24,9 @@ from utils.structs_base import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import Generator, Iterable, Iterator, Sequence
 
-    from utils.shift_scheduler import DraftSchedule
+    from utils.shift_scheduler import DraftSchedule, DraftTeamProfile
 
 
 class HourRangeFormatError(ValueError):
@@ -757,6 +757,13 @@ def _formula_string(value: str) -> str:
     return f'"{value.replace(chr(34), chr(34) * 2)}"'
 
 
+def _formula_column(values: Iterable[str]) -> str:
+    items = list(values)
+    if not items:
+        return '{" "}'
+    return "{" + ";".join(_formula_string(value) for value in items) + "}"
+
+
 # ponytail: one IMPORTRANGE per participant; add one bot-managed helper import
 # only if measured participant count, reload latency, or quota pressure requires it.
 def build_team_summary_formula(  # noqa: PLR0913
@@ -800,6 +807,36 @@ def build_team_summary_formula(  # noqa: PLR0913
     )
 
 
+def _longest_consecutive_hours(hours: list[int]) -> int:
+    longest = current = 0
+    previous: int | None = None
+    for hour in hours:
+        current = current + 1 if previous is not None and hour == previous + 1 else 1
+        longest = max(longest, current)
+        previous = hour
+    return longest
+
+
+@dataclass(frozen=True)
+class DraftNotesTeamSource:
+    """Team Summary formula metadata used by dynamic Draft Notes."""
+
+    sheet_url: str
+    worksheet_title: str
+    import_last_column: str
+    username_header: str
+    main_isv_header: str
+    main_power_header: str
+    encore_isv_header: str | None
+    encore_power_header: str | None
+
+
+def _draft_team_value(isv: float | None, power: float | None) -> str:
+    if isv is None and power is None:
+        return ""
+    return "/".join("—" if value is None else f"{value:g}" for value in (isv, power))
+
+
 class DraftWorksheetContent:
     """Builds the Shift Draft worksheet grid from a DraftSchedule.
 
@@ -812,6 +849,23 @@ class DraftWorksheetContent:
     ENCORE_COLUMN: ClassVar[str] = "アンコ"
     HONSO_COLUMNS: ClassVar[tuple[str, str, str]] = ("本走①", "本走②", "本走③")
     STANDBY_COLUMN: ClassVar[str] = "待機"
+    NOTES_HEADING: ClassVar[str] = "メモ"
+    CANONICAL_NAME_LEGEND: ClassVar[str] = (
+        "名前の表示ルール：通常は表示名を使用します。同じ表示名がある場合や、"  # noqa: RUF001
+        "表示名が「⟨@username⟩」形式で終わる場合は、末尾に実際のユーザー名が"
+        "付きます。シフトを調整するときは、名前全体をコピーしてください。"
+    )
+    TEAM_VALUE_LEGEND: ClassVar[str] = "編成欄の表示順：実効値/総合力"  # noqa: RUF001
+    NOTES_COLUMNS: ClassVar[tuple[str, ...]] = (
+        "名前",
+        "シフト合計（h）",  # noqa: RUF001
+        "最長連続（h）",  # noqa: RUF001
+        "アンコ（h）",  # noqa: RUF001
+        "内部編成",
+        "アンコ編成",
+        "編成状態",
+        "元メッセージ",
+    )
 
     COLUMNS: ClassVar[list[str]] = [
         JST_COLUMN,
@@ -850,3 +904,218 @@ class DraftWorksheetContent:
                 row[column] = schedule.display_for(assignment, supporter_slot)
             rows.append(row)
         return pd.DataFrame(rows, columns=cls.COLUMNS)
+
+    @classmethod
+    def notes_formula(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        entry_worksheet_title: str,
+        recruitment_time_range: str,
+        team_source: DraftNotesTeamSource | None,
+        team_source_warning: str | None,
+    ) -> str:
+        """Build the dynamic Japanese Notes spill formula below a Draft."""
+        last_row = max(2, len(schedule.assignments) + 1)
+        title = entry_worksheet_title.replace("'", "''")
+        hour_slots = "{" + ";".join(map(str, schedule.hours or [0])) + "}"
+        warning = _formula_string(team_source_warning or "")
+        recruitment = _formula_string(f"募集時間【{recruitment_time_range}】")
+        legend = _formula_string(cls.CANONICAL_NAME_LEGEND)
+        team_legend = _formula_string(cls.TEAM_VALUE_LEGEND)
+        headers = "{" + ",".join(map(_formula_string, cls.NOTES_COLUMNS)) + "}"
+        if team_source is None:
+            team_bindings = (
+                'mainTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "")), '
+                'mainTeamPowers, MAP(matchedUsernames, LAMBDA(username, "")), '
+                'encoreTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "")), '
+                'encoreTeamPowers, MAP(matchedUsernames, LAMBDA(username, "")), '
+                "unregisteredFlags, MAP(matchedUsernames, "
+                "LAMBDA(username, FALSE)), "
+            )
+        else:
+            source_title = team_source.worksheet_title.replace("'", "''")
+            source_range = _formula_string(
+                f"'{source_title}'!A:{team_source.import_last_column}"
+            )
+            encore_bindings = (
+                (
+                    "encoreIsvHeader, "
+                    f"{_formula_string(team_source.encore_isv_header)}, "
+                    "encoreIsvValues, CHOOSECOLS(team, XMATCH(encoreIsvHeader, "
+                    "teamHeaders, 0)), "
+                    "encoreTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "
+                    'XLOOKUP(username, teamUsernames, encoreIsvValues, ""))), '
+                )
+                if team_source.encore_isv_header is not None
+                else 'encoreTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "")), '
+            )
+            encore_power_bindings = (
+                (
+                    "encorePowerHeader, "
+                    f"{_formula_string(team_source.encore_power_header)}, "
+                    "encorePowerValues, CHOOSECOLS(team, XMATCH(encorePowerHeader, "
+                    "teamHeaders, 0)), "
+                    "encoreTeamPowers, MAP(matchedUsernames, LAMBDA(username, "
+                    'XLOOKUP(username, teamUsernames, encorePowerValues, ""))), '
+                )
+                if team_source.encore_power_header is not None
+                else 'encoreTeamPowers, MAP(matchedUsernames, LAMBDA(username, "")), '
+            )
+            team_bindings = (
+                f"teamSourceUrl, {_formula_string(team_source.sheet_url)}, "
+                f"team, IMPORTRANGE(teamSourceUrl, {source_range}), "
+                f"teamUsernameHeader, {_formula_string(team_source.username_header)}, "
+                f"mainIsvHeader, {_formula_string(team_source.main_isv_header)}, "
+                f"mainPowerHeader, {_formula_string(team_source.main_power_header)}, "
+                "teamHeaders, CHOOSEROWS(team, 1), "
+                "teamUsernames, CHOOSECOLS(team, XMATCH(teamUsernameHeader, "
+                "teamHeaders, 0)), "
+                "mainIsvValues, CHOOSECOLS(team, XMATCH(mainIsvHeader, "
+                "teamHeaders, 0)), "
+                "mainPowerValues, CHOOSECOLS(team, XMATCH(mainPowerHeader, "
+                "teamHeaders, 0)), "
+                "mainTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "
+                'XLOOKUP(username, teamUsernames, mainIsvValues, ""))), '
+                "mainTeamPowers, MAP(matchedUsernames, LAMBDA(username, "
+                'XLOOKUP(username, teamUsernames, mainPowerValues, ""))), '
+                f"{encore_bindings}{encore_power_bindings}"
+                'unregisteredFlags, MAP(mainTeamIsvs, LAMBDA(value, value = "")), '
+            )
+        return (
+            "=LET("
+            f"shifts, C2:G{last_row}, "
+            f"encore, C2:C{last_row}, "
+            f"hourSlots, {hour_slots}, "
+            f"usernames, IFERROR(FILTER('{title}'!A3:A, "
+            f'\'{title}\'!A3:A <> ""), ""), '
+            f"names, IFERROR(FILTER('{title}'!B3:B, "
+            f'\'{title}\'!A3:A <> ""), ""), '
+            f"messages, IFERROR(FILTER('{title}'!AJ3:AJ, "
+            f'\'{title}\'!A3:A <> ""), ""), '
+            'pattern, "⟨@[a-z0-9._]{2,32}⟩$", '
+            "keys, MAP(names, usernames, LAMBDA(name, username, "
+            "IF(OR(SUMPRODUCT(N(names = name)) > 1, REGEXMATCH(name, pattern)), "
+            'name & " ⟨@" & username & "⟩", name))), '
+            'people, IFERROR(UNIQUE(TOCOL(shifts, 1)), ""), '
+            "knownMask, MAP(people, LAMBDA(person, "
+            "ISNUMBER(XMATCH(person, keys, 0)))), "
+            'knownPeople, IFERROR(FILTER(people, knownMask), ""), '
+            'unknownPeople, IFERROR(FILTER(people, knownMask = FALSE), ""), '
+            "totals, MAP(knownPeople, LAMBDA(person, "
+            "SUMPRODUCT(N(shifts = person)))), "
+            "runs, MAP(knownPeople, LAMBDA(person, LET("
+            "assignedRows, BYROW(shifts, LAMBDA(row, "
+            "--(SUMPRODUCT(N(row = person)) > 0))), "
+            "MAX(SCAN(0, SEQUENCE(ROWS(shifts)), LAMBDA(streak, i, "
+            "IF(INDEX(assignedRows, i), IF(i = 1, 1, "
+            "IF(INDEX(hourSlots, i) = INDEX(hourSlots, MAX(1, i - 1)) + 1, "
+            "streak + 1, 1)), 0))))))), "
+            "encoreHours, MAP(knownPeople, LAMBDA(person, "
+            "SUMPRODUCT(N(encore = person)))), "
+            "matchedUsernames, MAP(knownPeople, LAMBDA(person, "
+            'XLOOKUP(person, keys, usernames, ""))), '
+            "matchedMessages, MAP(matchedUsernames, LAMBDA(username, "
+            'XLOOKUP(username, usernames, messages, ""))), '
+            f"{team_bindings}"
+            "internalTeams, MAP(mainTeamIsvs, mainTeamPowers, LAMBDA(isv, power, "
+            'IF(AND(isv = "", power = ""), "", IF(isv = "", "—", isv) & "/" & '
+            'IF(power = "", "—", power)))), '
+            "encoreTeams, MAP(encoreTeamIsvs, encoreTeamPowers, "
+            "LAMBDA(isv, power, "
+            'IF(AND(isv = "", power = ""), "", IF(isv = "", "—", isv) & "/" & '
+            'IF(power = "", "—", power)))), '
+            "stats, SORT(HSTACK(knownPeople, totals, runs, encoreHours, "
+            "internalTeams, encoreTeams, matchedUsernames, matchedMessages, "
+            "unregisteredFlags), "
+            "2, FALSE, 3, FALSE, 4, FALSE, 1, TRUE), "
+            "unknownLines, MAP(unknownPeople, LAMBDA(person, "
+            'IF(person = "", "", "⚠️ 参加者を特定できません：" & person))), '  # noqa: RUF001
+            f'metaCandidates, VSTACK("{cls.NOTES_HEADING}", {recruitment}, '
+            f"{warning}, unknownLines), "
+            'metaLines, FILTER(metaCandidates, metaCandidates <> ""), '
+            "meta, HSTACK(metaLines, MAKEARRAY(ROWS(metaLines), 7, "
+            'LAMBDA(row, column, ""))), '
+            'blankRow, MAKEARRAY(1, 8, LAMBDA(row, column, "")), '
+            f"headers, {headers}, "
+            "rawStatRows, HSTACK(CHOOSECOLS(stats, 1), CHOOSECOLS(stats, 2), "
+            "CHOOSECOLS(stats, 3), CHOOSECOLS(stats, 4), CHOOSECOLS(stats, 5), "
+            "CHOOSECOLS(stats, 6), MAP(CHOOSECOLS(stats, 9), "
+            'LAMBDA(flag, IF(flag, "未登録", ""))), CHOOSECOLS(stats, 8)), '
+            "statRows, IFERROR(FILTER(rawStatRows, CHOOSECOLS(rawStatRows, 1) "
+            '<> ""), MAKEARRAY(1, 8, LAMBDA(row, column, ""))), '
+            f"legendLines, VSTACK({legend}, {team_legend}), "
+            "legendRows, HSTACK(legendLines, MAKEARRAY(ROWS(legendLines), 7, "
+            'LAMBDA(row, column, ""))), '
+            "VSTACK(meta, blankRow, headers, statRows, blankRow, legendRows)"
+            ")"
+        )
+
+    @classmethod
+    def notes_snapshot(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        shifts: Sequence[Shift],
+        recruitment_time_range: str,
+        team_profiles: dict[str, DraftTeamProfile] | None,
+        team_source_warning: str | None,
+    ) -> str:
+        """Render the complete initial Japanese Notes as plain text."""
+        shifts_by_username = {shift.username: shift for shift in shifts}
+        assigned_hours: dict[str, list[int]] = {}
+        encore_hours: dict[str, int] = {}
+        for assignment in schedule.assignments:
+            for username in set(assignment.supporter_usernames_by_slot.values()):
+                assigned_hours.setdefault(username, []).append(assignment.hour)
+            encore_username = assignment.supporter_usernames_by_slot.get(
+                ENCORE_SUPPORTER_SLOT
+            )
+            if encore_username is not None:
+                encore_hours[encore_username] = encore_hours.get(encore_username, 0) + 1
+
+        lines = [
+            cls.NOTES_HEADING,
+            f"募集時間【{recruitment_time_range}】",
+        ]
+        if team_source_warning is not None:
+            lines.append(team_source_warning)
+        lines.append("")
+        for username in sorted(
+            assigned_hours,
+            key=lambda item: (
+                -len(assigned_hours[item]),
+                -_longest_consecutive_hours(assigned_hours[item]),
+                -encore_hours.get(item, 0),
+                schedule.display_names.get(item, item),
+            ),
+        ):
+            hours = assigned_hours[username]
+            profile = None if team_profiles is None else team_profiles.get(username)
+            parts = [
+                f"{schedule.display_names.get(username, username)}："  # noqa: RUF001
+                f"シフト合計 {len(hours)}h",
+                f"最長連続 {_longest_consecutive_hours(hours)}h",
+                f"アンコ {encore_hours.get(username, 0)}h",
+            ]
+            internal_team = _draft_team_value(
+                None if profile is None else profile.main_isv,
+                None if profile is None else profile.main_power,
+            )
+            if internal_team:
+                parts.append(f"内部編成 {internal_team}")
+            encore_team = _draft_team_value(
+                None if profile is None else profile.encore_isv,
+                None if profile is None else profile.encore_power,
+            )
+            if encore_team:
+                parts.append(f"アンコ編成 {encore_team}")
+            if team_profiles is not None and (
+                profile is None or profile.main_isv is None
+            ):
+                parts.append("内部編成 未登録")
+            if message := shifts_by_username[username].original_message:
+                parts.append(f"元メッセージ：{message}")  # noqa: RUF001
+            lines.append("｜".join(parts))  # noqa: RUF001
+        lines.extend(("", cls.CANONICAL_NAME_LEGEND, cls.TEAM_VALUE_LEGEND))
+        return "\n".join(lines)
