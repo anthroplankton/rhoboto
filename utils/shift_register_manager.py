@@ -15,12 +15,14 @@ if TYPE_CHECKING:
     from datetime import date, datetime
 
     from utils.google_sheets import AsyncioGspreadWorksheet
+    from utils.shift_scheduler import DraftSchedule
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
+    DraftWorksheetContent,
     EntryWorksheetContent,
     RecruitmentTimeRanges,
     Shift,
@@ -28,6 +30,7 @@ from utils.shift_register_structs import (
     build_team_summary_formula,
     column_letter,
 )
+from utils.shift_scheduler import ShiftScheduler
 from utils.storage_errors import (
     StorageError,
     StorageErrorKind,
@@ -481,6 +484,47 @@ class ShiftRegisterManager(
             shift,
             worksheet.title,
         )
+
+    async def generate_draft(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        runner: str | None = None,
+    ) -> DraftSchedule:
+        """Build the draft schedule and overwrite the draft worksheet."""
+        entry_worksheet = metadata.entry_worksheets.worksheet
+        draft_worksheet = metadata.draft_worksheet.worksheet
+        if entry_worksheet is None or draft_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+
+        df = await entry_worksheet.to_frame()
+        try:
+            EntryWorksheetContent.validate_core_header(df)
+        except ValueError as exc:
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
+
+        shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(df)
+        shifts = EntryWorksheetContent(shift_df, plain_df).to_shifts()
+        shift_register_config = await self.get_sheet_config()
+        recruitment_ranges = RecruitmentTimeRanges.from_json(
+            shift_register_config.recruitment_time_ranges
+        )
+        schedule = ShiftScheduler.assign(
+            shifts,
+            sorted(recruitment_ranges.ranges.slots),
+            runner=runner,
+        )
+        draft_df = DraftWorksheetContent.from_schedule(schedule)
+        await draft_worksheet.update_from_dataframe(draft_df, raw_data=True)
+        self.logger.info(
+            "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
+            draft_worksheet.title,
+            len(schedule.hours),
+            schedule.total_shortage,
+        )
+        return schedule
 
 
 async def _read_entry_state(

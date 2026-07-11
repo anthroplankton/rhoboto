@@ -89,12 +89,18 @@ class AsyncioGspreadWorksheet:
 
         return pd.DataFrame(data, columns=header)
 
-    async def update_from_dataframe(self, df: pd.DataFrame) -> None:
+    async def update_from_dataframe(
+        self,
+        df: pd.DataFrame,
+        *,
+        raw_data: bool = False,
+    ) -> None:
         """
         Update worksheet from a pandas DataFrame.
 
         Args:
             df (pd.DataFrame): DataFrame to upload to worksheet.
+            raw_data (bool): Whether to store data rows without USER_ENTERED parsing.
         """
         df = df.fillna("")
         rows = df.to_numpy().tolist()
@@ -108,7 +114,7 @@ class AsyncioGspreadWorksheet:
                 await self._worksheet.update(
                     rows,
                     range_name="A2",
-                    raw=False,
+                    raw=raw_data,
                 )
         except GoogleSheetsError:
             raise

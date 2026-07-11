@@ -207,6 +207,28 @@ async def test_adapter_batch_reads_formulas() -> None:
 
 
 @pytest.mark.asyncio
+async def test_adapter_updates_dataframe_rows_as_raw_when_requested() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+    frame = pd.DataFrame({"JST": ["4-5"]})
+
+    await adapter.update_from_dataframe(frame, raw_data=True)
+
+    assert raw.update_calls == [
+        {
+            "values": [["JST"]],
+            "range_name": "A1",
+            "raw": True,
+        },
+        {
+            "values": [["4-5"]],
+            "range_name": "A2",
+            "raw": True,
+        },
+    ]
+
+
+@pytest.mark.asyncio
 async def test_adapter_batch_updates_user_entered_ranges() -> None:
     raw = RawWorksheet()
     adapter = AsyncioGspreadWorksheet(raw)
