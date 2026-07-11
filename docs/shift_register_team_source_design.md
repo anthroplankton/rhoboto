@@ -2,8 +2,8 @@
 
 ## Status
 
-Implemented. Automated validation is complete; manual Discord and Google Sheets
-integration validation remains.
+Implemented in the working tree. Automated validation passed; database migration
+rollout and manual Discord and Google Sheets integration validation remain.
 
 ## Goal
 
@@ -56,6 +56,7 @@ aliases:
 ```python
 class TeamSourceStatus(StrEnum):
     AVAILABLE = "available"
+    UNSET = "unset"
     MISSING = "missing"
     AMBIGUOUS = "ambiguous"
     INVALID = "invalid"
@@ -100,19 +101,21 @@ The following names will change:
 
 `ShiftRegisterManager.resolve_team_source()` will:
 
-1. Query Team Register configurations whose FeatureChannel has the Shift Register's
-   `guild_id`, retaining `select_related("feature_channel")`.
-2. Return `MISSING` for no configuration and `AMBIGUOUS` for multiple
-   configurations.
-3. Use the unique config's `get_worksheet_ids()` and `sheet_url` to load the
+1. Read the selected Team FeatureChannel ID from `ShiftRegisterConfig`.
+2. Return `UNSET` when that ID is null. It must not query or use a sole Team
+   Register as a runtime fallback.
+3. Query the selected Team Register configuration by its FeatureChannel ID,
+   retaining `select_related("feature_channel")`. A missing saved configuration
+   returns `INVALID`.
+4. Use the selected config's `get_worksheet_ids()` and `sheet_url` to load the
    configured worksheets.
-4. Build `TeamRegisterGoogleSheetsMetadata` from those worksheets.
-5. Return `INVALID` if a configured worksheet is missing or the configured landing
+5. Build `TeamRegisterGoogleSheetsMetadata` from those worksheets.
+6. Return `INVALID` if a configured worksheet is missing or the configured landing
    worksheet cannot be found in the metadata.
-6. Read and validate the Summary worksheet header.
-7. Resolve the username, encore-role, Main ISV, optional Encore ISV, and final import
+7. Read and validate the Summary worksheet header.
+8. Resolve the username, encore-role, Main ISV, optional Encore ISV, and final import
    column positions into `TeamSummaryColumns`.
-8. Return `AVAILABLE` with `TeamSource(config, metadata, summary_columns)`.
+9. Return `AVAILABLE` with `TeamSource(config, metadata, summary_columns)`.
 
 Invalid URLs and missing worksheets remain `INVALID`. Transient or otherwise
 unavailable Google Sheets reads remain `UNRESOLVED` and are logged without exposing
@@ -130,10 +133,11 @@ change. Formula inputs will instead be read from the composed source:
 - Summary title from `source.metadata.summary_worksheet.title`.
 - Header positions from `source.summary_columns`.
 
-Formula state behavior remains unchanged:
+Formula state behavior is:
 
 - `AVAILABLE` creates or repairs the expected formula.
-- `MISSING`, `AMBIGUOUS`, and `INVALID` clear stale Team formula anchors.
+- `UNSET` and `INVALID` clear stale Team formula anchors and do not create new
+  Team references.
 - `UNRESOLVED` preserves existing formulas so a temporary external failure does not
   erase a working source reference.
 
@@ -150,25 +154,47 @@ For an available source, it will show:
 
 The displayed worksheet will be selected by
 `source.config.landing_worksheet_id` and resolved from `source.metadata.worksheets`.
-The formatter must not directly select `metadata.summary_worksheet`. Team Summary is
-The landing worksheet title and ID are not repeated in Shift settings. The link still
-targets the configured landing worksheet through its `gid` URL.
+The formatter must not directly select `metadata.summary_worksheet`. The landing
+worksheet title and ID are not repeated in Shift settings. The link still targets
+the configured landing worksheet through its `gid` URL.
 
-The unavailable-state messages will use the general `Team Source` term while
-preserving the existing status distinctions. The panel will not list every Team
-worksheet. The Team Register landing worksheet remains the canonical user-facing
-entry point.
+The unavailable-state messages will use the general `Team Source` term. `UNSET`
+will say that no Team source is selected and that Shift registrations continue
+without Team references. The panel will not list every Team worksheet. The Team
+Register landing worksheet remains the canonical user-facing entry point.
 
-### Future Channel Selection
+### Channel Selection
 
-This change will not add source selection or modify the database schema. Until source
-selection is implemented, a guild must have exactly one Team Register configuration
-for automatic resolution.
+Shift settings provide `Edit Team Source`, which stores a nullable selected Team
+FeatureChannel on `ShiftRegisterConfig`. A null value means `UNSET`; it never
+selects a Team Register implicitly.
 
-A future migration may persist the selected Team FeatureChannel using a stable
-relation or identifier on `ShiftRegisterConfig`. At that point,
-`resolve_team_source()` should resolve the selected configuration first and retain
-the current unique-source behavior only for an unset selection.
+After the initial Shift Sheet Modal saves successfully, the bot opens the same Team
+Source view used by `Edit Team Source`. The view explains that Team Source is
+optional: registrations continue without it, but Team references are not created.
+
+The view uses Discord's native `ChannelSelect`; it does not render its own channel
+option list. Before opening the selector, it checks how many Team Registers are
+configured in the guild:
+
+- Zero configured Team Registers: show that no Team Register is available and offer
+  only `Set Later` during initial setup or `Back to Settings` from editing.
+- Exactly one configured Team Register: keep `ChannelSelect` and preselect that
+  channel. This is a UI draft only; it is not stored or used until confirmation.
+- More than one configured Team Register: keep `ChannelSelect` with no preselection.
+
+`Apply & Repair` validates the chosen same-guild Team Register, its worksheets, and
+its Summary header again, persists the FeatureChannel ID, and repairs populated
+Shift Entry column C formula anchors using current worksheet metadata. This second
+validation is required because a source can change while the view is open.
+
+`Set Later` and `Back to Settings` make no database or Google Sheets changes. The
+former is shown only after first-time Sheet setup; the latter is shown only from the
+configured settings panel. After `Apply & Repair`, the returned settings panel must
+include all normal controls, including `Edit Team Source` and `Enable` or `Disable`
+Latest Guide as appropriate.
+
+An invalid saved source does not silently switch to a different Team Register.
 
 ### Future Draft Generation
 
@@ -189,6 +215,8 @@ purpose-specific operation should read Team data only when draft generation need
   - Return `summary_worksheet_id` as the landing worksheet.
 - `models/shift_register.py`
   - Return `entry_worksheet_id` as the landing worksheet.
+  - Add the nullable `team_source_feature_channel` relation with `SET NULL` deletion
+    behavior. Existing Shift Register rows remain unset.
 - `cogs/base/feature_channel_base.py`
   - Make both shared guide URL helpers use `landing_worksheet_id`.
   - Remove both `_guide_worksheet_id()` methods.
@@ -203,10 +231,14 @@ purpose-specific operation should read Team data only when draft generation need
 - `utils/shift_register_manager.py`
   - Replace Team Summary Source types and resolver names.
   - Compose existing Team config and metadata.
+  - Store and resolve only an explicitly selected Team source.
+  - Provide the configured-Team count and sole-channel hint needed by the UI.
   - Preserve Summary-column validation and Shift Entry formula behavior.
 - `components/ui_shift_register.py`
   - Resolve and format `Team Source`.
   - Select the displayed worksheet through `landing_worksheet_id`.
+  - Open optional Team Source selection after initial Sheet setup.
+  - Preserve Latest Guide controls when returning from Team Source repair.
 
 ### Automated Tests
 
@@ -221,13 +253,17 @@ purpose-specific operation should read Team data only when draft generation need
 - `tests/test_manager_fakes.py`
   - Update all Team Source types, resolver names, and fakes.
   - Verify available sources retain the original config and existing metadata.
-  - Preserve missing, ambiguous, invalid, unresolved, Main-only, Main-and-Encore,
-    renamed-header, formula-update, and formula-clearing coverage.
+  - Verify unset sources are not implicitly resolved from a sole Team Register.
+  - Preserve invalid, unresolved, Main-only, Main-and-Encore, renamed-header,
+    formula-update, and formula-clearing coverage.
 - `tests/test_ui_permissions.py`
   - Update the recording manager and settings field name.
   - Verify the available state displays the source channel and landing worksheet.
   - Verify the formatter follows `landing_worksheet_id` rather than assuming Summary.
-  - Preserve unavailable-state and field-order coverage.
+  - Verify zero, one, and multiple configured-Team entry states; `Set Later`; and
+    `Back to Settings`.
+  - Verify successful Team Source repair returns all settings controls, including
+    the Latest Guide control.
 
 `tests/test_worksheet_structs.py` should not require behavior changes because the
 formula builder contract and generated formula remain unchanged.
@@ -238,20 +274,24 @@ formula builder contract and generated formula remain unchanged.
   - Rename the settings status to Team Source and describe the landing worksheet.
   - Preserve current Summary-backed `IMPORTRANGE` migration instructions.
 - `docs/manual_integration_validation.md`
-  - Update Team Source settings cases and add landing worksheet consistency checks.
+  - Update Team Source settings cases, deferred setup, candidate availability, and
+    Latest Guide control preservation checks.
 
 ## Risk Areas
 
 - The landing worksheet ID must resolve to an item in the loaded Team metadata;
   otherwise the source is `INVALID`.
 - Summary header validation remains mandatory for existing Shift Entry formulas.
+- Removing the unique-source fallback means existing Shift Registers with a null
+  selected source require an administrator to choose one before Team formulas resume.
+- Adding the selected-source relation requires a reviewed database migration; schema
+  generation is not a production migration mechanism.
 - `UNRESOLVED` must continue preserving existing formulas.
 - `TeamSource.config.feature_channel.channel_id` depends on retaining
   `select_related("feature_channel")`.
 - Components must not import Team Register cogs to obtain worksheet-selection logic.
 - Guide, auto-guide, help, and delete flows must keep producing the same Sheet URLs.
-- No Discord permissions, command names, database schema, or Google Sheets layout may
-  change.
+- No Discord permissions, command names, or Google Sheets layout may change.
 
 ## Automated Validation
 
@@ -289,21 +329,24 @@ env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q \
 1. Confirm Team guide, auto-guide, and related buttons still open Team Summary.
 2. Confirm Shift guide still opens Shift Entry.
 3. Open `/shift_register settings` and confirm the field is named `Team Source`.
-4. With one Team Register, confirm the field shows its channel and landing worksheet
-   link and ID.
-5. Confirm missing, multiple, invalid, and temporarily unavailable sources show the
-   correct distinct status.
-6. Submit a Shift and confirm availability still updates.
-7. Confirm an available source populates the Shift Entry Team formula result.
-8. Confirm missing, ambiguous, and invalid sources clear stale Team formula anchors.
-9. Confirm a transient unresolved source preserves an existing formula.
-10. Confirm first-time cross-Sheet use still supports the required `IMPORTRANGE`
+4. Complete first-time Shift Sheet setup with zero, one, and multiple configured Team
+   Registers. Confirm zero shows no selector, one preselects its channel, and
+   multiple leaves the selector blank.
+5. Confirm `Set Later` and `Back to Settings` make no database or Google Sheets
+   changes.
+6. Confirm only `Apply & Repair` persists the selected source and that the returned
+   panel retains `Edit Team Source` and the correct Latest Guide control.
+7. Confirm unset, invalid, and temporarily unavailable sources show the correct
+   distinct status.
+8. Submit a Shift and confirm availability still updates.
+9. Confirm an available source populates the Shift Entry Team formula result.
+10. Confirm unset and invalid sources clear stale Team formula anchors.
+11. Confirm a transient unresolved source preserves an existing formula.
+12. Confirm first-time cross-Sheet use still supports the required `IMPORTRANGE`
     access authorization.
 
 ## Out of Scope
 
-- Team source channel selection UI or persistence.
-- Database migrations or new model fields.
 - Google Sheets worksheet, column, or formula changes.
 - Draft-generation implementation.
 - Listing all Team worksheet links in Shift settings.

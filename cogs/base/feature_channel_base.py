@@ -748,7 +748,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             if current_view is None
             else prepare_replacement_settings_view(current_view, panel.view)
         )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=None,
             embed=panel.embed,
             view=replacement_view,

@@ -207,10 +207,16 @@ def build_too_many_encore_roles_embed(
 
 
 async def send_settings_missing(interaction: Interaction) -> None:
-    await interaction.response.send_message(
-        TEAM_REGISTER_SETTINGS_MISSING_MESSAGE,
-        ephemeral=True,
-    )
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            TEAM_REGISTER_SETTINGS_MISSING_MESSAGE,
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            TEAM_REGISTER_SETTINGS_MISSING_MESSAGE,
+            ephemeral=True,
+        )
 
 
 async def get_fresh_team_register_config_or_respond(

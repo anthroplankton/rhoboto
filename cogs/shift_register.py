@@ -18,7 +18,10 @@ from components.ui_shift_register import (
 )
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
-from utils.shift_register_manager import ShiftRegisterManager
+from utils.shift_register_manager import (
+    SHIFT_REGISTER_SHEET_WRITE_LOCK,
+    ShiftRegisterManager,
+)
 from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
 from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
@@ -47,7 +50,7 @@ class ShiftRegister(
     guide_template_key = "shift.guide"
     auto_guide_template_key = "shift.auto_guide"
     timeline_template_key = "shift.timeline"
-    sheet_write_lock = KeyAsyncLock()
+    sheet_write_lock = SHIFT_REGISTER_SHEET_WRITE_LOCK
     auto_guide_lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager

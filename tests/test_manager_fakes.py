@@ -39,8 +39,19 @@ if TYPE_CHECKING:
     from typing import Self
 
 
-def make_feature_channel(feature_name: str) -> SimpleNamespace:
-    return SimpleNamespace(guild_id=1, channel_id=2, feature_name=feature_name)
+def make_feature_channel(
+    feature_name: str,
+    *,
+    feature_channel_id: int = 1,
+    guild_id: int = 1,
+    channel_id: int = 2,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=feature_channel_id,
+        guild_id=guild_id,
+        channel_id=channel_id,
+        feature_name=feature_name,
+    )
 
 
 def make_user(username: str = "alice", display_name: str = "Alice") -> UserInfo:
@@ -51,6 +62,7 @@ class FakeTeamConfigQuery:
     def __init__(self, configs: list[SimpleNamespace]) -> None:
         self.configs = configs
         self.selected_related: tuple[str, ...] = ()
+        self.filter_kwargs: dict[str, object] = {}
 
     def select_related(self, *fields: str) -> Self:
         self.selected_related = fields
@@ -108,9 +120,13 @@ def configure_team_source_query(
     source_sheet: FakeTeamSourceSheet | None = None,
 ) -> FakeTeamConfigQuery:
     query = FakeTeamConfigQuery(configs)
+    if manager._sheet_config is None:  # noqa: SLF001
+        manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+            team_source_feature_channel_id=None
+        )
 
     def filter_configs(**kwargs: object) -> FakeTeamConfigQuery:
-        assert kwargs == {"feature_channel__guild_id": manager.feature_channel.guild_id}
+        query.filter_kwargs = kwargs
         return query
 
     monkeypatch.setattr(
@@ -132,6 +148,8 @@ def make_team_source_config(
     *,
     team_worksheet_ids: list[int] | None = None,
     landing_worksheet_id: int = 201,
+    feature_channel_id: int = 22,
+    channel_id: int = 22,
 ) -> SimpleNamespace:
     worksheet_ids = [*(team_worksheet_ids or [101, 102]), 201]
     return SimpleNamespace(
@@ -139,7 +157,13 @@ def make_team_source_config(
         team_worksheet_ids=team_worksheet_ids or [101, 102],
         summary_worksheet_id=201,
         landing_worksheet_id=landing_worksheet_id,
-        feature_channel=SimpleNamespace(channel_id=22),
+        feature_channel_id=feature_channel_id,
+        feature_channel=SimpleNamespace(
+            id=feature_channel_id,
+            guild_id=1,
+            channel_id=channel_id,
+            feature_name="team_register",
+        ),
         get_worksheet_ids=lambda: worksheet_ids,
     )
 
@@ -286,6 +310,14 @@ def available_team_source() -> shift_register_manager.TeamSourceResolution:
     )
 
 
+def renamed_team_source() -> shift_register_manager.TeamSourceResolution:
+    resolution = available_team_source()
+    source = resolution.source
+    assert source is not None
+    source.metadata.summary_worksheet.title = "Renamed Summary"
+    return resolution
+
+
 def configure_row_source(
     manager: ShiftRegisterManager,
     resolution: shift_register_manager.TeamSourceResolution,
@@ -391,7 +423,7 @@ async def test_shift_manager_fresh_config_invalidates_cached_google_sheet() -> N
 
 
 @pytest.mark.asyncio
-async def test_shift_manager_selects_only_same_guild_team_register(
+async def test_shift_manager_requires_explicit_team_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(
@@ -426,16 +458,98 @@ async def test_shift_manager_selects_only_same_guild_team_register(
 
     resolution = await manager.resolve_team_source()
 
+    assert resolution.status is shift_register_manager.TeamSourceStatus.UNSET
+    assert resolution.source is None
+    assert query.selected_related == ()
+    assert query.filter_kwargs == {}
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_prefers_saved_team_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=23
+    )
+    query = configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[make_team_source_config(feature_channel_id=23, channel_id=33)],
+        source_sheet=FakeTeamSourceSheet(
+            [
+                FakeTeamSourceWorksheet(101, "Main Team"),
+                FakeTeamSourceWorksheet(102, "Encore Team"),
+                FakeTeamSourceWorksheet(
+                    201,
+                    "Team Summary",
+                    [
+                        "username",
+                        "display_name",
+                        "encore_roles",
+                        "Main Team ISV",
+                        "Main Team Power",
+                        "Encore Team ISV",
+                        "Encore Team Power",
+                    ],
+                ),
+            ]
+        ),
+    )
+
+    resolution = await manager.resolve_team_source()
+
     assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
     assert resolution.source is not None
-    assert resolution.source.config is config
-    assert resolution.source.config.feature_channel.channel_id == 22
-    assert resolution.source.metadata.summary_worksheet.title == "Renamed Summary"
-    assert [ws.id for ws in resolution.source.metadata.team_worksheets] == [101, 102]
-    assert resolution.source.summary_columns.main_isv == 4
-    assert resolution.source.summary_columns.encore_isv == 6
-    assert resolution.source.summary_columns.import_last_column == "G"
+    assert resolution.source.config.feature_channel.channel_id == 33
+    assert query.filter_kwargs == {"feature_channel_id": 23}
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_lists_configured_team_source_channels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    query = configure_team_source_query(
+        monkeypatch,
+        manager=manager,
+        configs=[
+            make_team_source_config(feature_channel_id=22, channel_id=32),
+            make_team_source_config(feature_channel_id=23, channel_id=33),
+        ],
+    )
+
+    channel_ids = await manager.get_team_source_candidate_channel_ids()
+
+    assert channel_ids == (32, 33)
     assert query.selected_related == ("feature_channel",)
+    assert query.filter_kwargs == {
+        "feature_channel__guild_id": 1,
+        "feature_channel__feature_name": "team_register",
+    }
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_validates_explicit_team_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    query = configure_team_source_query(monkeypatch, manager=manager, configs=[])
+
+    resolution = await manager.resolve_team_source(team_channel_id=33)
+
+    assert resolution.status is shift_register_manager.TeamSourceStatus.INVALID
+    assert query.filter_kwargs == {
+        "feature_channel__guild_id": 1,
+        "feature_channel__channel_id": 33,
+        "feature_channel__feature_name": "team_register",
+    }
 
 
 @pytest.mark.asyncio
@@ -444,6 +558,9 @@ async def test_shift_manager_resolves_main_only_team_source(
 ) -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
     )
     config = make_team_source_config(team_worksheet_ids=[101])
     source_sheet = FakeTeamSourceSheet(
@@ -478,40 +595,6 @@ async def test_shift_manager_resolves_main_only_team_source(
 
 
 @pytest.mark.asyncio
-async def test_shift_manager_reports_missing_team_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = ShiftRegisterManager(
-        make_feature_channel("shift_register"), "service.json"
-    )
-    configure_team_source_query(monkeypatch, manager=manager, configs=[])
-
-    resolution = await manager.resolve_team_source()
-
-    assert resolution.status is shift_register_manager.TeamSourceStatus.MISSING
-    assert resolution.source is None
-
-
-@pytest.mark.asyncio
-async def test_shift_manager_reports_ambiguous_team_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    manager = ShiftRegisterManager(
-        make_feature_channel("shift_register"), "service.json"
-    )
-    configure_team_source_query(
-        monkeypatch,
-        manager=manager,
-        configs=[make_team_source_config(), make_team_source_config()],
-    )
-
-    resolution = await manager.resolve_team_source()
-
-    assert resolution.status is shift_register_manager.TeamSourceStatus.AMBIGUOUS
-    assert resolution.source is None
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "worksheets",
     [
@@ -535,6 +618,9 @@ async def test_shift_manager_reports_invalid_team_source(
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
+    )
     configure_team_source_query(
         monkeypatch,
         manager=manager,
@@ -554,6 +640,9 @@ async def test_shift_manager_rejects_missing_team_landing_worksheet(
 ) -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
     )
     config = make_team_source_config(landing_worksheet_id=999)
     source_sheet = FakeTeamSourceSheet(
@@ -594,6 +683,9 @@ async def test_shift_manager_reports_transient_team_source_as_unresolved(
 ) -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        team_source_feature_channel_id=22
     )
     error = GoogleSheetsError(
         GoogleSheetsErrorKind.TRANSIENT,
@@ -720,14 +812,14 @@ async def test_new_shift_writes_formula_anchor_but_not_spill_cells() -> None:
 
 
 @pytest.mark.asyncio
-async def test_missing_team_source_saves_shift_and_clears_stale_anchor() -> None:
+async def test_unset_team_source_saves_shift_and_clears_stale_anchor() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
     configure_row_source(
         manager,
         shift_register_manager.TeamSourceResolution(
-            shift_register_manager.TeamSourceStatus.MISSING
+            shift_register_manager.TeamSourceStatus.UNSET
         ),
     )
     worksheet = FakeEntryWorksheet(
@@ -791,6 +883,103 @@ async def test_source_change_repairs_only_changed_formula_anchors() -> None:
     updates = worksheet.batch_updates[-1]
     assert {"range": "C3", "values": [[expected_formula(3)]]} in updates
     assert sum(item["range"] == "C4" for item in updates) == 0
+
+
+@pytest.mark.asyncio
+async def test_repair_team_references_updates_only_changed_populated_c_cells() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    resolution = renamed_team_source()
+    source = resolution.source
+    assert source is not None
+    worksheet = FakeEntryWorksheet(
+        current_entry_rows(
+            entry_participant_row("alice", "Alice", "=STALE"),
+            entry_participant_row("", "", "=KEEP-EMPTY"),
+        )
+    )
+    expected = build_team_summary_formula(
+        row=3,
+        sheet_url=source.config.sheet_url,
+        worksheet_title="Renamed Summary",
+        username_column=source.summary_columns.username,
+        roles_column=source.summary_columns.roles,
+        main_isv_column=source.summary_columns.main_isv,
+        encore_isv_column=source.summary_columns.encore_isv,
+        import_last_column=source.summary_columns.import_last_column,
+    )
+
+    changed = await manager.repair_team_references(
+        make_shift_metadata(worksheet), resolution
+    )
+
+    assert changed == 1
+    assert worksheet.batch_updates == [[{"range": "C3", "values": [[expected]]}]]
+    assert worksheet.rows[3][2] == "=KEEP-EMPTY"
+
+
+@pytest.mark.asyncio
+async def test_repair_team_references_skips_write_when_current() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    worksheet = FakeEntryWorksheet(
+        current_entry_rows(
+            entry_participant_row("alice", "Alice", expected_formula(3)),
+        )
+    )
+
+    changed = await manager.repair_team_references(
+        make_shift_metadata(worksheet), available_team_source()
+    )
+
+    assert changed == 0
+    assert worksheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_select_team_source_persists_before_repair() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    resolution = available_team_source()
+    events: list[object] = []
+
+    class Config:
+        team_source_feature_channel_id: int | None = None
+
+        async def save(self, *, update_fields: list[str]) -> None:
+            events.append(("save", update_fields))
+
+    config = Config()
+
+    async def resolve(*, team_channel_id: int | None = None) -> object:
+        assert team_channel_id == 22
+        return resolution
+
+    async def fetch() -> ShiftRegisterGoogleSheetsMetadata:
+        events.append("fetch")
+        return make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
+
+    async def repair(*_args: object) -> int:
+        events.append("repair")
+        return 0
+
+    manager.resolve_team_source = resolve  # type: ignore[method-assign]
+    manager.fetch_google_sheets_metadata = fetch  # type: ignore[method-assign]
+    manager.repair_team_references = repair  # type: ignore[method-assign]
+    manager._sheet_config = config  # type: ignore[assignment]  # noqa: SLF001
+
+    result = await manager.select_team_source_and_repair(22)
+
+    assert result is resolution
+    assert config.team_source_feature_channel_id == 22
+    assert events == [
+        ("save", ["team_source_feature_channel_id", "updated_at"]),
+        "fetch",
+        "repair",
+    ]
 
 
 @pytest.mark.asyncio

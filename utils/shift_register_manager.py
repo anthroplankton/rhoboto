@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
+from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import ManagerBase
 from utils.shift_register_structs import (
     EntryWorksheetContent,
@@ -26,13 +27,19 @@ from utils.shift_register_structs import (
     build_team_summary_formula,
     column_letter,
 )
-from utils.storage_errors import StorageError, StorageErrorKind
+from utils.storage_errors import (
+    StorageError,
+    StorageErrorKind,
+    partial_success_storage_error,
+)
 
 ENTRY_READ_RANGES = ["1:2", "A3:C"]
+SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
 
 
 class TeamSourceStatus(StrEnum):
     AVAILABLE = "available"
+    UNSET = "unset"
     MISSING = "missing"
     AMBIGUOUS = "ambiguous"
     INVALID = "invalid"
@@ -67,17 +74,53 @@ class ShiftRegisterManager(
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 
-    async def resolve_team_source(self) -> TeamSourceResolution:
-        """Resolve the sole configured Team source in this guild."""
-        configs = await TeamRegisterConfig.filter(
-            feature_channel__guild_id=self.feature_channel.guild_id
-        ).select_related("feature_channel")
+    async def resolve_team_source(
+        self,
+        *,
+        team_channel_id: int | None = None,
+    ) -> TeamSourceResolution:
+        """Resolve an explicit or saved Team source."""
+        if team_channel_id is not None:
+            filters = {
+                "feature_channel__guild_id": self.feature_channel.guild_id,
+                "feature_channel__channel_id": team_channel_id,
+                "feature_channel__feature_name": "team_register",
+            }
+            missing_status = TeamSourceStatus.INVALID
+        else:
+            shift_config = await self.get_sheet_config_or_none()
+            selected_id = getattr(
+                shift_config,
+                "team_source_feature_channel_id",
+                None,
+            )
+            if selected_id is None:
+                return TeamSourceResolution(TeamSourceStatus.UNSET)
+            filters = {"feature_channel_id": selected_id}
+            missing_status = TeamSourceStatus.INVALID
+
+        configs = await TeamRegisterConfig.filter(**filters).select_related(
+            "feature_channel"
+        )
         if not configs:
-            return TeamSourceResolution(TeamSourceStatus.MISSING)
+            return TeamSourceResolution(missing_status)
         if len(configs) > 1:
             return TeamSourceResolution(TeamSourceStatus.AMBIGUOUS)
 
-        config = configs[0]
+        return await self._resolve_team_source_config(configs[0])
+
+    async def get_team_source_candidate_channel_ids(self) -> tuple[int, ...]:
+        """Return same-guild Team Register channels available for UI selection."""
+        configs = await TeamRegisterConfig.filter(
+            feature_channel__guild_id=self.feature_channel.guild_id,
+            feature_channel__feature_name="team_register",
+        ).select_related("feature_channel")
+        return tuple(config.feature_channel.channel_id for config in configs)
+
+    async def _resolve_team_source_config(
+        self,
+        config: TeamRegisterConfig,
+    ) -> TeamSourceResolution:
         try:
             sheet = GoogleSheet(config.sheet_url, self.service_account_path)
             worksheets = await sheet.get_worksheets(config.get_worksheet_ids())
@@ -101,6 +144,67 @@ class ShiftRegisterManager(
                 exc.kind,
             )
             return TeamSourceResolution(status)
+
+    async def repair_team_references(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        resolution: TeamSourceResolution,
+    ) -> int:
+        """Repair changed Team formula anchors for populated Shift Entry rows."""
+        if resolution.status is not TeamSourceStatus.AVAILABLE:
+            msg = "Team source must be available before repair."
+            raise ValueError(msg)
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        try:
+            _layout, _values, participants = await _read_entry_state(worksheet)
+        except ValueError as exc:
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
+
+        updates: list[dict[str, object]] = []
+        for row, username, current_formula in participants:
+            if not username:
+                continue
+            expected_formula = _entry_team_formula(row, resolution)
+            if expected_formula is not None and expected_formula != current_formula:
+                updates.append({"range": f"C{row}", "values": [[expected_formula]]})
+        if updates:
+            await worksheet.batch_update_typed_values(
+                updates,
+                formula_ranges={str(item["range"]) for item in updates},
+            )
+        return len(updates)
+
+    async def select_team_source_and_repair(
+        self,
+        team_channel_id: int,
+    ) -> TeamSourceResolution:
+        """Persist a valid Team source, then repair Shift Entry references."""
+        resolution = await self.resolve_team_source(team_channel_id=team_channel_id)
+        source = resolution.source
+        if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
+            return resolution
+
+        config = await self.get_sheet_config()
+        config.team_source_feature_channel_id = source.config.feature_channel.id
+        await config.save(
+            update_fields=["team_source_feature_channel_id", "updated_at"]
+        )
+        try:
+            metadata = await self.fetch_google_sheets_metadata()
+            await self.repair_team_references(metadata, resolution)
+        except Exception as exc:
+            partial = partial_success_storage_error(exc)
+            if partial is None:
+                raise
+            raise partial from partial.__cause__
+        return resolution
 
     async def _build_team_source(
         self,

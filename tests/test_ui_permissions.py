@@ -32,11 +32,15 @@ from components.ui_settings_flow import (
     attach_settings_view_message,
 )
 from components.ui_shift_register import (
+    ApplyTeamSourceButton,
+    ManageTeamSourceButton,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
     ShiftRegisterSheetModal,
     ShiftRegisterView,
     ShiftTimelineModal,
+    TeamSourceSelect,
+    TeamSourceView,
     build_current_settings_embed as build_shift_current_settings_embed,
 )
 from components.ui_team_register import (
@@ -178,7 +182,7 @@ class RecordingShiftRegisterManager:
         self.timeline_updates: list[dict[str, object]] = []
         self.recruitment_range_updates: list[object] = []
         self.config_exists = True
-        self.feature_channel = SimpleNamespace(id=222)
+        self.feature_channel = SimpleNamespace(id=222, channel_id=222)
         self.sheet_url = "https://sheet.example"
         self.final_schedule_anchor_cell = "B2"
         self.day_number = 2
@@ -199,6 +203,8 @@ class RecordingShiftRegisterManager:
         self.refresh_error: Exception | None = None
         self.metadata_error: GoogleSheetsError | None = None
         self.team_source = TeamSourceResolution(TeamSourceStatus.MISSING)
+        self.team_source_apply_calls: list[int] = []
+        self.team_source_candidate_channel_ids: tuple[int, ...] = ()
 
     async def upsert_sheet_config_and_worksheets(
         self,
@@ -299,6 +305,16 @@ class RecordingShiftRegisterManager:
 
     async def resolve_team_source(self) -> TeamSourceResolution:
         return self.team_source
+
+    async def select_team_source_and_repair(
+        self,
+        team_channel_id: int,
+    ) -> TeamSourceResolution:
+        self.team_source_apply_calls.append(team_channel_id)
+        return self.team_source
+
+    async def get_team_source_candidate_channel_ids(self) -> tuple[int, ...]:
+        return self.team_source_candidate_channel_ids
 
 
 class FailingTeamRegisterManager(RecordingTeamRegisterManager):
@@ -659,13 +675,18 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     ("status", "expected"),
     [
         (
+            TeamSourceStatus.UNSET,
+            "- No Team source is selected. Shift registrations will continue without "
+            "Team references.",
+        ),
+        (
             TeamSourceStatus.MISSING,
             "- No configured Team Register exists in this server.",
         ),
         (
             TeamSourceStatus.AMBIGUOUS,
-            "- Multiple Team Registers are configured; source selection is not "
-            "supported yet.",
+            "- Multiple Team Registers are configured. Use Edit Team Source "
+            "to select one.",
         ),
         (
             TeamSourceStatus.INVALID,
@@ -718,11 +739,73 @@ async def test_shift_settings_panel_lists_unique_team_source() -> None:
         field_names.index("Worksheets & IDs") + 1
     )
     view = interaction.followup.messages[0][1]["view"]
-    assert [child.label for child in view.children] == [
+    assert [getattr(child, "label", None) for child in view.children] == [
         "Edit Sheet Settings",
+        "Edit Team Source",
         "Edit Shift Timeline",
         "Edit Recruitment Time Range",
     ]
+
+
+@pytest.mark.asyncio
+async def test_manage_team_source_button_rechecks_permissions() -> None:
+    manager = RecordingShiftRegisterManager()
+    button = ManageTeamSourceButton(manager)
+    interaction = unauthorized_interaction()
+
+    await button.callback(interaction)
+
+    assert_permission_denied(interaction)
+
+
+@pytest.mark.asyncio
+async def test_edit_team_source_can_return_to_settings_without_saving() -> None:
+    manager = RecordingShiftRegisterManager()
+    view = ShiftRegisterView(manager, has_existing_settings=True)
+    edit_button = child_with_label(view, "Edit Team Source")
+    edit_interaction = FakeInteraction()
+
+    await edit_button.callback(edit_interaction)
+
+    assert edit_interaction.response.deferred == [False]
+    _, edit_kwargs = edit_interaction.original_response_edits[-1]
+    team_source_view = edit_kwargs["view"]
+    assert isinstance(team_source_view, TeamSourceView)
+    assert [child.label for child in team_source_view.children] == ["Back to Settings"]
+
+    back_interaction = FakeInteraction()
+    await child_with_label(team_source_view, "Back to Settings").callback(
+        back_interaction
+    )
+
+    assert back_interaction.response.deferred == [False]
+    _, back_kwargs = back_interaction.original_response_edits[-1]
+    labels = [getattr(child, "label", None) for child in back_kwargs["view"].children]
+    assert labels == [
+        "Edit Sheet Settings",
+        "Edit Team Source",
+        "Edit Shift Timeline",
+        "Edit Recruitment Time Range",
+    ]
+    assert manager.team_source_apply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_team_source_repairs_selected_channel() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.team_source = team_source_resolution()
+    view = TeamSourceView(manager, selected_channel_id=22)
+    button = next(
+        child for child in view.children if isinstance(child, ApplyTeamSourceButton)
+    )
+    interaction = FakeInteraction()
+
+    await button.callback(interaction)
+
+    assert manager.team_source_apply_calls == [22]
+    assert interaction.followup.messages[-1][0] == (
+        "✅ Team source saved and references repaired."
+    )
 
 
 def test_shift_settings_embed_uses_team_landing_worksheet() -> None:
@@ -764,6 +847,26 @@ async def test_latest_guide_button_denies_unauthorized_user() -> None:
 
     assert_permission_denied(interaction)
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_latest_guide_button_defers_before_toggle_work() -> None:
+    async def toggle_callback(
+        interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        assert interaction.response.is_done()
+        assert enabled is True
+        assert current_view is button.view
+
+    interaction = FakeInteraction()
+    button = LatestGuideButton(enabled=False, toggle_callback=toggle_callback)
+
+    await button.callback(interaction)
+
+    assert interaction.response.deferred == [False]
 
 
 def test_auto_guide_button_language_uses_first_supported_language() -> None:
@@ -920,7 +1023,20 @@ async def test_shift_initial_setup_save_shows_disabled_latest_guide_controls(
     await modal.on_submit(save_interaction)
 
     assert len(save_interaction.followup.messages) == 1
-    assert_latest_guide_disabled_panel(save_interaction.followup.messages[0][1])
+    _, kwargs = save_interaction.followup.messages[0]
+    team_source_view = kwargs["view"]
+    assert kwargs["embed"] is None
+    assert isinstance(team_source_view, TeamSourceView)
+    assert team_source_view.latest_guide_toggle_callback is not None
+    assert [child.label for child in team_source_view.children] == ["Set Later"]
+
+    return_interaction = FakeInteraction()
+    await child_with_label(team_source_view, "Set Later").callback(return_interaction)
+
+    assert return_interaction.response.deferred == [False]
+    assert_latest_guide_disabled_panel(
+        return_interaction.original_response_edits[-1][1]
+    )
 
 
 @pytest.mark.asyncio
@@ -2257,6 +2373,7 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
     assert field_map["Recruitment Time Range"] == "- `4-28`"
     assert [child.label for child in kwargs["view"].children] == [
         "Edit Sheet Settings",
+        "Edit Team Source",
         "Edit Shift Timeline",
         "Edit Recruitment Time Range",
     ]
@@ -2451,17 +2568,124 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
     assert len(manager.upsert_calls) == 1
     assert manager.anchor_updates == ["B2"]
     assert len(interaction.followup.messages) == 1
-    _, kwargs = interaction.followup.messages[0]
-    embed = kwargs["embed"]
-    assert embed.title == "Shift Register Settings Saved"
-    assert embed.description == (
-        "Your Shift Register settings were saved. "
-        "Use the buttons below to update sheet settings, shift timeline, "
-        "or recruitment time range."
+    content, kwargs = interaction.followup.messages[0]
+    assert content == (
+        "⚠️ No Team Register is configured in this server. "
+        "Shift registrations will continue without Team references."
     )
-    assert embed.footer.text is None
+    assert kwargs["embed"] is None
+    assert [child.label for child in kwargs["view"].children] == ["Set Later"]
     assert kwargs["wait"] is True
     assert kwargs["view"].message is interaction.followup.sent_message_objects[0]
+
+
+@pytest.mark.asyncio
+async def test_shift_initial_setup_without_team_source_offers_set_later() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.config_exists = False
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    content, kwargs = interaction.followup.messages[-1]
+    assert content == (
+        "⚠️ No Team Register is configured in this server. "
+        "Shift registrations will continue without Team references."
+    )
+    assert kwargs["embed"] is None
+    assert [child.label for child in kwargs["view"].children] == ["Set Later"]
+
+
+@pytest.mark.asyncio
+async def test_shift_initial_setup_multiple_sources_keeps_channel_select() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.config_exists = False
+    manager.team_source_candidate_channel_ids = (22, 33)
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    _, kwargs = interaction.followup.messages[-1]
+    view = kwargs["view"]
+    assert isinstance(view, TeamSourceView)
+    assert view.selected_channel_id is None
+    assert any(isinstance(child, TeamSourceSelect) for child in view.children)
+    assert [getattr(child, "label", None) for child in view.children] == [
+        None,
+        "Apply & Repair",
+        "Set Later",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shift_initial_setup_with_one_team_source_preselects_channel() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.config_exists = False
+    manager.team_source_candidate_channel_ids = (22,)
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    await modal.on_submit(interaction)
+
+    _, kwargs = interaction.followup.messages[-1]
+    view = kwargs["view"]
+    assert isinstance(view, TeamSourceView)
+    assert view.selected_channel_id == 22
+    select = next(
+        child for child in view.children if isinstance(child, TeamSourceSelect)
+    )
+    assert select.default_values[0].id == 22
+    assert manager.team_source_apply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_apply_team_source_preserves_latest_guide_control() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.team_source = team_source_resolution()
+    view = TeamSourceView(
+        manager,
+        selected_channel_id=22,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+    )
+    button = next(
+        child for child in view.children if isinstance(child, ApplyTeamSourceButton)
+    )
+    interaction = FakeInteraction()
+
+    await button.callback(interaction)
+
+    panel_view = interaction.followup.messages[-1][1]["view"]
+    assert [getattr(child, "label", None) for child in panel_view.children] == [
+        "Disable Latest Guide",
+        "Edit Sheet Settings",
+        "Edit Team Source",
+        "Edit Shift Timeline",
+        "Edit Recruitment Time Range",
+    ]
 
 
 @pytest.mark.asyncio

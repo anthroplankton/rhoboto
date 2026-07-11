@@ -15,6 +15,8 @@ This migration includes:
 - Reserving `deadline_automation_enabled`, defaulting to `false`.
 - Moving Shift Entry worksheets to the count row plus fixed `A:AJ` bot layout.
 - Showing Team Summary ISV/Encore information in Shift Entry through formulas.
+- Persisting an optional Team Register source for each Shift Register.
+- Repairing Shift Entry Team formulas after Team Summary worksheet renames.
 - Preserving administrator-owned Shift Entry cells from `AK` onward.
 - Making `/shift_register announce_timeline` read saved settings instead of command
   parameters.
@@ -48,6 +50,17 @@ Add these non-null columns with defaults:
   `[{"start": 4, "end": 28}]`
 - `deadline_automation_enabled`, default `false`
 
+Add nullable `team_source_feature_channel_id` to `shift_register` as a foreign key
+to `feature_channel.id` with `ON DELETE SET NULL`. Existing rows stay `null`; no
+backfill is required.
+
+This repository does not track an Aerich or equivalent migration module.
+`generate_schemas()` is not a safe existing-production migration mechanism. Back up
+the database, stop the bot, inspect the schema generated from the current model in a
+disposable database, then apply the reviewed database-specific equivalent. Do not
+reuse one `ALTER TABLE` command across SQLite and the production database; SQLite
+may require a table rebuild.
+
 Backfill existing rows:
 
 - timeline columns stay `null`
@@ -60,6 +73,10 @@ Verification query checklist:
 - Every existing row has `deadline_automation_enabled = false`.
 - Existing sheet URL and worksheet ID columns are unchanged.
 - Existing `final_schedule_anchor_cell` values are unchanged.
+- `team_source_feature_channel_id` exists, is nullable, and references
+  `feature_channel.id` with `ON DELETE SET NULL`.
+- Deleting a selected Team FeatureChannel clears the Shift relation without
+  deleting Shift settings.
 
 ## Shift Entry Worksheet Migration
 
@@ -114,7 +131,11 @@ After database and sheet migration:
    - Recruitment Time Range.
 3. Use `Edit Shift Timeline` to save day number, event date, and milestones.
 4. Use `Edit Recruitment Time Range` to confirm or change the range.
-5. Run `/shift_register announce_timeline` with no parameters and confirm the public
+5. Use `Edit Team Source` to select the configured Team Register channel, then
+   press `Apply & Repair`.
+6. Rename Team Summary in the development Sheet, reapply the same source, and
+   confirm populated Shift Entry column C formulas use the new worksheet title.
+7. Run `/shift_register announce_timeline` with no parameters and confirm the public
    announcement uses the saved values.
 
 Blank timeline fields are valid. Blank recruitment range input resets to
@@ -138,6 +159,8 @@ If the migration must be rolled back:
 
 - Stop the bot before changing database schema or worksheet headers.
 - Restore the database backup and spreadsheet backup together.
+- When rolling back only Team source selection, deploy code that no longer reads
+  the relation before removing its constraint and column.
 - Re-enable the bot only after slash commands and settings panels match the
   restored code version.
 

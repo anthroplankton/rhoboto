@@ -2320,8 +2320,8 @@ async def test_latest_guide_toggle_enable_saves_before_refresh_and_warns(
 
     assert events == ["get_context", "state", "save:True", "build_panel", "refresh"]
     assert current_view.is_finished()
-    assert len(interaction.response.edits) == 1
-    edit_kwargs = interaction.response.edits[0][1]
+    assert len(interaction.original_response_edits) == 1
+    edit_kwargs = interaction.original_response_edits[0][1]
     assert edit_kwargs["embed"] is panel.embed
     assert edit_kwargs["view"] is panel.view
     assert interaction.followup.messages == [

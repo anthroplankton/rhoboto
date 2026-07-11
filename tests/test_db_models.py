@@ -76,8 +76,48 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert shift_config.final_shift_notice_at is None
         assert shift_config.recruitment_time_ranges == [{"start": 4, "end": 28}]
         assert shift_config.deadline_automation_enabled is False
+        assert shift_config.team_source_feature_channel_id is None
     finally:
         await Tortoise.close_connections()
+
+
+@pytest.mark.asyncio
+async def test_shift_team_source_relation_is_nullable_and_set_null() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        shift_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="shift_register",
+        )
+        team_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="team_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=shift_channel,
+            sheet_url="https://shift.sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+
+        assert config.team_source_feature_channel_id is None
+
+        config.team_source_feature_channel_id = team_channel.id
+        await config.save(
+            update_fields=["team_source_feature_channel_id", "updated_at"]
+        )
+        await config.refresh_from_db()
+        assert config.team_source_feature_channel_id == team_channel.id
+
+        await team_channel.delete()
+        await config.refresh_from_db()
+        assert config.team_source_feature_channel_id is None
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio
