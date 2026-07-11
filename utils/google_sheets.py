@@ -114,6 +114,52 @@ class AsyncioGspreadWorksheet:
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "update_worksheet")
 
+    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
+        """Read disjoint ranges while preserving formula text."""
+        try:
+            values = await self._worksheet.batch_get(
+                ranges,
+                value_render_option="FORMULA",
+            )
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
+        return [list(value_range) for value_range in values]
+
+    async def batch_update_values(self, data: list[dict[str, object]]) -> None:
+        """Write disjoint ranges as user-entered values and formulas."""
+        try:
+            await self._worksheet.batch_update(data, raw=False)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "update_worksheet")
+
+    async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
+        """Grow the worksheet only when the requested grid exceeds its size."""
+        current_rows = self._worksheet.row_count
+        current_cols = self._worksheet.col_count
+        rows = max(current_rows, min_rows)
+        cols = max(current_cols, min_cols)
+        if (rows, cols) == (current_rows, current_cols):
+            return
+        try:
+            await self._worksheet.resize(rows=rows, cols=cols)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "resize_worksheet")
+
+    async def delete_row(self, index: int) -> None:
+        """Delete one physical worksheet row by its one-based index."""
+        try:
+            await self._worksheet.delete_rows(index)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "delete_worksheet_row")
+
 
 class GoogleSheet:
     def __init__(self, sheet_url: str, service_account_path: str) -> None:

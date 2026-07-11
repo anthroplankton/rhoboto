@@ -1,7 +1,7 @@
 # Shift Register Timeline Migration
 
 This checklist covers the one-time migration for the Shift Register timeline,
-recruitment range, and `0-30` Shift Entry worksheet layout.
+recruitment range, and bot-managed Shift Entry count/Team layout.
 
 Use a development guild and disposable spreadsheet first. Do not run these steps
 against production data without a database backup and a rollback plan.
@@ -13,7 +13,9 @@ This migration includes:
 - Persisting Shift Register timeline fields in `shift_register`.
 - Persisting `recruitment_time_ranges`, defaulting to `4-28`.
 - Reserving `deadline_automation_enabled`, defaulting to `false`.
-- Moving Shift Entry worksheets to fixed hour columns `0-1` through `29-30`.
+- Moving Shift Entry worksheets to the count row plus fixed `A:AJ` bot layout.
+- Showing Team Summary ISV/Encore information in Shift Entry through formulas.
+- Preserving administrator-owned Shift Entry cells from `AK` onward.
 - Making `/shift_register announce_timeline` read saved settings instead of command
   parameters.
 
@@ -61,35 +63,41 @@ Verification query checklist:
 
 ## Shift Entry Worksheet Migration
 
-The new Shift Entry core header is:
+The bot-owned Shift Entry layout is:
 
 ```text
-username
-display_name
-0-1
-1-2
-...
-29-30
-original_message
+Row 1: count formulas in F:AI
+Row 2: username | display_name | Main ISV | Encore ISV |
+       Team Info | 0-1 | ... | 29-30 | original_message
+Rows 3+: participant data
 ```
 
-Existing old worksheets with `4-5` through `27-28` are intentionally rejected by
-the bot instead of being silently interpreted as the new shape.
+Columns `A:AJ` are bot-owned. Columns `AK` onward are administrator-owned; normal
+registration writes never target them. `C` contains the participant's Team formula,
+while `D:E` are spill results and are not written directly.
+
+Existing row-1-header worksheets and old worksheets with `4-5` through `27-28`
+are intentionally rejected instead of being silently reinterpreted.
 
 Recommended migration:
 
 1. Create a backup copy of the existing spreadsheet.
-2. Create a new Shift Entry worksheet or replace the old header with the new
-   `0-30` header.
-3. If preserving old rows, map matching old hour columns into the same labels in
-   the new sheet and fill new outside-range columns with `0`.
-4. Keep `username`, `display_name`, and `original_message` values unchanged.
-5. Leave draft and final schedule worksheets unchanged.
+2. In the existing Shift Entry worksheet, insert one row above the legacy header.
+3. Insert three columns before legacy column `C`. Native Google Sheets insertion
+   moves each participant's hour data and all trailing cell values, formulas,
+   formatting, validation, and notes together.
+4. Leave new `C:E` blank, or set them to `Main ISV`, `Encore ISV`, and
+   `Team Info`.
+5. Confirm hours are now `F:AI`, `original_message` is `AJ`, and all manual columns
+   start at `AK`.
+6. Leave draft and final schedule worksheets unchanged.
+7. Trigger one Shift registration. The bot initializes or repairs row 1, row 2,
+   and participant formulas without writing `AK+`.
+8. In Google Sheets, grant `IMPORTRANGE` **Allow access** once for the Team source
+   spreadsheet. Formula results remain unavailable until this connection is allowed.
 
-Trailing extra columns after `original_message` are accepted by the header guard,
-but the current Shift Entry write path does not promise to preserve them. Do not
-use trailing extra columns as source-of-truth data until that behavior has its
-own design.
+Do not manually copy only visible values during this migration; doing so can detach
+formulas, validation, formatting, or notes from their participant row.
 
 ## Settings Migration
 
@@ -99,6 +107,8 @@ After database and sheet migration:
 2. Confirm the panel shows:
    - Google Sheet link.
    - Entry, draft, and final worksheet titles and IDs.
+   - Team Summary Source status and, when uniquely resolved, its channel and
+     Summary worksheet link/ID.
    - Final schedule anchor cell.
    - Shift Timeline.
    - Recruitment Time Range.

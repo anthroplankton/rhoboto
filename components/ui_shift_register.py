@@ -30,6 +30,11 @@ from components.ui_settings_flow import (
     settings_description,
     settings_title,
 )
+from utils.google_sheets_urls import google_sheet_url_with_gid
+from utils.shift_register_manager import (
+    TeamSummarySourceResolution,
+    TeamSummarySourceStatus,
+)
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
@@ -118,6 +123,7 @@ async def build_shift_register_settings_panel(
         enabled=latest_guide_enabled,
         state_resolver=latest_guide_state_resolver,
     )
+    team_summary_source = await shift_register_manager.resolve_team_summary_source()
     embed = build_current_settings_embed(
         sheet_url=shift_register.sheet_url,
         metadata=active_metadata,
@@ -126,6 +132,7 @@ async def build_shift_register_settings_panel(
         color=config.DEFAULT_EMBED_COLOR,
         is_save_action=is_save_action,
         latest_guide_enabled=latest_guide_enabled,
+        team_summary_source=team_summary_source,
     )
     view = ShiftRegisterView(
         shift_register_manager=shift_register_manager,
@@ -171,6 +178,35 @@ def _format_settings_datetime(value: datetime | None) -> str:
     if value is None:
         return "Not set"
     return format_iso_hour(value)
+
+
+def _format_team_summary_source(
+    resolution: TeamSummarySourceResolution,
+) -> str:
+    source = resolution.source
+    if resolution.status is TeamSummarySourceStatus.AVAILABLE and source is not None:
+        worksheet_url = google_sheet_url_with_gid(
+            source.sheet_url,
+            source.worksheet_id,
+        )
+        return (
+            f"- **Channel** = <#{source.channel_id}>\n"
+            f"- **Worksheet** = [{source.worksheet_title}]"
+            f"({worksheet_url}) : `{source.worksheet_id}`"
+        )
+    if resolution.status is TeamSummarySourceStatus.MISSING:
+        return "- No configured Team Register exists in this server."
+    if resolution.status is TeamSummarySourceStatus.AMBIGUOUS:
+        return (
+            "- Multiple Team Registers are configured; source selection is not "
+            "supported yet."
+        )
+    if resolution.status is TeamSummarySourceStatus.INVALID:
+        return (
+            "- The configured Team Summary source is invalid. Repair its worksheet "
+            "settings or header."
+        )
+    return "- The Team Summary source could not be read at this time."
 
 
 def _timeline_defaults_from_config(shift_register: object) -> dict[str, str]:
@@ -1066,6 +1102,7 @@ def build_current_settings_embed(
     *,
     is_save_action: bool = False,
     latest_guide_enabled: bool = False,
+    team_summary_source: TeamSummarySourceResolution,
 ) -> Embed:
     """
     Build an embed showing the current shift register settings.
@@ -1081,6 +1118,8 @@ def build_current_settings_embed(
         color (int): Embed color.
         is_save_action (bool):
             If True, this is a settings save, otherwise a settings query (view).
+        team_summary_source (TeamSummarySourceResolution):
+            Resolved same-guild Team Summary source status.
 
     Returns:
         Embed: The constructed embed.
@@ -1118,6 +1157,11 @@ def build_current_settings_embed(
     embed.add_field(
         name="Worksheets & IDs",
         value="\n".join(worksheet_rows),
+        inline=False,
+    )
+    embed.add_field(
+        name="Team Summary Source",
+        value=_format_team_summary_source(team_summary_source),
         inline=False,
     )
 

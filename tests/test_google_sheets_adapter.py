@@ -8,18 +8,28 @@ from utils.google_sheets import AsyncioGspreadWorksheet, GoogleSheet
 
 
 class RawWorksheet:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         worksheet_id: int = 1,
         title: str = "Worksheet",
         values: list[list[object]] | None = None,
+        batch_values: list[list[list[object]]] | None = None,
+        row_count: int = 100,
+        col_count: int = 20,
     ) -> None:
         self.id = worksheet_id
         self.title = title
         self.values = values or []
+        self.batch_values = batch_values or []
+        self.row_count = row_count
+        self.col_count = col_count
         self.get_calls: list[dict[str, object]] = []
         self.update_calls: list[dict[str, object]] = []
+        self.batch_get_calls: list[dict[str, object]] = []
+        self.batch_update_calls: list[dict[str, object]] = []
+        self.resize_calls: list[dict[str, int]] = []
+        self.delete_calls: list[tuple[int, int | None]] = []
         self.extra_attribute = "delegated"
 
     async def get(self, **kwargs: object) -> list[list[object]]:
@@ -28,6 +38,25 @@ class RawWorksheet:
 
     async def update(self, values: list[list[object]], **kwargs: object) -> None:
         self.update_calls.append({"values": values, **kwargs})
+
+    async def batch_get(
+        self, ranges: list[str], **kwargs: object
+    ) -> list[list[list[object]]]:
+        self.batch_get_calls.append({"ranges": ranges, **kwargs})
+        return self.batch_values
+
+    async def batch_update(
+        self, data: list[dict[str, object]], **kwargs: object
+    ) -> None:
+        self.batch_update_calls.append({"data": data, **kwargs})
+
+    async def resize(self, *, rows: int, cols: int) -> None:
+        self.resize_calls.append({"rows": rows, "cols": cols})
+        self.row_count = rows
+        self.col_count = cols
+
+    async def delete_rows(self, index: int, end_index: int | None = None) -> None:
+        self.delete_calls.append((index, end_index))
 
 
 class RawSpreadsheet:
@@ -133,6 +162,64 @@ async def test_adapter_updates_empty_dataframe_header_as_raw_text() -> None:
             "raw": True,
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_batch_reads_formulas() -> None:
+    batch_values = [[["count"]], [["username"], ["alice"]]]
+    raw = RawWorksheet(batch_values=batch_values)
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    values = await adapter.batch_get_values(["1:2", "A3:C"])
+
+    assert values == batch_values
+    assert raw.batch_get_calls == [
+        {
+            "ranges": ["1:2", "A3:C"],
+            "value_render_option": "FORMULA",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_batch_updates_user_entered_ranges() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+    data = [{"range": "A3:B3", "values": [["alice", "Alice"]]}]
+
+    await adapter.batch_update_values(data)
+
+    assert raw.batch_update_calls == [{"data": data, "raw": False}]
+
+
+@pytest.mark.asyncio
+async def test_adapter_ensures_only_missing_grid_capacity() -> None:
+    raw = RawWorksheet(row_count=2, col_count=20)
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.ensure_size(min_rows=3, min_cols=36)
+
+    assert raw.resize_calls == [{"rows": 3, "cols": 36}]
+
+
+@pytest.mark.asyncio
+async def test_adapter_does_not_resize_sufficient_grid() -> None:
+    raw = RawWorksheet(row_count=100, col_count=40)
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.ensure_size(min_rows=3, min_cols=36)
+
+    assert raw.resize_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_deletes_one_physical_row() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.delete_row(4)
+
+    assert raw.delete_calls == [(4, None)]
 
 
 @pytest.mark.asyncio

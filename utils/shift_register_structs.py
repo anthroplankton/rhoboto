@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import dataclasses
 import itertools as it
 import re
 import unicodedata
@@ -601,18 +600,64 @@ class ShiftRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
 
 
 class EntryWorksheetContent(WorksheetContentBase[Shift]):
-    COLUMNS: ClassVar[list[str]] = (
-        [f.name for f in dataclasses.fields(UserInfo)]
-        + ShiftParser.HOUR_LABELS
-        + [f.name for f in dataclasses.fields(OriginalMessage)]
-    )
+    TEAM_COLUMNS: ClassVar[list[str]] = [
+        "Main ISV",
+        "Encore ISV",
+        "Team Info",
+    ]
+    HOUR_COLUMNS: ClassVar[list[str]] = ShiftParser.HOUR_LABELS
+    COLUMNS: ClassVar[list[str]] = [
+        "username",
+        "display_name",
+        *TEAM_COLUMNS,
+        *HOUR_COLUMNS,
+        "original_message",
+    ]
     DTYPES: ClassVar[dict[str, str]] = (
-        {f.name: str(f.type) for f in dataclasses.fields(UserInfo)}
-        | dict.fromkeys(ShiftParser.HOUR_LABELS, "int")
-        | {f.name: str(f.type) for f in dataclasses.fields(OriginalMessage)}
+        dict.fromkeys(["username", "display_name", *TEAM_COLUMNS], "str")
+        | dict.fromkeys(HOUR_COLUMNS, "int")
+        | {"original_message": "str"}
     )
 
     INDEX_NAME: ClassVar[str] = COLUMNS[0]
+    COUNT_ROW: ClassVar[int] = 1
+    HEADER_ROW: ClassVar[int] = 2
+    FIRST_DATA_ROW: ClassVar[int] = 3
+    COLUMN_COUNT: ClassVar[int] = len(COLUMNS)
+
+    @classmethod
+    def count_row(cls) -> list[str]:
+        """Build the bot-owned count row for all availability columns."""
+        row = [""] * cls.COLUMN_COUNT
+        row[0] = "count"
+        for offset, _column in enumerate(cls.HOUR_COLUMNS, start=5):
+            letter = column_letter(offset + 1)
+            row[offset] = f"=COUNTIF({letter}${cls.FIRST_DATA_ROW}:{letter}, 1)"
+        return row
+
+    @classmethod
+    def shift_value_ranges(
+        cls,
+        shift: Shift,
+        *,
+        row: int,
+    ) -> list[dict[str, object]]:
+        """Serialize one shift into the two disjoint bot-owned value ranges."""
+        return [
+            {
+                "range": f"A{row}:B{row}",
+                "values": [[shift.username, shift.display_name]],
+            },
+            {
+                "range": f"F{row}:AJ{row}",
+                "values": [
+                    [
+                        *(getattr(shift, column) for column in cls.HOUR_COLUMNS),
+                        shift.original_message,
+                    ]
+                ],
+            },
+        ]
 
     @classmethod
     def validate_core_header(cls, df: object) -> None:
@@ -627,3 +672,58 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
                 f"{expected!r}, got {actual_core!r}."
             )
             raise ValueError(msg)
+
+
+def column_letter(column: int) -> str:
+    letters = ""
+    while column:
+        column, remainder = divmod(column - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _formula_string(value: str) -> str:
+    return f'"{value.replace(chr(34), chr(34) * 2)}"'
+
+
+# ponytail: one IMPORTRANGE per participant; add one bot-managed helper import
+# only if measured participant count, reload latency, or quota pressure requires it.
+def build_team_summary_formula(  # noqa: PLR0913
+    *,
+    row: int,
+    sheet_url: str,
+    worksheet_title: str,
+    username_column: int,
+    roles_column: int,
+    main_isv_column: int,
+    encore_isv_column: int | None,
+    import_last_column: str,
+) -> str:
+    """Build one C-cell formula that spills Team display values into D:E."""
+    title = worksheet_title.replace("'", "''")
+    source_range = _formula_string(f"'{title}'!A:{import_last_column}")
+    username = f"CHOOSECOLS(team, {username_column})"
+    roles = f"CHOOSECOLS(team, {roles_column})"
+    main = f"CHOOSECOLS(team, {main_isv_column})"
+    encore = (
+        f'XLOOKUP($A{row}, username, CHOOSECOLS(team, {encore_isv_column}), "")'
+        if encore_isv_column is not None
+        else '""'
+    )
+    return (
+        "=LET("
+        f"team, IMPORTRANGE({_formula_string(sheet_url)}, {source_range}), "
+        f"username, {username}, "
+        f"found, COUNTIF(username, $A{row}) > 0, "
+        f'roles, XLOOKUP($A{row}, username, {roles}, ""), '
+        f'main, XLOOKUP($A{row}, username, {main}, ""), '
+        f"encoreTeam, {encore}, "
+        "HSTACK("
+        "main, "
+        'IF(encoreTeam <> "", encoreTeam, IF(roles <> "", main, "")), '
+        'IF(found, IF(roles <> "", roles & IF(encoreTeam <> "", "", '
+        '"｜Main fallback"), IF(encoreTeam <> "", "No role", "")), '  # noqa: RUF001
+        '"No team yet")'
+        ")"
+        ")"
+    )

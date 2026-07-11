@@ -3,7 +3,6 @@ from __future__ import annotations
 # ruff: noqa: SLF001
 from types import MethodType, SimpleNamespace
 
-import pandas as pd
 import pytest
 from tortoise.exceptions import DBConnectionError
 
@@ -12,7 +11,6 @@ from cogs.base.feature_channel_base import FeatureChannelBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
-from tests.fakes import FakeWorksheet
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -420,22 +418,28 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
 async def test_shift_listener_marks_old_entry_header_google_sheets_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old_frame = pd.DataFrame(
-        columns=[
-            "username",
-            "display_name",
-            *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
-            "original_message",
-        ],
-    )
+    class OldHeaderWorksheet:
+        id = 1
+        title = "Shift Entry"
+
+        async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
+            assert ranges == ["1:2", "A3:C"]
+            return [
+                [
+                    [
+                        "username",
+                        "display_name",
+                        *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
+                        "original_message",
+                    ]
+                ],
+                [],
+            ]
+
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
-            EntryWorksheetMetadata(
-                1,
-                "Shift Entry",
-                FakeWorksheet(title="Shift Entry", frame=old_frame),
-            ),
+            EntryWorksheetMetadata(1, "Shift Entry", OldHeaderWorksheet()),
             DraftWorksheetMetadata(2, "Shift Draft", None),
             FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
         ],
