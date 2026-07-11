@@ -96,9 +96,19 @@ class AsyncioGspreadWorksheet:
             df (pd.DataFrame): DataFrame to upload to worksheet.
         """
         df = df.fillna("")
-        values = [df.columns.tolist(), *df.to_numpy().tolist()]
+        rows = df.to_numpy().tolist()
         try:
-            await self._worksheet.update(values, raw=False)
+            await self._worksheet.update(
+                [df.columns.tolist()],
+                range_name="A1",
+                raw=True,
+            )
+            if rows:
+                await self._worksheet.update(
+                    rows,
+                    range_name="A2",
+                    raw=False,
+                )
         except GoogleSheetsError:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:

@@ -106,8 +106,31 @@ async def test_adapter_updates_dataframe_through_wrapped_worksheet() -> None:
 
     assert raw.update_calls == [
         {
-            "values": [["username", "score"], ["alice", ""]],
+            "values": [["username", "score"]],
+            "range_name": "A1",
+            "raw": True,
+        },
+        {
+            "values": [["alice", ""]],
+            "range_name": "A2",
             "raw": False,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_updates_empty_dataframe_header_as_raw_text() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+    frame = pd.DataFrame(columns=["username", "1-2"])
+
+    await adapter.update_from_dataframe(frame)
+
+    assert raw.update_calls == [
+        {
+            "values": [["username", "1-2"]],
+            "range_name": "A1",
+            "raw": True,
         }
     ]
 
