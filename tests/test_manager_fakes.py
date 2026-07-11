@@ -162,6 +162,8 @@ class FakeEntryWorksheet:
         self.col_count = max(col_count, max(map(len, self.rows), default=0))
         self.batch_gets: list[list[str]] = []
         self.batch_updates: list[list[dict[str, object]]] = []
+        self.typed_batch_updates: list[list[dict[str, object]]] = []
+        self.typed_formula_ranges: list[set[str]] = []
         self.ensure_calls: list[tuple[int, int]] = []
         self.deleted_rows: list[int] = []
 
@@ -174,6 +176,19 @@ class FakeEntryWorksheet:
 
     async def batch_update_values(self, data: list[dict[str, object]]) -> None:
         self.batch_updates.append(copy.deepcopy(data))
+        for item in data:
+            self._apply_range(str(item["range"]), item["values"])
+
+    async def batch_update_typed_values(
+        self,
+        data: list[dict[str, object]],
+        *,
+        formula_ranges: set[str],
+    ) -> None:
+        copied = copy.deepcopy(data)
+        self.batch_updates.append(copied)
+        self.typed_batch_updates.append(copied)
+        self.typed_formula_ranges.append(formula_ranges)
         for item in data:
             self._apply_range(str(item["range"]), item["values"])
 
@@ -579,8 +594,13 @@ async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
-    ranges = [item["range"] for item in worksheet.batch_updates[-1]]
-    assert ranges == ["A1:AJ1", "A2:AJ2", "A3:B3", "F3:AJ3"]
+    assert len(worksheet.typed_batch_updates) == 1
+    assert [item["range"] for item in worksheet.typed_batch_updates[0]] == [
+        "A1:AJ1",
+        "A2:AJ2",
+        "A3:B3",
+        "F3:AJ3",
+    ]
     assert worksheet.rows[0][:36] == EntryWorksheetContent.count_row()
     assert worksheet.rows[1][:36] == EntryWorksheetContent.COLUMNS
     assert worksheet.rows[2][0:2] == ["alice", "Alice"]
@@ -793,8 +813,11 @@ async def test_shift_manager_repairs_migration_ready_header_and_count() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
-    ranges = [item["range"] for item in worksheet.batch_updates[-1]]
-    assert ranges[:2] == ["A1:AJ1", "A2:AJ2"]
+    assert len(worksheet.typed_batch_updates) == 1
+    assert [item["range"] for item in worksheet.typed_batch_updates[0]][:2] == [
+        "A1:AJ1",
+        "A2:AJ2",
+    ]
     assert worksheet.rows[0][:36] == EntryWorksheetContent.count_row()
     assert worksheet.rows[1][:36] == EntryWorksheetContent.COLUMNS
 

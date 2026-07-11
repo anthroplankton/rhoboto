@@ -344,7 +344,15 @@ class ShiftRegisterManager(
             min_rows=target_row,
             min_cols=EntryWorksheetContent.COLUMN_COUNT,
         )
-        await worksheet.batch_update_values(updates)
+        formula_ranges = {
+            str(item["range"])
+            for item in updates
+            if item["range"] == "A1:AJ1" or str(item["range"]).startswith("C")
+        }
+        await worksheet.batch_update_typed_values(
+            updates,
+            formula_ranges=formula_ranges,
+        )
 
         self.logger.info(
             "Updated shift registration %r in worksheet `%s`",

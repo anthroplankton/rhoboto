@@ -7,6 +7,7 @@ import pandas as pd
 from async_lru import alru_cache
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
+from gspread.utils import a1_range_to_grid_range
 
 from utils.google_sheets_errors import (
     GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS,
@@ -136,6 +137,53 @@ class AsyncioGspreadWorksheet:
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "update_worksheet")
 
+    async def batch_update_typed_values(
+        self,
+        data: list[dict[str, object]],
+        *,
+        formula_ranges: set[str],
+    ) -> None:
+        """Atomically write ranges with explicit cell value types."""
+        requests = []
+        for item in data:
+            range_name = str(item["range"])
+            values = item["values"]
+            if not isinstance(values, list):
+                msg = f"Invalid values for range {range_name!r}."
+                raise TypeError(msg)
+            requests.append(
+                {
+                    "updateCells": {
+                        "range": a1_range_to_grid_range(range_name, self.id),
+                        "rows": [
+                            {
+                                "values": [
+                                    {
+                                        "userEnteredValue": _extended_value(
+                                            value,
+                                            formulas=range_name in formula_ranges,
+                                        )
+                                    }
+                                    for value in row
+                                ]
+                            }
+                            for row in values
+                        ],
+                        "fields": "userEnteredValue",
+                    }
+                }
+            )
+        try:
+            await self._worksheet.agcm._call(  # noqa: SLF001
+                self._worksheet.ws.client.batch_update,
+                self._worksheet.ws.spreadsheet_id,
+                {"requests": requests},
+            )
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "update_worksheet")
+
     async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
         """Grow the worksheet only when the requested grid exceeds its size."""
         current_rows = self._worksheet.row_count
@@ -159,6 +207,16 @@ class AsyncioGspreadWorksheet:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "delete_worksheet_row")
+
+
+def _extended_value(value: object, *, formulas: bool) -> dict[str, object]:
+    if formulas and isinstance(value, str) and value.startswith("="):
+        return {"formulaValue": value}
+    if isinstance(value, bool):
+        return {"boolValue": value}
+    if isinstance(value, int | float):
+        return {"numberValue": value}
+    return {"stringValue": "" if value is None else str(value)}
 
 
 class GoogleSheet:

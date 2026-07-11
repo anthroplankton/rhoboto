@@ -30,6 +30,9 @@ class RawWorksheet:
         self.batch_update_calls: list[dict[str, object]] = []
         self.resize_calls: list[dict[str, int]] = []
         self.delete_calls: list[tuple[int, int | None]] = []
+        self.spreadsheet_batch_update_calls: list[dict[str, object]] = []
+        self.agcm = RawClientManager()
+        self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls)
         self.extra_attribute = "delegated"
 
     async def get(self, **kwargs: object) -> list[list[object]]:
@@ -57,6 +60,28 @@ class RawWorksheet:
 
     async def delete_rows(self, index: int, end_index: int | None = None) -> None:
         self.delete_calls.append((index, end_index))
+
+
+class RawClientManager:
+    async def _call(self, method: object, *args: object) -> object:
+        assert callable(method)
+        return method(*args)
+
+
+class RawWorksheetResource:
+    spreadsheet_id = "spreadsheet-id"
+
+    def __init__(self, calls: list[dict[str, object]]) -> None:
+        self.client = RawSpreadsheetClient(calls)
+
+
+class RawSpreadsheetClient:
+    def __init__(self, calls: list[dict[str, object]]) -> None:
+        self.calls = calls
+
+    def batch_update(self, spreadsheet_id: str, body: dict[str, object]) -> None:
+        assert spreadsheet_id == "spreadsheet-id"
+        self.calls.append(body)
 
 
 class RawSpreadsheet:
@@ -190,6 +215,41 @@ async def test_adapter_batch_updates_user_entered_ranges() -> None:
     await adapter.batch_update_values(data)
 
     assert raw.batch_update_calls == [{"data": data, "raw": False}]
+
+
+@pytest.mark.asyncio
+async def test_adapter_batch_updates_mixed_cell_types_atomically() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+    data = [
+        {"range": "F1", "values": [["=COUNTIF(F$3:F, 1)"]]},
+        {"range": "G1", "values": [["0-1"]]},
+        {"range": "F3:G3", "values": [[1, False]]},
+    ]
+
+    await adapter.batch_update_typed_values(data, formula_ranges={"F1"})
+
+    assert len(raw.spreadsheet_batch_update_calls) == 1
+    requests = raw.spreadsheet_batch_update_calls[0]["requests"]
+    assert isinstance(requests, list)
+    cells = [request["updateCells"] for request in requests]
+    assert cells[0]["range"] == {
+        "sheetId": 1,
+        "startRowIndex": 0,
+        "endRowIndex": 1,
+        "startColumnIndex": 5,
+        "endColumnIndex": 6,
+    }
+    assert cells[0]["rows"][0]["values"][0]["userEnteredValue"] == {
+        "formulaValue": "=COUNTIF(F$3:F, 1)"
+    }
+    assert cells[1]["rows"][0]["values"][0]["userEnteredValue"] == {
+        "stringValue": "0-1"
+    }
+    assert [value["userEnteredValue"] for value in cells[2]["rows"][0]["values"]] == [
+        {"numberValue": 1},
+        {"boolValue": False},
+    ]
 
 
 @pytest.mark.asyncio
