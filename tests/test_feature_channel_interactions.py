@@ -4272,7 +4272,7 @@ async def test_delete_callback_uses_feature_catalog_in_ja_copy(
     )
 
     assert result == (
-        "✅ Google Sheets 上の編成登録の入力データを正常に削除しました。"
+        "✅ Google Sheets 上の編成登録のデータを正常に削除しました。"
         "Discord 上の元の登録メッセージも削除したい場合は、"
         "ご自身で削除してください。"
     )

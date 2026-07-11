@@ -80,7 +80,7 @@ def test_register_user_text_formats_delete_success() -> None:
         "delete_success",
         fallback_display_name="Team Register",
     ) == (
-        "✅ Google Sheets 上の編成登録の入力データを正常に削除しました。"
+        "✅ Google Sheets 上の編成登録のデータを正常に削除しました。"
         "Discord 上の元の登録メッセージも削除したい場合は、"
         "ご自身で削除してください。"
     )
@@ -163,7 +163,7 @@ def test_register_user_text_formats_delete_confirmation_copy() -> None:
         "delete_confirm_prompt",
         fallback_display_name="Team Register",
     ) == (
-        "‼️ このチャンネルの編成登録の入力データを削除してもよろしいですか？"  # noqa: RUF001
+        "‼️ このチャンネルの編成登録のデータを削除してもよろしいですか？"  # noqa: RUF001
         "削除されるのは Google Sheets 上のデータのみです。"
     )
     assert (
