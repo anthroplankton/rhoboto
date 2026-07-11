@@ -497,16 +497,22 @@ class ShiftRegisterManager(
         if entry_worksheet is None or draft_worksheet is None:
             raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
 
-        df = await entry_worksheet.to_frame()
         try:
-            EntryWorksheetContent.validate_core_header(df)
+            (
+                header_rows,
+                identity_rows,
+                availability_rows,
+            ) = await entry_worksheet.batch_get_values(["2:2", "A3:B", "F3:AJ"])
+            shifts = EntryWorksheetContent.shifts_from_ranges(
+                header_rows,
+                identity_rows,
+                availability_rows,
+            )
         except ValueError as exc:
             error = StorageError(StorageErrorKind.MALFORMED_SHEET)
             error.__cause__ = exc
             raise error from exc
 
-        shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(df)
-        shifts = EntryWorksheetContent(shift_df, plain_df).to_shifts()
         shift_register_config = await self.get_sheet_config()
         recruitment_ranges = RecruitmentTimeRanges.from_json(
             shift_register_config.recruitment_time_ranges

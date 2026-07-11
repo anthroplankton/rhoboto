@@ -701,6 +701,49 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
             )
         return shifts
 
+    @classmethod
+    def shifts_from_ranges(
+        cls,
+        header_rows: list[list[object]],
+        identity_rows: list[list[object]],
+        availability_rows: list[list[object]],
+    ) -> list[Shift]:
+        """Build shifts from the current bot-owned Entry ranges."""
+        if header_rows != [cls.COLUMNS]:
+            msg = "Shift Entry worksheet header does not match the current layout."
+            raise ValueError(msg)
+        if len(identity_rows) != len(availability_rows):
+            msg = "Shift Entry participant ranges have different row counts."
+            raise ValueError(msg)
+
+        shifts = []
+        availability_width = len(cls.HOUR_COLUMNS) + 1
+        for identity, availability in zip(
+            identity_rows,
+            availability_rows,
+            strict=True,
+        ):
+            username, display_name = [*identity[:2], "", ""][:2]
+            if username in ("", None):
+                continue
+            values = [
+                *availability[:availability_width],
+                *([""] * max(0, availability_width - len(availability))),
+            ]
+            shifts.append(
+                Shift(
+                    username=str(username),
+                    display_name=str(display_name),
+                    original_message=str(values[-1]),
+                    slots={
+                        index
+                        for index, value in enumerate(values[:-1])
+                        if int(value) == 1
+                    },
+                )
+            )
+        return shifts
+
 
 def column_letter(column: int) -> str:
     letters = ""
