@@ -121,6 +121,40 @@ async def test_shift_team_source_relation_is_nullable_and_set_null() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shift_manager_reads_saved_team_source_discord_channel_id() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        shift_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="shift_register",
+        )
+        team_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="team_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=shift_channel,
+            team_source_feature_channel=team_channel,
+            sheet_url="https://shift.sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(shift_channel, "service.json")
+        manager._sheet_config = config  # noqa: SLF001
+
+        assert await manager.get_saved_team_source_channel_id() == 2002
+
+        config.team_source_feature_channel_id = None
+        assert await manager.get_saved_team_source_channel_id() is None
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
 async def test_feature_channel_message_state_enum_unique_and_cascade() -> None:
     db_url = "sqlite://:memory:"
     await asyncio.wait_for(init_db(db_url), timeout=3)

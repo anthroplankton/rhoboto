@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, overload, override
 
+from models.feature_channel import FeatureChannel
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import GoogleSheet
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
@@ -73,6 +74,15 @@ class ShiftRegisterManager(
 ):
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
+
+    async def get_saved_team_source_channel_id(self) -> int | None:
+        """Return the Discord channel ID for the saved Team source."""
+        config = await self.get_sheet_config()
+        source_id = getattr(config, "team_source_feature_channel_id", None)
+        if source_id is None:
+            return None
+        source = await FeatureChannel.get_or_none(id=source_id)
+        return source.channel_id if source is not None else None
 
     async def resolve_team_source(
         self,

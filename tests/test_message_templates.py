@@ -247,12 +247,63 @@ def test_guide_templates_render_jinja_values(key: str, locale: str) -> None:
         locale,
         bot="@Rhoboto",
         sheet_url="https://docs.google.com/spreadsheets/d/example",
+        team_source_channel_id=123,
     )
 
     assert "@Rhoboto" in content
     assert "https://docs.google.com/spreadsheets/d/example" in content
     assert "{bot}" not in content
     assert "{sheet_url}" not in content
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_mention", "expected_fallback"),
+    [
+        (
+            "ja",
+            "シフトを提出する前に、編成は <#123> へご提出ください。",
+            "シフトを提出する前に、編成は登録用のチャンネルへご提出ください。",
+        ),
+        (
+            "zh_tw",
+            "提交班表前，請先將編成提交至 <#123>。",  # noqa: RUF001
+            "提交班表前，請先將編成提交至編成登記用頻道。",  # noqa: RUF001
+        ),
+        (
+            "en",
+            "Before submitting your shifts, please submit your teams in <#123>.",
+            "Before submitting your shifts, please submit your teams in the team "
+            "registration channel.",
+        ),
+    ],
+)
+def test_shift_guide_team_source_channel_copy(
+    locale: str,
+    expected_mention: str,
+    expected_fallback: str,
+) -> None:
+    values = {
+        "bot": "@Rhoboto",
+        "sheet_url": "https://docs.google.com/spreadsheets/d/example",
+    }
+
+    mention_content = render_message_template(
+        "shift.guide",
+        locale,
+        team_source_channel_id=123,
+        **values,
+    )
+    fallback_content = render_message_template(
+        "shift.guide",
+        locale,
+        team_source_channel_id=None,
+        **values,
+    )
+
+    assert expected_mention in mention_content
+    assert expected_fallback not in mention_content
+    assert expected_fallback in fallback_content
+    assert "<#" not in fallback_content
 
 
 @pytest.mark.parametrize("feature", ["team", "shift"])

@@ -12,6 +12,7 @@ from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
+    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from utils.structs_base import UserInfo
 
 
@@ -27,6 +28,17 @@ class Shift(
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
+
+    @override
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+    ) -> dict[str, object]:
+        values = await super()._guide_template_values(context)
+        values[
+            "team_source_channel_id"
+        ] = await context.manager.get_saved_team_source_channel_id()
+        return values
 
     @override
     async def _delete_user_data(

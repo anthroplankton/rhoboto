@@ -210,6 +210,9 @@ class ConfiguredShiftHelpUrlManager(ConfiguredHelpUrlManager):
         config.landing_worksheet_id = config.entry_worksheet_id
         return config
 
+    async def get_saved_team_source_channel_id(self) -> int:
+        return 987
+
 
 class AutoGuideMessage:
     def __init__(
@@ -687,6 +690,7 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
         "_guide_sheet_url",
+        "_guide_template_values",
         "_auto_guide_is_enabled",
         "_auto_guide_template_values",
         "_render_auto_guide_embeds",
@@ -3143,7 +3147,7 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredShiftHelpUrlManager)
-    captured_sheet_urls: list[object] = []
+    captured_values: dict[str, object] = {}
 
     async def fake_render_announcement_messages(
         template_key: str,
@@ -3153,7 +3157,7 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
     ) -> list[RenderedAnnouncement]:
         assert template_key == "shift.guide"
         assert guild_id == 111
-        captured_sheet_urls.append(values["sheet_url"])
+        captured_values.update(values)
         return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
@@ -3172,9 +3176,10 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
 
     await subject.send_guide_message(interaction)
 
-    assert captured_sheet_urls == [
+    assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
-    ]
+    )
+    assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [
         ("en guide", {"ephemeral": False, "wait": True})
     ]
@@ -3249,6 +3254,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
     assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
     )
+    assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [
         ("rendered shift guide", {"ephemeral": True})
     ]

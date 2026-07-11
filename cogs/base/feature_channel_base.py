@@ -942,6 +942,16 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             feature_config.landing_worksheet_id,
         )
 
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+    ) -> dict[str, object]:
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+        return {
+            "bot": bot_mention,
+            "sheet_url": self._guide_sheet_url(context.feature_config),
+        }
+
     def _auto_guide_template_values(
         self,
         context: ConfiguredFeatureChannelContext[TManager],
@@ -1236,13 +1246,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                 await self._send_missing_config_followup(interaction)
                 return
 
-            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
             announcements = await render_announcement_messages(
                 self.guide_template_key,
                 context.guild_id,
                 self.logger,
-                bot=bot_mention,
-                sheet_url=self._guide_sheet_url(context.feature_config),
+                **await self._guide_template_values(context),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -1554,6 +1562,16 @@ class FeatureChannelUserBase[
             feature_config.landing_worksheet_id,
         )
 
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+    ) -> dict[str, object]:
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+        return {
+            "bot": bot_mention,
+            "sheet_url": self._guide_sheet_url(context.feature_config),
+        }
+
     async def delete_callback(self, interaction: Interaction) -> None:
         """
         Ask for confirmation before deleting the user's data for this feature.
@@ -1716,12 +1734,10 @@ class FeatureChannelUserBase[
                 return
 
             locale = locale_to_template_code(interaction.locale.value)
-            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
             content = render_message_template(
                 template_key,
                 locale,
-                bot=bot_mention,
-                sheet_url=self._guide_sheet_url(context.feature_config),
+                **await self._guide_template_values(context),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(

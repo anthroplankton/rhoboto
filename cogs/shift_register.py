@@ -57,6 +57,17 @@ class ShiftRegister(
     ParserType = ShiftParser
 
     @override
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+    ) -> dict[str, object]:
+        values = await super()._guide_template_values(context)
+        values[
+            "team_source_channel_id"
+        ] = await context.manager.get_saved_team_source_channel_id()
+        return values
+
+    @override
     def _auto_guide_template_values(
         self,
         context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
