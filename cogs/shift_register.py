@@ -426,10 +426,8 @@ class ShiftRegister(
     ) -> str:
         """Format the generated draft report.
 
-        Assigned slots use a full-width vertical bar between encore and 本走,
-        a full-width semicolon before standby, and ``、`` between users in the
-        same supporter group. Missing groups omit their separator; ``No encore``
-        appears only when another supporter is assigned.
+        The report always shows encore, 本走, and standby in that order. Empty
+        slots display their per-group shortage so each role remains visible.
         """
         lines = [
             "### ✅ 班表草稿已產生",
@@ -439,7 +437,7 @@ class ShiftRegister(
                 f"[Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
             ),
         ]
-        lines.append("- 已排入：")  # noqa: RUF001
+        lines.append("- 已排入（安可｜本走；待機）：")  # noqa: RUF001
         for assignment in schedule.assignments:
             encore_username = assignment.supporter_usernames_by_slot.get(
                 ENCORE_SUPPORTER_SLOT
@@ -449,7 +447,7 @@ class ShiftRegister(
                 if encore_username is not None
                 else None
             )
-            main_names = "、".join(
+            main_name_parts = [
                 _format_draft_username(
                     assignment.supporter_usernames_by_slot[supporter_slot],
                     schedule,
@@ -457,7 +455,11 @@ class ShiftRegister(
                 )
                 for supporter_slot in HONSO_SUPPORTER_SLOTS
                 if supporter_slot in assignment.supporter_usernames_by_slot
-            )
+            ]
+            missing_main_count = len(HONSO_SUPPORTER_SLOTS) - len(main_name_parts)
+            if missing_main_count:
+                main_name_parts.append(f"缺 `{missing_main_count}`")
+            main_names = "、".join(main_name_parts)
             standby_username = assignment.supporter_usernames_by_slot.get(
                 STANDBY_SUPPORTER_SLOT
             )
@@ -466,25 +468,10 @@ class ShiftRegister(
                 if standby_username is not None
                 else None
             )
-            if encore_name and main_names:
-                names = f"{encore_name} ｜ {main_names}"  # noqa: RUF001
-            elif encore_name:
-                names = encore_name
-            elif main_names:
-                names = f"`No encore` ｜ {main_names}"  # noqa: RUF001
-            else:
-                names = ""
-            if standby_name:
-                names = (
-                    f"{names}；{standby_name}"  # noqa: RUF001
-                    if names
-                    else f"`No encore`；{standby_name}"  # noqa: RUF001
-                )
-            shortage = (
-                f"（缺 `{assignment.shortage}`）" if assignment.shortage else ""  # noqa: RUF001
+            names = f"{encore_name or '缺'}｜{main_names}；{standby_name or '缺'}"  # noqa: RUF001
+            lines.append(
+                f"  - -# `{hour_label(assignment.hour)}`：{names}"  # noqa: RUF001
             )
-            names = f"：{names}" if names else ""  # noqa: RUF001
-            lines.append(f"  - -# `{hour_label(assignment.hour)}`{shortage}{names}")
         unassigned_assignments = [
             assignment
             for assignment in schedule.assignments

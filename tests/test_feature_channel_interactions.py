@@ -121,15 +121,15 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         "- ‼️ 已將 `8` 個小時的班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
         "，並覆蓋原有內容。\n"  # noqa: RUF001
-        "- 已排入：\n"  # noqa: RUF001
-        "  - -# `4-5`（缺 `4`）：<@111>\n"  # noqa: RUF001
-        "  - -# `5-6`（缺 `3`）：<@111> ｜ <@222>\n"  # noqa: RUF001
-        "  - -# `6-7`：<@111> ｜ <@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
-        "  - -# `7-8`（缺 `4`）：`No encore` ｜ <@222>\n"  # noqa: RUF001
-        "  - -# `8-9`（缺 `5`）\n"  # noqa: RUF001
-        "  - -# `9-10`（缺 `3`）：<@111>；`Grace`\n"  # noqa: RUF001
-        "  - -# `10-11`（缺 `3`）：`No encore` ｜ <@222>；`Grace`\n"  # noqa: RUF001
-        "  - -# `11-12`（缺 `4`）：`No encore`；`Grace`\n"  # noqa: RUF001
+        "- 已排入（安可｜本走；待機）：\n"  # noqa: RUF001
+        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"  # noqa: RUF001
+        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
+        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
+        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
+        "  - -# `8-9`：缺｜缺 `3`；缺\n"  # noqa: RUF001
+        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"  # noqa: RUF001
+        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"  # noqa: RUF001
+        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"  # noqa: RUF001
         "- 未排入（位置已滿）：\n"  # noqa: RUF001
         "  - -# `4-5`：<@333>、`Dave`"  # noqa: RUF001
     )
