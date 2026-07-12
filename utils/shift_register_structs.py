@@ -59,28 +59,30 @@ class HourRange:
 
 
 class HourRanges:
+    RANGE_CONNECTORS: ClassVar[str] = r"\-~‐‒–—―−〜〰ー"  # noqa: RUF001
     RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?<![\d:/\-~點点時时])"
+        rf"(?<![\d:/{RANGE_CONNECTORS}點点時时])"
         r"(?<!\d\.)"
-        r"(?P<start>\d{1,2})\s*[-~]\s*"
+        rf"(?P<start>\d{{1,2}})\s*[{RANGE_CONNECTORS}]\s*"
         r"(?P<end>\d{1,2})"
         r"(?!\.\d)"
-        r"(?![\d:/\-~點点時时])"
+        rf"(?![\d:/{RANGE_CONNECTORS}點点時时])"
     )
     TIME_VALUE_PATTERN: ClassVar[str] = r"\d{1,2}(?:\s*[.:]\s*\d{2}|\s*[點点時时])?"
     INVALID_ATTEMPT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        rf"(?<![\d:/\-~])(?:"
-        rf"{TIME_VALUE_PATTERN}\s*(?:[-~]|到)\s*"
+        rf"(?<![\d:/{RANGE_CONNECTORS}])(?:"
+        rf"{TIME_VALUE_PATTERN}\s*(?:[{RANGE_CONNECTORS}]|到)\s*"
         rf"(?:{TIME_VALUE_PATTERN})?"
-        rf"|(?:[-~]|到)\s*{TIME_VALUE_PATTERN}"
-        rf")(?![\d:/\-~])"
+        rf"|(?:[{RANGE_CONNECTORS}]|到)\s*{TIME_VALUE_PATTERN}"
+        rf")(?![\d:/{RANGE_CONNECTORS}])"
     )
     MALFORMED_RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
-        r"(?<![\d:/\-~])(?:"
-        r"\d{1,2}(?:\s*[-~]\s*){2,}\d{1,2}"
-        r"|\d{1,2}(?:\s*[-~]\s*\d{1,2}){2,}"
-        r"|(?:\d{3}\s*[-~]\s*\d{1,3}|\d{1,2}\s*[-~]\s*\d{3})"
-        r")(?![\d:/\-~])"
+        rf"(?<![\d:/{RANGE_CONNECTORS}])(?:"
+        rf"\d{{1,2}}(?:\s*[{RANGE_CONNECTORS}]\s*){{2,}}\d{{1,2}}"
+        rf"|\d{{1,2}}(?:\s*[{RANGE_CONNECTORS}]\s*\d{{1,2}}){{2,}}"
+        rf"|(?:\d{{3}}\s*[{RANGE_CONNECTORS}]\s*\d{{1,3}}"
+        rf"|\d{{1,2}}\s*[{RANGE_CONNECTORS}]\s*\d{{3}})"
+        rf")(?![\d:/{RANGE_CONNECTORS}])"
     )
 
     def __init__(self, ranges: list[HourRange]) -> None:

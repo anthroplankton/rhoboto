@@ -175,6 +175,18 @@ def test_shift_parser_accepts_linear_0_30_ranges_and_notes() -> None:
     assert result.periods.display() == "4-12, 20-28"
 
 
+@pytest.mark.parametrize("connector", "-‐‑‒–—―−〜～〰ーｰ﹘﹣－")  # noqa: RUF001
+def test_shift_parser_accepts_common_range_connectors(connector: str) -> None:
+    line = f"20{connector}21"
+
+    result = ShiftParser.parse_submission(make_user(), [line])
+
+    assert result.invalid_attempts == []
+    assert result.shift is not None
+    assert set(result.shift) == {20}
+    assert result.shift.original_message == line
+
+
 @pytest.mark.parametrize(
     ("line", "expected_invalid"),
     [
