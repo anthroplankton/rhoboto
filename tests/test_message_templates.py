@@ -306,6 +306,75 @@ def test_shift_guide_team_source_channel_copy(
     assert "<#" not in fallback_content
 
 
+@pytest.mark.parametrize(
+    ("locale", "expected_full", "expected_auto"),
+    [
+        (
+            "ja",
+            (
+                "募集時間の範囲内で登録したい時間帯を、`開始-終了`（JST）の形式で入力"  # noqa: RUF001
+                "してください。時刻は30時間制の表記にも対応しています。"
+            ),
+            (
+                "**開始-終了**（JST）で、募集時間の範囲内で登録したい時間帯をすべて"  # noqa: RUF001
+                "1つのメッセージにまとめて、このチャンネルに送ってください。"
+                "備考も各時間帯に添えられます。"
+            ),
+        ),
+        (
+            "zh_tw",
+            (
+                "請用 `開始-結束`（JST）的格式，輸入募集時段內想登記的時段。"  # noqa: RUF001
+                "輸入時間也支援 30 小時制。"
+            ),
+            (
+                "請用 **開始-結束**（JST）的格式，將募集時段內所有想登記的時段整理"  # noqa: RUF001
+                "在一則訊息，並傳送到這個頻道。每個時段旁也可以加上備註。"  # noqa: RUF001
+            ),
+        ),
+        (
+            "en",
+            (
+                "Enter the time ranges you want to register within the recruitment "
+                "time "
+                "range in `Start-End` format (JST). The 30-hour clock notation is also "
+                "supported."
+            ),
+            (
+                "In **Start-End** format (JST), send all time ranges you want to "
+                "register "
+                "within the recruitment time range in one message in this channel. You "
+                "can add a note to each time range."
+            ),
+        ),
+    ],
+)
+def test_shift_guides_limit_entries_to_recruitment_time_range(
+    locale: str,
+    expected_full: str,
+    expected_auto: str,
+) -> None:
+    values = {
+        "bot": "@Rhoboto",
+        "sheet_url": "https://docs.google.com/spreadsheets/d/example",
+        "team_source_channel_id": None,
+    }
+
+    assert expected_full in render_message_template("shift.guide", locale, **values)
+    for part in ("description", "plain"):
+        assert expected_auto in render_message_template(
+            f"shift.auto_guide.{part}",
+            locale,
+            recruitment_time_range="4-28",
+            event_date=None,
+            day_number=None,
+            submission_deadline=None,
+            draft_shift_proposal=None,
+            final_shift_notice=None,
+            **values,
+        )
+
+
 @pytest.mark.parametrize("feature", ["team", "shift"])
 @pytest.mark.parametrize("part", ["title", "description", "footer"])
 @pytest.mark.parametrize("locale", ["ja", "zh_tw", "en"])
