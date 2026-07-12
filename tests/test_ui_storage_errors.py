@@ -109,6 +109,7 @@ async def test_send_storage_error_logs_safe_storage_fields(
     assert "STG-12345678" in caplog.text
     assert "database_unavailable" in caplog.text
     assert "database_connection_failed" in caplog.text
+    assert "DBConnectionError" in caplog.text
     assert "private database host" not in caplog.text
 
 
@@ -245,4 +246,5 @@ async def test_mark_storage_failure_logs_safe_storage_fields(
     assert "STG-12345678" in caplog.text
     assert "database_unavailable" in caplog.text
     assert "database_connection_failed" in caplog.text
+    assert "DBConnectionError" in caplog.text
     assert "private database host" not in caplog.text
