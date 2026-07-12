@@ -709,6 +709,8 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
         availability_rows: list[list[object]],
     ) -> list[Shift]:
         """Build shifts from the current bot-owned Entry ranges."""
+        if not header_rows and not identity_rows and not availability_rows:
+            return []
         if header_rows != [cls.COLUMNS]:
             msg = "Shift Entry worksheet header does not match the current layout."
             raise ValueError(msg)

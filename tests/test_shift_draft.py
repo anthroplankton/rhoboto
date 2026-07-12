@@ -842,6 +842,37 @@ async def test_generate_draft_writes_draft_worksheet(
 
 
 @pytest.mark.asyncio
+async def test_generate_draft_accepts_completely_empty_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    entry_worksheet = EntryRangeFakeWorksheet([[], [], []])
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://sheet.example",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+
+    async def resolve_profiles() -> DraftTeamProfileResolution:
+        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
+
+    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+
+    result = await manager.generate_draft(metadata, encore_power_threshold=35)
+
+    assert result.schedule.display_names == {}
+    assert result.schedule.hours == [4]
+    assert {"A4", "I1"} <= draft_worksheet.formula_ranges[-1]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("old_notes_value", "clears_old_anchor"),
     [
