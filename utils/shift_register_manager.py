@@ -1150,12 +1150,46 @@ def _entry_presentation_plan(
     visible_index = "SUBTOTAL(103,$A$3:$A3)"
     rules = []
     if gap_ranges:
-        rules.append(
-            _entry_conditional_rule(
-                gap_ranges,
-                '=N("rhoboto:shift-entry:gap:v1")=0',
-                background="#CCCCCC",
-                foreground="#B7B7B7",
+        count_gap_ranges = [
+            _entry_rule_range(
+                worksheet_id,
+                item["startColumnIndex"],
+                item["endColumnIndex"],
+                start_row=0,
+                end_row=1,
+            )
+            for item in gap_ranges
+        ]
+        header_gap_ranges = [
+            _entry_rule_range(
+                worksheet_id,
+                item["startColumnIndex"],
+                item["endColumnIndex"],
+                start_row=1,
+                end_row=2,
+            )
+            for item in gap_ranges
+        ]
+        rules.extend(
+            (
+                _entry_conditional_rule(
+                    count_gap_ranges,
+                    '=N("rhoboto:shift-entry:gap-count:v1")=0',
+                    background="#CCCCCC",
+                    foreground="#B7B7B7",
+                ),
+                _entry_conditional_rule(
+                    header_gap_ranges,
+                    '=N("rhoboto:shift-entry:gap-header:v1")=0',
+                    background="#B7B7B7",
+                    foreground="#999999",
+                ),
+                _entry_conditional_rule(
+                    gap_ranges,
+                    '=N("rhoboto:shift-entry:gap:v1")=0',
+                    background="#CCCCCC",
+                    foreground="#B7B7B7",
+                ),
             )
         )
     rules.extend(
@@ -1306,13 +1340,19 @@ def _entry_rule_range(
     worksheet_id: int,
     start_column: int,
     end_column: int,
+    *,
+    start_row: int = EntryWorksheetContent.FIRST_DATA_ROW - 1,
+    end_row: int | None = None,
 ) -> dict[str, int]:
-    return {
+    grid_range = {
         "sheetId": worksheet_id,
-        "startRowIndex": EntryWorksheetContent.FIRST_DATA_ROW - 1,
+        "startRowIndex": start_row,
         "startColumnIndex": start_column,
         "endColumnIndex": end_column,
     }
+    if end_row is not None:
+        grid_range["endRowIndex"] = end_row
+    return grid_range
 
 
 def _entry_hour_columns(start: int, end: int) -> str:
