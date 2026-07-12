@@ -59,7 +59,7 @@ class HourRange:
 
 
 class HourRanges:
-    RANGE_CONNECTORS: ClassVar[str] = r"\-~‐‒–—―−〜〰ー"  # noqa: RUF001
+    RANGE_CONNECTORS: ClassVar[str] = r"\-~‐‒–—―−⁓〜〰ー⸺⸻➖"  # noqa: RUF001
     RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         rf"(?<![\d:/{RANGE_CONNECTORS}點点時时])"
         r"(?<!\d\.)"

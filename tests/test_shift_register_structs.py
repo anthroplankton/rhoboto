@@ -175,7 +175,10 @@ def test_shift_parser_accepts_linear_0_30_ranges_and_notes() -> None:
     assert result.periods.display() == "4-12, 20-28"
 
 
-@pytest.mark.parametrize("connector", "-‐‑‒–—―−〜～〰ーｰ﹘﹣－")  # noqa: RUF001
+@pytest.mark.parametrize(
+    "connector",
+    "-‐‑‒–—―−⁓〜～〰ーｰ⸺⸻﹘﹣－➖",  # noqa: RUF001
+)
 def test_shift_parser_accepts_common_range_connectors(connector: str) -> None:
     line = f"20{connector}21"
 
