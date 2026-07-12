@@ -14,6 +14,7 @@ from cogs.base.feature_channel_base import (
 )
 from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
+    GenerateDraftConfirmView,
     ShiftRegisterView,
     build_shift_register_settings_panel,
     get_fresh_shift_register_config_or_respond,
@@ -53,6 +54,33 @@ if TYPE_CHECKING:
 
 def _format_display_name(name: str) -> str:
     return escape_markdown(name) if "`" in name else f"`{name}`"
+
+
+def _format_generate_draft_confirmation(
+    recruitment_ranges: RecruitmentTimeRanges,
+) -> str:
+    ranges = recruitment_ranges.ranges.ranges
+    final_row = ranges[-1].end - ranges[0].start + 1
+    return "\n".join(
+        [
+            "### ‼️ 確認產生班表草稿",
+            "即將覆蓋 Shift Draft 的以下位置：",  # noqa: RUF001
+            "- 班表：`A1:G31`",  # noqa: RUF001
+            f"- Notes：`A{final_row + 2}`",  # noqa: RUF001
+            (
+                f"- 候補：`I1`、閾值 `I{final_row + 1}:K{final_row + 1}`"  # noqa: RUF001
+            ),
+            f"- 反查：`J{final_row + 3}:L{final_row + 5}`",  # noqa: RUF001
+            (
+                f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"  # noqa: RUF001
+            ),
+            "",
+            (
+                "Notes・候補的展開位置若已有資料，將保留該資料並可能顯示 "  # noqa: RUF001
+                "`#REF!`。"
+            ),
+        ]
+    )
 
 
 def _format_draft_username(
@@ -391,6 +419,50 @@ class ShiftRegister(
             )
             if context is None:
                 await self._send_missing_config_followup(interaction)
+                return
+
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                context.feature_config.recruitment_time_ranges
+            )
+            confirmation_content = _format_generate_draft_confirmation(
+                recruitment_ranges
+            )
+            view = GenerateDraftConfirmView(requesting_user_id=interaction.user.id)
+            await interaction.edit_original_response(
+                content=confirmation_content,
+                view=view,
+            )
+            await view.wait()
+            if view.value is False:
+                await interaction.edit_original_response(view=None)
+                return
+            if view.value is None:
+                await interaction.edit_original_response(
+                    content="✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+                    view=None,
+                )
+                return
+
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+            fresh_ranges = RecruitmentTimeRanges.from_json(
+                context.feature_config.recruitment_time_ranges
+            )
+            if _format_generate_draft_confirmation(fresh_ranges) != (
+                confirmation_content
+            ):
+                await interaction.edit_original_response(
+                    content=(
+                        "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
+                        "請重新執行 command。"
+                    ),
+                    view=None,
+                )
                 return
 
             async with self.sheet_write_lock(source.channel.id):

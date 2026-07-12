@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from discord import ButtonStyle, Embed, Interaction, Object, TextStyle
-from discord.ui import Button, ChannelSelect, Modal, TextInput
+from discord.ui import Button, ChannelSelect, Modal, TextInput, View
 
 from bot import config
 from components.ui_auto_guide import (
@@ -73,6 +73,66 @@ SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE = (
 SHIFT_REGISTER_FEATURE_NAME = "shift_register"
 
 logger = logging.getLogger(__name__)
+
+
+class GenerateDraftConfirmView(View):
+    """Confirm one administrator's Shift Draft generation request."""
+
+    def __init__(self, *, requesting_user_id: int, timeout: float = 20.0) -> None:
+        super().__init__(timeout=timeout)
+        self.requesting_user_id = requesting_user_id
+        self.value: bool | None = None
+        self.add_item(GenerateDraftConfirmButton())
+        self.add_item(GenerateDraftCancelButton())
+
+    async def authorize(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.requesting_user_id:
+            await interaction.response.send_message(
+                "⚠️ 只有執行此 command 的管理員可以操作。",
+                ephemeral=True,
+            )
+            return False
+        if await require_settings_permissions(interaction):
+            return True
+        self.value = False
+        self.stop()
+        return False
+
+
+class GenerateDraftConfirmButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="確認生成", style=ButtonStyle.danger)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
+            interaction
+        ):
+            return
+        view.value = True
+        await interaction.response.edit_message(
+            content="已確認生成，正在處理 Shift Draft。",  # noqa: RUF001
+            view=None,
+        )
+        view.stop()
+
+
+class GenerateDraftCancelButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="取消", style=ButtonStyle.secondary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
+            interaction
+        ):
+            return
+        view.value = False
+        await interaction.response.edit_message(
+            content="✖️ 已取消生成，未變更 Shift Draft。",  # noqa: RUF001
+            view=None,
+        )
+        view.stop()
 
 
 async def send_shift_settings_missing(interaction: Interaction) -> None:

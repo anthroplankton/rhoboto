@@ -10,6 +10,9 @@ hierarchy refinement is also implemented and covered by automated validation.
 The revised colors, directional borders, shifted lookup, and editable candidate
 threshold are also implemented and covered by automated validation.
 
+The pre-generation overwrite confirmation and bounded Draft cleanup are also
+implemented and covered by automated validation.
+
 ## Goal
 
 Improve `/shift_register generate_draft` so the generated Shift Draft uses the
@@ -37,6 +40,7 @@ This change includes:
 - Exact canonical-name reverse lookup for Shift Entry and Team Summary data.
 - Draft-body borders and visible non-recruitment gap-row formatting.
 - One atomic Google Sheets batch update for the bot-owned Draft area.
+- An administrator confirmation before Draft generation touches Google Sheets.
 
 This change does not include:
 
@@ -76,6 +80,45 @@ copy:
 
 Discord may display required slash options before optional options in the command
 UI. The response ordering is independent and remains as specified above.
+
+### Pre-generation Confirmation
+
+After Discord validates the command and the bot confirms from database state that
+Shift Register is enabled and configured, it displays an ephemeral confirmation
+view before making any Google Sheets API request. Reading database-backed Shift
+settings is allowed before the prompt; opening the spreadsheet, resolving Team
+Source availability, ensuring worksheets, and reading or writing cells are not.
+
+Let `R` be the final schedule row calculated from the configured continuous
+earliest-to-latest recruitment axis, including the header row. The confirmation
+lists only the new write destinations:
+
+```text
+‼️ Shift Draft の次の範囲を上書きします。
+班表：A1:G31
+Notes：A{R+2}
+候補：I1、閾値 I{R+1}:K{R+1}
+反查：J{R+3}:L{R+5}
+編成一覧：Team Source が利用可能な場合は J{R+6} から書き込みます。
+```
+
+It also warns that existing cells in a Notes or candidate spill path are
+preserved and may cause visible `#REF!`. The prompt does not list old signed
+bot-owned blocks that regeneration may remove.
+
+The Draft-specific view has a danger-style `確認生成` button and a secondary
+`取消` button. Only the administrator who invoked the command may operate it,
+and button callbacks re-check both `administrator` and `manage_channels`.
+Cancellation, timeout, an unauthorized interaction, or lost permissions makes no
+Google Sheets request and reports that Shift Draft was not changed.
+
+The confirmation wait does not hold the channel's Sheet write lock, so normal
+Shift message registration continues. On confirmation, the command reloads the
+database settings before Sheets access. If the calculated destinations changed
+while the prompt was open, generation stops and asks the administrator to rerun
+the command. Otherwise the existing lock covers worksheet resolution, source
+reads, scheduling, and the atomic Draft write. The generated schedule therefore
+uses the latest Shift Entry values available after confirmation.
 
 ## Team Source Data Flow
 
@@ -253,7 +296,7 @@ ignored for scheduling.
 
 The ownership boundary is:
 
-- `A:G`: bot-owned Draft schedule.
+- `A1:G31`: bot-owned Draft schedule value area.
 - `A:H` below the schedule: bot-owned dynamic Notes spill.
 - `I+`: shared candidate and reverse-lookup display region. The bot owns only the
   candidate anchor at `I1`, the signed candidate-threshold control below the Draft,
@@ -357,8 +400,13 @@ in the web UI.
 The old lookup cells are treated as bot-owned only when the three expected labels
 `名前を貼り付け`, `シフト時間`, and `シフト元メッセージ` appear at either the
 legacy or shifted exact rows derived from the old Draft extent. The old candidate
-threshold is bot-owned only when `アンコ候補閾値` appears at its exact row. One
-Any other label is preserved as unrelated user content.
+threshold is bot-owned only when `アンコ候補閾値` appears at its exact row. Any
+other label is preserved as unrelated user content. A movable old Notes anchor is
+bot-owned only at the row derived from the old Draft extent and when its formula
+contains the Rhoboto Shift Draft Notes ownership signature. Existing pre-signature
+Rhoboto Notes formulas are recognized by their legacy formula structure for
+migration. Other values at that position are preserved and may block the new spill
+with visible `#REF!`.
 A first pre-feature run or manually occupied `I+` area without the corresponding
 signature is preserved and may visibly block the new output.
 
@@ -464,12 +512,12 @@ Draft generation extends the typed worksheet batch boundary so values, formulas,
 exact old lookup cleanup, background cleanup, and borders use one underlying
 `spreadsheets.batchUpdate` call with ordered subrequests:
 
-1. Update range `A:G` with the raw header and schedule rows. Because the specified
-   range is larger than the supplied rows, remaining `userEnteredValue` cells in
-   `A:G` are cleared, removing stale schedules and Notes.
-2. Clear `H` from the earlier of the old and new Notes anchor rows downward so
-   stale values cannot remain beside a longer schedule or block the new
-   eight-column spill.
+1. Clear and replace only `A1:G31` with the raw header and schedule rows. This
+   fixed value boundary removes stale schedule rows without clearing later rows
+   in columns `A:G`.
+2. Clear an old movable Notes anchor only when its expected position and Rhoboto
+   formula signature both match. Removing the anchor removes its calculated
+   `A:H` spill; column `H` is not cleared independently or without a row bound.
 3. Clear only a signed old candidate-threshold control and the exact old
    reverse-lookup labels, pasted input, formula anchors, and bot-owned formatting
    calculated from the old Draft extent. Unrelated `I+` values remain untouched;
@@ -603,9 +651,13 @@ Focused tests must cover:
   instead of a silently empty Notes body.
 - Exact initial semantic parity between the Sheet Notes content and the UTF-8 text
   attachment, including the complete stored original messages.
-- One atomic typed batch, stale `A:G` and Notes-column `H` clearing, raw
-  user-derived strings, exact old lookup-anchor cleanup, unrelated `I+` value
-  preservation, and narrowly scoped formatting.
+- One atomic typed batch, bounded `A1:G31` clearing, signed old Notes-anchor
+  cleanup, raw user-derived strings, exact old lookup-anchor cleanup, unrelated
+  values outside owned cells, and narrowly scoped formatting.
+- Confirmation destination calculation without Google Sheets access; confirm,
+  cancel, timeout, wrong-user, lost-permission, and settings-change behavior.
+- The confirmation wait does not hold the Sheet write lock used by Shift message
+  registration.
 - Discord report ordering, recruitment-time display, configured-slot filtering,
   existing shortage/unassigned behavior, and snapshot notice.
 - Per-hour candidate availability, scheduled-person inclusion, runner exclusion,
@@ -636,8 +688,12 @@ Implementation must add corresponding cases to
 - Confirming the attachment remains the generation-time snapshot after a manual
   Draft rearrangement while Sheet Notes update dynamically.
 - Duplicate and reserved-suffix display names.
-- Shorter regeneration clearing stale `A:G` values, removing the old lookup block,
-  rebuilding it at the new row, and preserving unrelated `I+` values.
+- Pre-generation destination display, confirm, cancel, timeout, wrong-user,
+  permission-loss, and changed-settings behavior with no pre-confirmation Google
+  Sheets request.
+- Shorter regeneration clearing stale `A1:G31` values, removing only signed old
+  Notes and lookup anchors, rebuilding them at new rows, and preserving unrelated
+  values outside bot-owned cells.
 - Candidate and reverse-lookup recalculation after Shift Entry and Team Summary
   value edits, including a new participant that expands beyond the prior last
   worksheet column.

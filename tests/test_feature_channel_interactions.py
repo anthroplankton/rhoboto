@@ -5,6 +5,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -26,7 +27,7 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
 )
 from cogs.shift import Shift
-from cogs.shift_register import ShiftRegister
+from cogs.shift_register import ShiftRegister, _format_generate_draft_confirmation
 from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
@@ -75,6 +76,22 @@ def test_generate_draft_requires_non_negative_power_threshold() -> None:
     assert threshold.required is True
     assert threshold.min_value == 0
     assert parameters["runner"].required is False
+
+
+def test_generate_draft_confirmation_formats_new_destinations() -> None:
+    ranges = RecruitmentTimeRanges.from_json(
+        [{"start": 4, "end": 12}, {"start": 20, "end": 28}]
+    )
+
+    content = _format_generate_draft_confirmation(ranges)
+
+    assert "`A1:G31`" in content
+    assert "`A27`" in content
+    assert "`I1`" in content
+    assert "`I26:K26`" in content
+    assert "`J28:L30`" in content
+    assert "`J31`" in content
+    assert "#REF!" in content
 
 
 def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
@@ -212,7 +229,10 @@ def test_format_shift_draft_report_places_team_warning_before_assignments(
 
 
 @pytest.mark.asyncio
-async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
+async def test_generate_shift_draft_links_to_draft_worksheet_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
     schedule = DraftSchedule(
         None,
         [4],
@@ -228,6 +248,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
 
     class Manager:
         async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            events.append("sheet")
             return metadata
 
         def log_missing_worksheet_warnings(self, _metadata: object) -> None:
@@ -260,12 +281,30 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
     async def get_feature_channel_context(_source: object) -> object:
         return object()
 
+    config = SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 5}])
+
     async def get_configured_context(_context: object) -> SimpleNamespace:
-        return SimpleNamespace(manager=Manager())
+        return SimpleNamespace(manager=Manager(), feature_config=config)
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int) -> None:
+            assert requesting_user_id == 333
+
+        async def wait(self) -> None:
+            events.append("wait")
+
+    @asynccontextmanager
+    async def recording_lock(_channel_id: int) -> object:
+        events.append("lock")
+        yield
 
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
+    subject.sheet_write_lock = recording_lock
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
     interaction = FakeInteraction(
         guild=SimpleNamespace(
             id=111,
@@ -275,6 +314,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
 
+    assert events[:3] == ["wait", "lock", "sheet"]
+    prompt, prompt_kwargs = interaction.original_response_edits[0]
+    assert "`A1:G31`" in prompt
+    assert isinstance(prompt_kwargs["view"], ConfirmView)
     content, kwargs = interaction.followup.messages[0]
     assert "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)" in (
         content or ""
@@ -288,6 +331,108 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id() -> None:
     attachment.fp.seek(0)
     assert attachment.fp.read().decode("utf-8") == notes_snapshot
     assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmation", [False, None])
+async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    confirmation: bool | None,
+) -> None:
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> None:
+            msg = "Google Sheets must not be accessed before confirmation"
+            raise AssertionError(msg)
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            manager=Manager(),
+            feature_config=SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 5}]
+            ),
+        )
+
+    class ConfirmView:
+        value = confirmation
+
+        def __init__(self, *, requesting_user_id: int) -> None:
+            assert requesting_user_id == 333
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert interaction.followup.messages == []
+    assert "`A1:G31`" in interaction.original_response_edits[0][0]
+    if confirmation is False:
+        assert interaction.original_response_edits[-1][1] == {"view": None}
+    else:
+        assert interaction.original_response_edits[-1] == (
+            "✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+            {"view": None},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_changed_destinations_skip_google_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feature_context_calls = 0
+
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> None:
+            msg = "changed destinations must abort before Google Sheets"
+            raise AssertionError(msg)
+
+    async def get_feature_channel_context(_source: object) -> object:
+        nonlocal feature_context_calls
+        feature_context_calls += 1
+        return object()
+
+    configs = iter(
+        [
+            SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 5}]),
+            SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 6}]),
+        ]
+    )
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager(), feature_config=next(configs))
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int) -> None:
+            assert requesting_user_id == 333
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert feature_context_calls == 2
+    assert interaction.followup.messages == []
+    assert interaction.original_response_edits[-1] == (
+        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",  # noqa: RUF001
+        {"view": None},
+    )
 
 
 async def fake_feature_channel_get(

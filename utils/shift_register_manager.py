@@ -619,8 +619,12 @@ class ShiftRegisterManager(
             old_axis_rows,
             old_threshold_labels,
             old_lookup_labels,
-        ) = await draft_worksheet.batch_get_values(["A1:A31", "I1:I32", "J1:J37"])
+        ) = await draft_worksheet.batch_get_values(["A1:A33", "I1:I32", "J1:J37"])
         old_last_row = _old_draft_last_row(old_axis_rows)
+        old_notes_row = _old_notes_row(
+            old_last_row=old_last_row,
+            rows=old_axis_rows,
+        )
         old_threshold_row = _old_candidate_threshold_row(
             old_last_row=old_last_row,
             threshold_labels=old_threshold_labels,
@@ -704,9 +708,12 @@ class ShiftRegisterManager(
         )
         notes_row = len(schedule.assignments) + 3
         notes_cell = f"A{notes_row}"
-        notes_clear_row = _draft_notes_clear_row(
-            old_last_row=old_last_row,
-            new_notes_row=notes_row,
+        notes_cleanup_updates = (
+            [{"range": f"A{old_notes_row}", "values": []}]
+            if old_notes_row is not None
+            and old_notes_row > DraftWorksheetContent.DRAFT_VALUE_LAST_ROW
+            and old_notes_row != notes_row
+            else []
         )
         background_updates, border_updates = _draft_format_updates(
             schedule=schedule,
@@ -739,13 +746,13 @@ class ShiftRegisterManager(
         await draft_worksheet.batch_update_typed_values(
             [
                 {
-                    "range": "A:G",
+                    "range": f"A1:G{DraftWorksheetContent.DRAFT_VALUE_LAST_ROW}",
                     "values": [
                         DraftWorksheetContent.COLUMNS,
                         *draft_df.fillna("").to_numpy().tolist(),
                     ],
                 },
-                {"range": f"H{notes_clear_row}:H", "values": []},
+                *notes_cleanup_updates,
                 *candidate_control_updates,
                 {"range": notes_cell, "values": [[notes_formula]]},
                 {"range": "I1", "values": [[candidate_formula]]},
@@ -816,8 +823,18 @@ def _old_lookup_row(
     return None
 
 
-def _draft_notes_clear_row(*, old_last_row: int, new_notes_row: int) -> int:
-    return min(old_last_row + 2, new_notes_row)
+def _old_notes_row(
+    *,
+    old_last_row: int,
+    rows: list[list[object]],
+) -> int | None:
+    row = old_last_row + 2
+    value = rows[row - 1][0] if row <= len(rows) and rows[row - 1] else ""
+    if not isinstance(value, str):
+        return None
+    signature = DraftWorksheetContent.NOTES_FORMULA_SIGNATURE
+    legacy_prefix = f"=LET(shifts, C2:G{old_last_row}, encore, C2:C{old_last_row}, "
+    return row if signature in value or value.startswith(legacy_prefix) else None
 
 
 def _draft_format_updates(  # noqa: PLR0913

@@ -67,7 +67,7 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         ranges: list[str],
     ) -> list[list[list[object]]]:
         self.batch_get_calls.append(ranges)
-        assert ranges == ["A1:A31", "I1:I32", "J1:J37"]
+        assert ranges == ["A1:A33", "I1:I32", "J1:J37"]
         return [
             self.old_axis_rows,
             self.old_threshold_labels,
@@ -567,20 +567,37 @@ def test_old_draft_layout_detection_requires_owned_labels() -> None:
         )
         is None
     )
+
+
+def test_old_notes_detection_requires_expected_signed_formula() -> None:
+    rows = [[""] for _ in range(33)]
+    rows[32] = ['=LET(owner, "rhoboto-shift-draft-notes", shifts, C2:G31, shifts)']
     assert (
-        shift_register_manager._draft_notes_clear_row(  # noqa: SLF001
-            old_last_row=3,
-            new_notes_row=21,
+        shift_register_manager._old_notes_row(  # noqa: SLF001
+            old_last_row=31,
+            rows=rows,
         )
-        == 5
+        == 33
     )
+
+    rows[32] = ["=LET(shifts, C2:G31, encore, C2:C31, hourSlots, {0})"]
     assert (
-        shift_register_manager._draft_notes_clear_row(  # noqa: SLF001
-            old_last_row=23,
-            new_notes_row=21,
+        shift_register_manager._old_notes_row(  # noqa: SLF001
+            old_last_row=31,
+            rows=rows,
         )
-        == 21
+        == 33
     )
+
+    for unrelated in ("manual value", "=SUM(A1:A2)", 1):
+        rows[32] = [unrelated]
+        assert (
+            shift_register_manager._old_notes_row(  # noqa: SLF001
+                old_last_row=31,
+                rows=rows,
+            )
+            is None
+        )
 
 
 def test_notes_snapshot_matches_initial_schedule_and_complete_messages() -> None:
@@ -734,14 +751,14 @@ async def test_generate_draft_writes_draft_worksheet(
     )
 
     data = draft_worksheet.typed_batches[-1]
-    assert data[0]["range"] == "A:G"
+    assert data[0]["range"] == "A1:G31"
     assert data[0]["values"][0] == DraftWorksheetContent.COLUMNS
     assert data[0]["values"][1][0] == "4-5"
     assert data[0]["values"][1][1] == "Run"
     assert [row[0] for row in data[0]["values"][1:]] == [
         f"{hour}-{hour + 1}" for hour in range(4, 22)
     ]
-    assert data[1] == {"range": "H21:H", "values": []}
+    assert not any(str(item["range"]).startswith("H") for item in data)
     assert {"range": "I24:K24", "values": []} in data
     assert {
         "range": "I20:K20",
@@ -752,6 +769,9 @@ async def test_generate_draft_writes_draft_worksheet(
     notes_update = next(item for item in data if item["range"] == "A21")
     candidate_update = next(item for item in data if item["range"] == "I1")
     assert str(notes_update["values"][0][0]).startswith("=LET(")
+    assert DraftWorksheetContent.NOTES_FORMULA_SIGNATURE in str(
+        notes_update["values"][0][0]
+    )
     assert "募集時間【4-7・20-22】" in str(notes_update["values"][0][0])
     assert "本走候補（実効値：高→低）" in str(  # noqa: RUF001
         candidate_update["values"][0][0]
@@ -818,7 +838,63 @@ async def test_generate_draft_writes_draft_worksheet(
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
     assert entry_worksheet.batch_get_calls == [["2:2", "A3:B", "F3:AJ"]]
-    assert draft_worksheet.batch_get_calls == [["A1:A31", "I1:I32", "J1:J37"]]
+    assert draft_worksheet.batch_get_calls == [["A1:A33", "I1:I32", "J1:J37"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("old_notes_value", "clears_old_anchor"),
+    [
+        (
+            '=LET(owner, "rhoboto-shift-draft-notes", shifts, C2:G31, shifts)',
+            True,
+        ),
+        ("manual value", False),
+    ],
+)
+async def test_generate_draft_clears_only_signed_old_notes_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+    old_notes_value: str,
+    *,
+    clears_old_anchor: bool,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    entry_worksheet = EntryRangeFakeWorksheet(build_entry_ranges([]))
+    old_axis_rows = [
+        ["JST"],
+        *([f"{hour}-{hour + 1}"] for hour in range(30)),
+        [""],
+        [old_notes_value],
+    ]
+    draft_worksheet = DraftBatchFakeWorksheet(
+        title="Shift Draft",
+        old_axis_rows=old_axis_rows,
+    )
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://sheet.example",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+
+    async def resolve_profiles() -> DraftTeamProfileResolution:
+        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
+
+    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+
+    await manager.generate_draft(metadata, encore_power_threshold=35)
+
+    cleared_ranges = {
+        str(item["range"])
+        for item in draft_worksheet.typed_batches[-1]
+        if item["values"] == []
+    }
+    assert ("A33" in cleared_ranges) is clears_old_anchor
 
 
 @pytest.mark.asyncio

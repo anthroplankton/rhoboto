@@ -860,6 +860,7 @@ class DraftWorksheetContent:
     """
 
     JST_COLUMN: ClassVar[str] = "JST"
+    DRAFT_VALUE_LAST_ROW: ClassVar[int] = 31
     RUNNER_COLUMN: ClassVar[str] = "ランナー"
     ENCORE_COLUMN: ClassVar[str] = "アンコ"
     HONSO_COLUMNS: ClassVar[tuple[str, str, str]] = ("本走①", "本走②", "本走③")
@@ -876,6 +877,7 @@ class DraftWorksheetContent:
     ENCORE_CANDIDATE_HEADER: ClassVar[str] = "アンコ候補（実効値：高→低）"  # noqa: RUF001
     UNREGISTERED_HEADER: ClassVar[str] = "編成未登録"
     CANDIDATE_THRESHOLD_LABEL: ClassVar[str] = "アンコ候補閾値"
+    NOTES_FORMULA_SIGNATURE: ClassVar[str] = "rhoboto-shift-draft-notes"
     NOTES_COLUMNS: ClassVar[tuple[str, ...]] = (
         "名前",
         "シフト合計（h）",  # noqa: RUF001
@@ -1266,6 +1268,7 @@ class DraftWorksheetContent:
             )
         return (
             "=LET("
+            f"owner, {_formula_string(cls.NOTES_FORMULA_SIGNATURE)}, "
             f"shifts, C2:G{last_row}, "
             f"encore, C2:C{last_row}, "
             f"hourSlots, {hour_slots}, "

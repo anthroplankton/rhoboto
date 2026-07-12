@@ -33,6 +33,7 @@ from components.ui_settings_flow import (
 )
 from components.ui_shift_register import (
     ApplyTeamSourceButton,
+    GenerateDraftConfirmView,
     ManageTeamSourceButton,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
@@ -3360,6 +3361,64 @@ async def test_disable_and_clear_confirm_denies_unauthorized_user() -> None:
     assert view.value is False
     assert view.is_finished()
     assert interaction.response.edits == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["確認生成", "取消"])
+async def test_generate_draft_confirm_rejects_other_user(label: str) -> None:
+    view = GenerateDraftConfirmView(requesting_user_id=333)
+    interaction = FakeInteraction(user_id=444)
+
+    await child_with_label(view, label).callback(interaction)
+
+    assert view.value is None
+    assert not view.is_finished()
+    assert interaction.response.messages == [
+        ("⚠️ 只有執行此 command 的管理員可以操作。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["確認生成", "取消"])
+async def test_generate_draft_confirm_stops_after_permission_loss(label: str) -> None:
+    view = GenerateDraftConfirmView(requesting_user_id=333)
+    interaction = FakeInteraction(user_id=333, manage_channels=False)
+
+    await child_with_label(view, label).callback(interaction)
+
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.messages == [
+        (MISSING_SETTINGS_PERMISSION_MESSAGE, {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_confirm_allows_requester() -> None:
+    view = GenerateDraftConfirmView(requesting_user_id=333)
+    interaction = FakeInteraction(user_id=333)
+
+    await child_with_label(view, "確認生成").callback(interaction)
+
+    assert view.value is True
+    assert view.is_finished()
+    assert interaction.response.edits == [
+        ("已確認生成，正在處理 Shift Draft。", {"view": None})  # noqa: RUF001
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_cancel_allows_requester() -> None:
+    view = GenerateDraftConfirmView(requesting_user_id=333)
+    interaction = FakeInteraction(user_id=333)
+
+    await child_with_label(view, "取消").callback(interaction)
+
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.edits == [
+        ("✖️ 已取消生成，未變更 Shift Draft。", {"view": None})  # noqa: RUF001
+    ]
 
 
 @pytest.mark.asyncio
