@@ -66,7 +66,8 @@ def _format_generate_draft_confirmation(
         [
             "### ‼️ 確認產生班表草稿",
             (
-                f"即將覆蓋 [Shift Draft]({draft_sheet_url}) 的以下位置："  # noqa: RUF001
+                "請先備份需要保留的內容。確認後將覆蓋 "
+                f"[Shift Draft]({draft_sheet_url}) 的以下位置："  # noqa: RUF001
             ),
             "- 班表：`A1:G31`",  # noqa: RUF001
             f"- Notes：`A{final_row + 2}`",  # noqa: RUF001
@@ -441,7 +442,10 @@ class ShiftRegister(
                 recruitment_ranges,
                 draft_sheet_url,
             )
-            view = GenerateDraftConfirmView(requesting_user_id=interaction.user.id)
+            view = GenerateDraftConfirmView(
+                requesting_user_id=interaction.user.id,
+                draft_sheet_url=draft_sheet_url,
+            )
             await interaction.edit_original_response(
                 content=confirmation_content,
                 view=view,

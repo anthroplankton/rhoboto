@@ -94,7 +94,8 @@ earliest-to-latest recruitment axis, including the header row. The confirmation
 lists only the new write destinations:
 
 ```text
-‼️ [Shift Draft](draft worksheet URL) の次の範囲を上書きします。
+‼️ 確認產生班表草稿
+請先備份需要保留的內容。確認後將覆蓋 [Shift Draft](draft worksheet URL) 的以下位置：
 班表：A1:G31
 Notes：A{R+2}
 候補：I1、閾値 I{R+1}:K{R+1}
@@ -109,6 +110,8 @@ bot-owned blocks that regeneration may remove.
 The Draft-specific view has a danger-style `確認生成` button and a secondary
 `取消` button. Only the administrator who invoked the command may operate it,
 and button callbacks re-check both `administrator` and `manage_channels`.
+Both the confirmation heading and confirmed-processing message link the visible
+`Shift Draft` text directly to the configured Draft worksheet.
 Cancellation, timeout, an unauthorized interaction, or lost permissions makes no
 Google Sheets request and reports that Shift Draft was not changed.
 

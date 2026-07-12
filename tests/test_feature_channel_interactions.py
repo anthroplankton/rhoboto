@@ -92,6 +92,18 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
         in content
     )
+    assert content.startswith(
+        "### ‼️ 確認產生班表草稿\n"
+        "請先備份需要保留的內容。確認後將覆蓋 "
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        " 的以下位置："  # noqa: RUF001
+    )
+    assert (
+        content.count(
+            "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        )
+        == 1
+    )
     assert "`A1:G31`" in content
     assert "`A27`" in content
     assert "`I1`" in content
@@ -300,8 +312,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int) -> None:
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
             assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             events.append("wait")
@@ -372,8 +385,9 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     class ConfirmView:
         value = confirmation
 
-        def __init__(self, *, requesting_user_id: int) -> None:
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
             assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -434,8 +448,9 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int) -> None:
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
             assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass

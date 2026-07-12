@@ -78,9 +78,16 @@ logger = logging.getLogger(__name__)
 class GenerateDraftConfirmView(View):
     """Confirm one administrator's Shift Draft generation request."""
 
-    def __init__(self, *, requesting_user_id: int, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        draft_sheet_url: str,
+        timeout: float = 20.0,
+    ) -> None:
         super().__init__(timeout=timeout)
         self.requesting_user_id = requesting_user_id
+        self.draft_sheet_url = draft_sheet_url
         self.value: bool | None = None
         self.add_item(GenerateDraftConfirmButton())
         self.add_item(GenerateDraftCancelButton())
@@ -111,7 +118,10 @@ class GenerateDraftConfirmButton(Button):
             return
         view.value = True
         await interaction.response.edit_message(
-            content="已確認生成，正在處理 Shift Draft。",  # noqa: RUF001
+            content=(
+                "已確認生成，正在處理 "  # noqa: RUF001
+                f"[Shift Draft]({view.draft_sheet_url})。"
+            ),
             view=None,
         )
         view.stop()

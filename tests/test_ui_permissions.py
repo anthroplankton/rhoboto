@@ -3404,7 +3404,10 @@ async def test_disable_and_clear_confirm_denies_unauthorized_user() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("label", ["確認生成", "取消"])
 async def test_generate_draft_confirm_rejects_other_user(label: str) -> None:
-    view = GenerateDraftConfirmView(requesting_user_id=333)
+    view = GenerateDraftConfirmView(
+        requesting_user_id=333,
+        draft_sheet_url="https://sheet.example#gid=222",
+    )
     interaction = FakeInteraction(user_id=444)
 
     await child_with_label(view, label).callback(interaction)
@@ -3419,7 +3422,10 @@ async def test_generate_draft_confirm_rejects_other_user(label: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("label", ["確認生成", "取消"])
 async def test_generate_draft_confirm_stops_after_permission_loss(label: str) -> None:
-    view = GenerateDraftConfirmView(requesting_user_id=333)
+    view = GenerateDraftConfirmView(
+        requesting_user_id=333,
+        draft_sheet_url="https://sheet.example#gid=222",
+    )
     interaction = FakeInteraction(user_id=333, manage_channels=False)
 
     await child_with_label(view, label).callback(interaction)
@@ -3433,7 +3439,10 @@ async def test_generate_draft_confirm_stops_after_permission_loss(label: str) ->
 
 @pytest.mark.asyncio
 async def test_generate_draft_confirm_allows_requester() -> None:
-    view = GenerateDraftConfirmView(requesting_user_id=333)
+    view = GenerateDraftConfirmView(
+        requesting_user_id=333,
+        draft_sheet_url="https://sheet.example#gid=222",
+    )
     interaction = FakeInteraction(user_id=333)
 
     await child_with_label(view, "確認生成").callback(interaction)
@@ -3441,13 +3450,20 @@ async def test_generate_draft_confirm_allows_requester() -> None:
     assert view.value is True
     assert view.is_finished()
     assert interaction.response.edits == [
-        ("已確認生成，正在處理 Shift Draft。", {"view": None})  # noqa: RUF001
+        (
+            "已確認生成，正在處理 "  # noqa: RUF001
+            "[Shift Draft](https://sheet.example#gid=222)。",
+            {"view": None},
+        )
     ]
 
 
 @pytest.mark.asyncio
 async def test_generate_draft_cancel_allows_requester() -> None:
-    view = GenerateDraftConfirmView(requesting_user_id=333)
+    view = GenerateDraftConfirmView(
+        requesting_user_id=333,
+        draft_sheet_url="https://sheet.example#gid=222",
+    )
     interaction = FakeInteraction(user_id=333)
 
     await child_with_label(view, "取消").callback(interaction)
