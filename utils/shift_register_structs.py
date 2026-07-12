@@ -60,6 +60,9 @@ class HourRange:
 
 class HourRanges:
     RANGE_CONNECTORS: ClassVar[str] = r"\-~‐‒–—―−⁓〜〰ー⸺⸻➖"  # noqa: RUF001
+    KEYCAP_DIGIT_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
+        r"([0-9])\ufe0f?\u20e3"
+    )
     RANGE_PATTERN: ClassVar[re.Pattern[str]] = re.compile(
         rf"(?<![\d:/{RANGE_CONNECTORS}點点時时])"
         r"(?<!\d\.)"
@@ -90,7 +93,7 @@ class HourRanges:
 
     @classmethod
     def parse_strict(cls, text: str) -> Self:
-        normalized = unicodedata.normalize("NFKC", text).strip()
+        normalized = cls._normalize_input(text).strip()
         matches = list(cls.RANGE_PATTERN.finditer(normalized))
         if not matches:
             raise HourRangeFormatError(text)
@@ -100,7 +103,7 @@ class HourRanges:
 
     @classmethod
     def parse_tolerant(cls, text: str) -> tuple[Self, list[str]]:
-        normalized = unicodedata.normalize("NFKC", text)
+        normalized = cls._normalize_input(text)
         matches = list(cls.RANGE_PATTERN.finditer(normalized))
         ranges: list[HourRange] = []
         invalid_attempts: list[str] = []
@@ -130,6 +133,11 @@ class HourRanges:
             invalid_attempts.append(invalid_match.group(0))
 
         return cls(ranges), invalid_attempts
+
+    @classmethod
+    def _normalize_input(cls, text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", text)
+        return cls.KEYCAP_DIGIT_PATTERN.sub(r"\1", normalized).replace("🔟", "10")
 
     @classmethod
     def _ranges_from_matches(
