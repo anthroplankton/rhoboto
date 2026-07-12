@@ -15,4 +15,5 @@ def google_sheet_url_with_gid(sheet_url: str, worksheet_id: int | None) -> str:
     if worksheet_id is None:
         return normalized
     parsed = urlparse(normalized)
-    return urlunparse(parsed._replace(fragment=f"gid={worksheet_id}"))
+    gid = f"gid={worksheet_id}"
+    return urlunparse(parsed._replace(query=gid, fragment=gid))

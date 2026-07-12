@@ -754,7 +754,7 @@ async def test_shift_settings_panel_lists_unique_team_source() -> None:
     assert field_map["Team Source"] == (
         "- **Channel** = <#22>\n"
         "- **Google Sheet** = [Open Team Register Sheet]"
-        "(https://team.sheet.example#gid=201)"
+        "(https://team.sheet.example?gid=201#gid=201)"
     )
     assert field_names.index("Team Source") == (
         field_names.index("Worksheets & IDs") + 1
@@ -845,7 +845,7 @@ def test_shift_settings_embed_uses_team_landing_worksheet() -> None:
     assert field_map["Team Source"] == (
         "- **Channel** = <#22>\n"
         "- **Google Sheet** = [Open Team Register Sheet]"
-        "(https://team.sheet.example#gid=101)"
+        "(https://team.sheet.example?gid=101#gid=101)"
     )
 
 
