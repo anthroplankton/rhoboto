@@ -29,6 +29,8 @@ def make_user(username: str = "alice", display_name: str = "Alice") -> UserInfo:
         ("4－12", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
         ("4～12", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
         ("４-１２", [(4, 12)], set(range(4, 12))),  # noqa: RUF001
+        ("4️⃣-1️⃣2️⃣", [(4, 12)], set(range(4, 12))),
+        ("🔟-1⃣2⃣", [(10, 12)], {10, 11}),
         ("4-12、20-28", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),
         ("4-12・20-28", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),
         ("４－１２，２０－２８", [(4, 12), (20, 28)], {*range(4, 12), *range(20, 28)}),  # noqa: RUF001
@@ -187,6 +189,26 @@ def test_shift_parser_accepts_common_range_connectors(connector: str) -> None:
     assert result.invalid_attempts == []
     assert result.shift is not None
     assert set(result.shift) == {20}
+    assert result.shift.original_message == line
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_slots"),
+    [
+        ("2️⃣0️⃣-2️⃣1️⃣", {20}),
+        ("2⃣0⃣-2⃣1⃣", {20}),
+        ("🔟-1️⃣2️⃣", {10, 11}),
+    ],
+)
+def test_shift_parser_accepts_emoji_digits(
+    line: str,
+    expected_slots: set[int],
+) -> None:
+    result = ShiftParser.parse_submission(make_user(), [line])
+
+    assert result.invalid_attempts == []
+    assert result.shift is not None
+    assert set(result.shift) == expected_slots
     assert result.shift.original_message == line
 
 
