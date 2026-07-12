@@ -343,8 +343,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
     assert "`A1:G31`" in prompt
     assert isinstance(prompt_kwargs["view"], ConfirmView)
     content, kwargs = interaction.followup.messages[0]
-    assert "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)" in (
-        content or ""
+    assert (
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit?gid=222#gid=222)"
+        in (content or "")
     )
     assert "<@333>" in (content or "")
     assert "募集時間【4-5】" in (content or "")
@@ -2270,7 +2271,10 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": True})
+        (
+            "⚠️ The message contains an invalid Team Register format.",
+            {"ephemeral": True},
+        )
     ]
 
 
@@ -2301,7 +2305,10 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
     assert interaction.response.deferred == [True]
     assert message.added_reactions == []
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": True})
+        (
+            "⚠️ No Team Register data was recognized in this message.",
+            {"ephemeral": True},
+        )
     ]
 
 
@@ -3554,7 +3561,7 @@ async def test_team_public_guide_uses_summary_worksheet_gid(
     await subject.send_guide_message(interaction)
 
     assert captured_sheet_urls == [
-        "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
+        "https://docs.google.com/spreadsheets/d/abc/edit?gid=333#gid=333"
     ]
     assert interaction.followup.messages == [
         ("en guide", {"ephemeral": False, "wait": True})
@@ -3597,7 +3604,7 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
     await subject.send_guide_message(interaction)
 
     assert captured_values["sheet_url"] == (
-        "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
+        "https://docs.google.com/spreadsheets/d/abc/edit?gid=444#gid=444"
     )
     assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [
@@ -3635,7 +3642,7 @@ async def test_team_user_guide_uses_summary_worksheet_gid(
     await subject.send_guide_message(interaction, TeamRegister.guide_template_key)
 
     assert captured_values["sheet_url"] == (
-        "https://docs.google.com/spreadsheets/d/abc/edit#gid=333"
+        "https://docs.google.com/spreadsheets/d/abc/edit?gid=333#gid=333"
     )
     assert interaction.followup.messages == [
         ("rendered team guide", {"ephemeral": True})
@@ -3672,7 +3679,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
     await subject.send_guide_message(interaction, ShiftRegister.guide_template_key)
 
     assert captured_values["sheet_url"] == (
-        "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
+        "https://docs.google.com/spreadsheets/d/abc/edit?gid=444#gid=444"
     )
     assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [

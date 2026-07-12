@@ -1057,6 +1057,52 @@ def test_entry_presentation_plan_matches_approved_sheet_contract() -> None:
     assert gap_rule["booleanRule"]["format"]["backgroundColorStyle"] == {
         "rgbColor": {"red": 0.8, "green": 0.8, "blue": 0.8}
     }
+    count_gap_rule = next(
+        rule for rule in plan.conditional_format_rules if "gap-count:v1" in str(rule)
+    )
+    assert count_gap_rule["ranges"] == [
+        {
+            "sheetId": 1,
+            "startRowIndex": 0,
+            "endRowIndex": 1,
+            "startColumnIndex": 17,
+            "endColumnIndex": 25,
+        }
+    ]
+    assert count_gap_rule["booleanRule"]["format"] == {
+        "backgroundColorStyle": {"rgbColor": {"red": 0.8, "green": 0.8, "blue": 0.8}},
+        "textFormat": {
+            "foregroundColorStyle": {
+                "rgbColor": {
+                    "red": 183 / 255,
+                    "green": 183 / 255,
+                    "blue": 183 / 255,
+                }
+            }
+        },
+    }
+    header_gap_rule = next(
+        rule for rule in plan.conditional_format_rules if "gap-header:v1" in str(rule)
+    )
+    assert header_gap_rule["ranges"] == [
+        {
+            "sheetId": 1,
+            "startRowIndex": 1,
+            "endRowIndex": 2,
+            "startColumnIndex": 17,
+            "endColumnIndex": 25,
+        }
+    ]
+    assert header_gap_rule["booleanRule"]["format"] == {
+        "backgroundColorStyle": {
+            "rgbColor": {"red": 183 / 255, "green": 183 / 255, "blue": 183 / 255}
+        },
+        "textFormat": {
+            "foregroundColorStyle": {
+                "rgbColor": {"red": 0.6, "green": 0.6, "blue": 0.6}
+            }
+        },
+    }
 
 
 def test_entry_rule_updates_replace_only_marked_rules_in_descending_order() -> None:
