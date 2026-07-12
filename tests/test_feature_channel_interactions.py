@@ -2271,7 +2271,10 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": True})
+        (
+            "⚠️ The message contains an invalid Team Register format.",
+            {"ephemeral": True},
+        )
     ]
 
 
@@ -2302,7 +2305,10 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
     assert interaction.response.deferred == [True]
     assert message.added_reactions == []
     assert interaction.followup.messages == [
-        ("Failed to upsert for Team Register.", {"ephemeral": True})
+        (
+            "⚠️ No Team Register data was recognized in this message.",
+            {"ephemeral": True},
+        )
     ]
 
 

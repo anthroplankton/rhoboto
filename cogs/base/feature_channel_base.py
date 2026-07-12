@@ -511,6 +511,22 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             await self._send_missing_config_followup(interaction)
             return
 
+        if outcome.status is _MessageUpsertStatus.INVALID:
+            await interaction.followup.send(
+                f"⚠️ The message contains an invalid {self.feature_display_name} "
+                "format.",
+                ephemeral=True,
+            )
+            return
+
+        if outcome.status is _MessageUpsertStatus.IGNORED:
+            await interaction.followup.send(
+                f"⚠️ No {self.feature_display_name} data was recognized in this "
+                "message.",
+                ephemeral=True,
+            )
+            return
+
         content = (
             f"Failed to upsert for {self.feature_display_name}."
             if outcome.result is None
