@@ -45,6 +45,7 @@ ENTRY_READ_RANGES = ["1:2", "A3:C"]
 SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
 OUTER_BORDER_SIDES = ("top", "bottom", "left", "right")
 ENTRY_RULE_MARKER = "rhoboto:shift-entry:"
+DRAFT_CANDIDATE_RULE_MARKER = "rhoboto:shift-draft:candidate:"
 
 
 class TeamSourceStatus(StrEnum):
@@ -688,7 +689,7 @@ class ShiftRegisterManager(
             worksheet.title,
         )
 
-    async def generate_draft(
+    async def generate_draft(  # noqa: PLR0915
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
@@ -831,19 +832,35 @@ class ShiftRegisterManager(
         candidate_control_updates = []
         if old_threshold_row is not None:
             candidate_control_updates.append(
-                {"range": f"I{old_threshold_row}:K{old_threshold_row}", "values": []}
+                {"range": f"I{old_threshold_row}:M{old_threshold_row}", "values": []}
             )
         candidate_control_updates.append(
             {
-                "range": f"I{threshold_row}:K{threshold_row}",
+                "range": f"I{threshold_row}:M{threshold_row}",
                 "values": [
                     [
                         DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL,
                         encore_power_threshold,
                         "万総合力",
+                        "仮配置済：緑背景",  # noqa: RUF001
+                        "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
                     ]
                 ],
             }
+        )
+        legend_format_updates = _draft_legend_format_updates(
+            old_threshold_row=old_threshold_row,
+            threshold_row=threshold_row,
+        )
+        current_rules = await draft_worksheet.get_conditional_format_rules()
+        candidate_rules = _draft_candidate_conditional_rules(
+            worksheet_id=draft_worksheet.id,
+            last_row=new_last_row,
+        )
+        candidate_rule_deletes = tuple(
+            index
+            for index, rule in reversed(list(enumerate(current_rules)))
+            if DRAFT_CANDIDATE_RULE_MARKER in _entry_conditional_formula(rule)
         )
         await draft_worksheet.batch_update_typed_values(
             [
@@ -863,6 +880,9 @@ class ShiftRegisterManager(
             formula_ranges={notes_cell, "I1", *lookup_formula_ranges},
             background_updates=background_updates,
             border_updates=border_updates,
+            format_updates=legend_format_updates,
+            conditional_format_rule_deletes=candidate_rule_deletes,
+            conditional_format_rule_adds=tuple(reversed(candidate_rules)),
             frozen_column_count=1,
         )
         self.logger.info(
@@ -963,13 +983,14 @@ def _draft_format_updates(  # noqa: PLR0913
     )
     if old_threshold_row is not None:
         background_updates.append(
-            (f"I{old_threshold_row}:K{old_threshold_row}", "#FFFFFF")
+            (f"I{old_threshold_row}:M{old_threshold_row}", "#FFFFFF")
         )
     background_updates.extend(
         [
             (f"I{threshold_row}", "#A4C2F4"),
             (f"J{threshold_row}", "#FFF2CC"),
             (f"K{threshold_row}", "#A4C2F4"),
+            (f"L{threshold_row}:M{threshold_row}", "#D9EAD3"),
         ]
     )
     if old_lookup_row is not None:
@@ -1004,13 +1025,13 @@ def _draft_format_updates(  # noqa: PLR0913
     ]
     if old_threshold_row is not None:
         border_updates.append(
-            (f"J{old_threshold_row}:K{old_threshold_row}", None, "NONE", BORDER_NAMES)
+            (f"J{old_threshold_row}:M{old_threshold_row}", None, "NONE", BORDER_NAMES)
         )
     border_updates.extend(
         [
             (f"I1:I{threshold_row}", "#000000", "SOLID", ("left",)),
             (
-                f"I{threshold_row}:K{threshold_row}",
+                f"I{threshold_row}:M{threshold_row}",
                 "#000000",
                 "SOLID",
                 ("bottom",),
@@ -1046,6 +1067,49 @@ def _draft_format_updates(  # noqa: PLR0913
         ]
     )
     return background_updates, border_updates
+
+
+def _draft_candidate_conditional_rules(
+    *, worksheet_id: int, last_row: int
+) -> tuple[dict[str, object], dict[str, object]]:
+    grid_range = {
+        "sheetId": worksheet_id,
+        "startRowIndex": 1,
+        "endRowIndex": last_row,
+        "startColumnIndex": 8,
+    }
+    marker = f'N("{DRAFT_CANDIDATE_RULE_MARKER}v1")=0'
+    return (
+        _entry_conditional_rule(
+            [grid_range],
+            f'=AND(I2<>"",$C2=I2,{marker})',
+            background="#D9EAD3",
+            foreground="#FF0000",
+        ),
+        _entry_conditional_rule(
+            [grid_range],
+            f'=AND(I2<>"",SUMPRODUCT(N($C2:$G2=I2))>0,{marker})',
+            background="#D9EAD3",
+        ),
+    )
+
+
+def _draft_legend_format_updates(
+    *, old_threshold_row: int | None, threshold_row: int
+) -> tuple[tuple[str, dict[str, object], str], ...]:
+    field = "userEnteredFormat.textFormat.foregroundColorStyle"
+
+    def update(row: int, color: str) -> tuple[str, dict[str, object], str]:
+        return (
+            f"M{row}",
+            {"textFormat": {"foregroundColorStyle": {"rgbColor": _entry_rgb(color)}}},
+            field,
+        )
+
+    return (
+        *((update(old_threshold_row, "#000000"),) if old_threshold_row else ()),
+        update(threshold_row, "#FF0000"),
+    )
 
 
 def _entry_presentation_plan(
@@ -1216,12 +1280,12 @@ def _entry_conditional_rule(
     ranges: list[dict[str, int]],
     formula: str,
     *,
-    background: str,
+    background: str | None = None,
     foreground: str | None = None,
 ) -> dict[str, object]:
-    cell_format: dict[str, object] = {
-        "backgroundColorStyle": {"rgbColor": _entry_rgb(background)}
-    }
+    cell_format: dict[str, object] = {}
+    if background is not None:
+        cell_format["backgroundColorStyle"] = {"rgbColor": _entry_rgb(background)}
     if foreground is not None:
         cell_format["textFormat"] = {
             "foregroundColorStyle": {"rgbColor": _entry_rgb(foreground)}

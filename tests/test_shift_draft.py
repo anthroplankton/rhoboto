@@ -59,7 +59,11 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.formula_ranges: list[set[str]] = []
         self.background_updates: list[list[tuple[str, str]]] = []
         self.border_updates: list[list[tuple[str, str | None, str, Sequence[str]]]] = []
+        self.format_updates: list[list[tuple[str, dict[str, object], str]]] = []
         self.frozen_column_counts: list[int | None] = []
+        self.conditional_format_rules: list[dict[str, object]] = []
+        self.conditional_format_rule_deletes: list[list[int]] = []
+        self.conditional_format_rule_adds: list[list[dict[str, object]]] = []
         self.ensure_calls: list[tuple[int, int]] = []
 
     async def batch_get_values(
@@ -74,20 +78,31 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
             self.old_lookup_labels,
         ]
 
-    async def batch_update_typed_values(
+    async def batch_update_typed_values(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
         formula_ranges: set[str],
         background_updates: Sequence[tuple[str, str]] = (),
         border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        format_updates: Sequence[tuple[str, dict[str, object], str]] = (),
+        conditional_format_rule_deletes: Sequence[int] = (),
+        conditional_format_rule_adds: Sequence[dict[str, object]] = (),
         frozen_column_count: int | None = None,
     ) -> None:
         self.typed_batches.append(data)
         self.formula_ranges.append(formula_ranges)
         self.background_updates.append(list(background_updates))
         self.border_updates.append(list(border_updates))
+        self.format_updates.append(list(format_updates))
+        self.conditional_format_rule_deletes.append(
+            list(conditional_format_rule_deletes)
+        )
+        self.conditional_format_rule_adds.append(list(conditional_format_rule_adds))
         self.frozen_column_counts.append(frozen_column_count)
+
+    async def get_conditional_format_rules(self) -> list[dict[str, object]]:
+        return self.conditional_format_rules
 
     async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
         self.ensure_calls.append((min_rows, min_cols))
@@ -671,7 +686,7 @@ def test_notes_snapshot_matches_initial_schedule_and_complete_messages() -> None
 
 
 @pytest.mark.asyncio
-async def test_generate_draft_writes_draft_worksheet(
+async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
@@ -704,10 +719,27 @@ async def test_generate_draft_writes_draft_worksheet(
     old_threshold_labels[23] = [DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL]
     draft_worksheet = DraftBatchFakeWorksheet(
         title="Shift Draft",
+        worksheet_id=2,
         old_axis_rows=old_axis_rows,
         old_threshold_labels=old_threshold_labels,
         old_lookup_labels=old_lookup_labels,
     )
+    draft_worksheet.conditional_format_rules = [
+        {
+            "booleanRule": {
+                "condition": {
+                    "values": [
+                        {
+                            "userEnteredValue": (
+                                '=AND(I2<>"",N("rhoboto:shift-draft:candidate:v0")=0)'
+                            )
+                        }
+                    ]
+                }
+            }
+        },
+        {"booleanRule": {"condition": {"values": []}}},
+    ]
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
@@ -759,10 +791,18 @@ async def test_generate_draft_writes_draft_worksheet(
         f"{hour}-{hour + 1}" for hour in range(4, 22)
     ]
     assert not any(str(item["range"]).startswith("H") for item in data)
-    assert {"range": "I24:K24", "values": []} in data
+    assert {"range": "I24:M24", "values": []} in data
     assert {
-        "range": "I20:K20",
-        "values": [["アンコ候補閾値", 35, "万総合力"]],
+        "range": "I20:M20",
+        "values": [
+            [
+                "アンコ候補閾値",
+                35,
+                "万総合力",
+                "仮配置済：緑背景",  # noqa: RUF001
+                "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
+            ]
+        ],
     } in data
     assert {"range": "J25:L29", "values": []} in data
     assert {"range": "J25", "values": [["編成一覧"]]} in data
@@ -786,10 +826,11 @@ async def test_generate_draft_writes_draft_worksheet(
     assert draft_worksheet.background_updates[-1][0] == ("A1:G23", "#FFFFFF")
     assert draft_worksheet.background_updates[-1][1:] == [
         *((f"B{row}:G{row}", "#CCCCCC") for row in range(5, 18)),
-        ("I24:K24", "#FFFFFF"),
+        ("I24:M24", "#FFFFFF"),
         ("I20", "#A4C2F4"),
         ("J20", "#FFF2CC"),
         ("K20", "#A4C2F4"),
+        ("L20:M20", "#D9EAD3"),
         ("J25:L29", "#FFFFFF"),
         ("J22:L24", "#FFFFFF"),
         ("J22:J24", "#A4C2F4"),
@@ -806,9 +847,9 @@ async def test_generate_draft_writes_draft_worksheet(
         ),
         ("A1:G1", "#000000", "SOLID", ("bottom",)),
         ("I1:I24", None, "NONE", shift_register_manager.BORDER_NAMES),
-        ("J24:K24", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J24:M24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("I1:I20", "#000000", "SOLID", ("left",)),
-        ("I20:K20", "#000000", "SOLID", ("bottom",)),
+        ("I20:M20", "#000000", "SOLID", ("bottom",)),
         ("J20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
         ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
@@ -821,7 +862,89 @@ async def test_generate_draft_writes_draft_worksheet(
             ("top", "bottom", "left", "right"),
         ),
     ]
+    assert draft_worksheet.format_updates[-1] == [
+        (
+            "M24",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+        (
+            "M20",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+    ]
     assert draft_worksheet.frozen_column_counts[-1] == 1
+    assert draft_worksheet.conditional_format_rule_deletes[-1] == [0]
+    candidate_rules = list(reversed(draft_worksheet.conditional_format_rule_adds[-1]))
+    assert len(candidate_rules) == 2
+    assert all(
+        rule["ranges"]
+        == [
+            {
+                "sheetId": 2,
+                "startRowIndex": 1,
+                "endRowIndex": 19,
+                "startColumnIndex": 8,
+            }
+        ]
+        for rule in candidate_rules
+    )
+    assert candidate_rules[0]["booleanRule"] == {
+        "condition": {
+            "type": "CUSTOM_FORMULA",
+            "values": [
+                {
+                    "userEnteredValue": (
+                        '=AND(I2<>"",$C2=I2,N("rhoboto:shift-draft:candidate:v1")=0)'
+                    )
+                }
+            ],
+        },
+        "format": {
+            "backgroundColorStyle": {
+                "rgbColor": {
+                    "red": 0.8509803921568627,
+                    "green": 0.9176470588235294,
+                    "blue": 0.8274509803921568,
+                }
+            },
+            "textFormat": {
+                "foregroundColorStyle": {
+                    "rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                }
+            },
+        },
+    }
+    assert candidate_rules[1]["booleanRule"]["condition"]["values"] == [
+        {
+            "userEnteredValue": (
+                '=AND(I2<>"",SUMPRODUCT(N($C2:$G2=I2))>0,'
+                'N("rhoboto:shift-draft:candidate:v1")=0)'
+            )
+        }
+    ]
+    assert candidate_rules[1]["booleanRule"]["format"] == {
+        "backgroundColorStyle": {
+            "rgbColor": {
+                "red": 0.8509803921568627,
+                "green": 0.9176470588235294,
+                "blue": 0.8274509803921568,
+            }
+        }
+    }
     assert draft_worksheet.ensure_calls == []
     assert result.schedule.hours == list(range(4, 22))
     assert all(
@@ -981,10 +1104,11 @@ async def test_generate_draft_falls_back_without_team_profiles(
     )
     formula = str(notes_update["values"][0][0])
     assert result.team_source_warning in formula
-    assert draft_worksheet.background_updates[-1][-6:] == [
+    assert draft_worksheet.background_updates[-1][-7:] == [
         ("I3", "#A4C2F4"),
         ("J3", "#FFF2CC"),
         ("K3", "#A4C2F4"),
+        ("L3:M3", "#D9EAD3"),
         ("J5:L7", "#FFFFFF"),
         ("J5:J7", "#A4C2F4"),
         ("K5", "#FFF2CC"),

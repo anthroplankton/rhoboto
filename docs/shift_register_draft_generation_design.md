@@ -433,13 +433,28 @@ existing frozen-row setting is preserved.
 
 The candidate spill keeps no background fill. A thin black left border runs from
 `I1` through the threshold-control row. One thin black bottom border is applied
-across `I{R+1}:K{R+1}`. The label and `万総合力` suffix cells use `#A4C2F4`;
+across `I{R+1}:M{R+1}`. The label and `万総合力` suffix cells use `#A4C2F4`;
 the middle input uses `#FFF2CC` plus the same medium solid four-sided `#FF0000`
 border as the lookup input, applied after the black bottom border so red wins at
-the shared edge. No border follows the candidate spill's dynamic right edge. The formula's
+the shared edge. `仮配置済：緑背景` and `アンコ配置済：緑背景＋赤字` follow in
+`#D9EAD3`; the latter also uses `#FF0000` text. No border follows the candidate
+spill's dynamic right edge. The formula's
 blank separator columns and explicit Japanese headings provide the remaining
 grouping. Dynamic Notes keep no generated borders or fills because warning rows
 can move the participant-table header after manual Draft edits.
+
+Candidate data rows use two native conditional-format rules from column `I`
+through an unbounded right edge. The first rule gives a nonblank candidate in
+the same row's Encore lane `C` background `#D9EAD3` and foreground `#FF0000`;
+the lower-priority rule gives other candidates appearing in Draft `C:G` only
+the same background. This ordering accounts for Sheets using only the first
+matching conditional-format rule. This includes
+`本走候補`, `アンコ候補`, and `編成未登録`. Headers and blank separator cells
+remain unchanged. Generation removes every rule carrying the
+`rhoboto:shift-draft:candidate:` marker and adds the current two rules in the
+same atomic batch as the Draft values and formatting, so regeneration does not
+accumulate rules. The API `GridRange` omits `endColumnIndex`, allowing the
+formatting to follow a candidate spill that expands to additional columns.
 
 ## Dynamic Notes
 

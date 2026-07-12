@@ -95,7 +95,7 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     assert "`A1:G31`" in content
     assert "`A27`" in content
     assert "`I1`" in content
-    assert "`I26:K26`" in content
+    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content  # noqa: RUF001
     assert "`J28:L30`" in content
     assert "`J31`" in content
     assert "#REF!" in content

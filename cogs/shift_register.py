@@ -71,7 +71,8 @@ def _format_generate_draft_confirmation(
             "- 班表：`A1:G31`",  # noqa: RUF001
             f"- Notes：`A{final_row + 2}`",  # noqa: RUF001
             (
-                f"- 候補：`I1`、閾值 `I{final_row + 1}:K{final_row + 1}`"  # noqa: RUF001
+                f"- 候補：`I1`、閾值・圖例 "  # noqa: RUF001
+                f"`I{final_row + 1}:M{final_row + 1}`"
             ),
             f"- 反查：`J{final_row + 3}:L{final_row + 5}`",  # noqa: RUF001
             (
