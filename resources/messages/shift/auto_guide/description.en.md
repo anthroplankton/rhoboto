@@ -1,4 +1,4 @@
-**Start-End** (JST, 30-hour clock): send all time ranges you want to register in one message in this channel. You can add a note to each time range.
+In **Start-End** format (JST), send all time ranges you want to register within the recruitment time range in one message in this channel. You can add a note to each time range.
 
 ‼️ To update, **send a new message with every time range you want to keep**. Previous registrations are overwritten, and editing an old message does not update registration.
 

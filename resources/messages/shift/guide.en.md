@@ -1,6 +1,6 @@
 ## 📋 How to Register Your Shifts
 
-Enter the time ranges you want to register in the format `Start-End` (30-hour clock).
+Enter the time ranges you want to register within the recruitment time range in `Start-End` format (JST). The 30-hour clock notation is also supported.
 Notes can be added to each range. Send one message with all of your time ranges in the shift registration channel.
 
 **All time ranges you enter will be registered. If even one entry has an invalid format, the entire message cannot be registered.**
