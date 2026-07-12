@@ -35,7 +35,7 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
             "Discord, you'll need to delete it yourself."
         ),
         "ja": (
-            "✅ Google Sheets 上の{feature_label}の入力データを正常に削除しました。"
+            "✅ Google Sheets 上の{feature_label}のデータを正常に削除しました。"
             "Discord 上の元の登録メッセージも削除したい場合は、"
             "ご自身で削除してください。"
         ),
@@ -52,7 +52,7 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
             "Google Sheets."
         ),
         "ja": (
-            "‼️ このチャンネルの{feature_label}の入力データを削除してもよろしいですか？"  # noqa: RUF001
+            "‼️ このチャンネルの{feature_label}のデータを削除してもよろしいですか？"  # noqa: RUF001
             "削除されるのは Google Sheets 上のデータのみです。"
         ),
         "zh_tw": (
@@ -62,7 +62,7 @@ _TEXT_TEMPLATES: Final[dict[str, dict[str, str]]] = {
     },
     "delete_in_progress": {
         "en": "{processing_emoji} Deleting your data...",
-        "ja": "{processing_emoji} 入力データを削除しています...",
+        "ja": "{processing_emoji} データを削除しています...",
         "zh_tw": "{processing_emoji} 正在刪除您的資料...",
     },
     "delete_cancelled": {

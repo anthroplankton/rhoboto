@@ -748,7 +748,7 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
             if current_view is None
             else prepare_replacement_settings_view(current_view, panel.view)
         )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=None,
             embed=panel.embed,
             view=replacement_view,
@@ -933,20 +933,24 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
     guide_template_key: str
     auto_guide_template_key: str
 
-    def _guide_worksheet_id(
-        self,
-        _feature_config: SheetConfigBase,
-    ) -> int | None:
-        return None
-
     def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._guide_worksheet_id(feature_config),
+            feature_config.landing_worksheet_id,
         )
+
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+    ) -> dict[str, object]:
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+        return {
+            "bot": bot_mention,
+            "sheet_url": self._guide_sheet_url(context.feature_config),
+        }
 
     def _auto_guide_template_values(
         self,
@@ -1242,13 +1246,11 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                 await self._send_missing_config_followup(interaction)
                 return
 
-            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
             announcements = await render_announcement_messages(
                 self.guide_template_key,
                 context.guild_id,
                 self.logger,
-                bot=bot_mention,
-                sheet_url=self._guide_sheet_url(context.feature_config),
+                **await self._guide_template_values(context),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -1551,20 +1553,24 @@ class FeatureChannelUserBase[
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
-    def _guide_worksheet_id(
-        self,
-        _feature_config: SheetConfigBase,
-    ) -> int | None:
-        return None
-
     def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
     ) -> str:
         return google_sheet_url_with_gid(
             feature_config.sheet_url,
-            self._guide_worksheet_id(feature_config),
+            feature_config.landing_worksheet_id,
         )
+
+    async def _guide_template_values(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+    ) -> dict[str, object]:
+        bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
+        return {
+            "bot": bot_mention,
+            "sheet_url": self._guide_sheet_url(context.feature_config),
+        }
 
     async def delete_callback(self, interaction: Interaction) -> None:
         """
@@ -1728,12 +1734,10 @@ class FeatureChannelUserBase[
                 return
 
             locale = locale_to_template_code(interaction.locale.value)
-            bot_mention = self.bot.user.mention if self.bot.user is not None else "@Bot"
             content = render_message_template(
                 template_key,
                 locale,
-                bot=bot_mention,
-                sheet_url=self._guide_sheet_url(context.feature_config),
+                **await self._guide_template_values(context),
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(

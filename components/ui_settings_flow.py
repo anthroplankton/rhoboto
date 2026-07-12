@@ -218,7 +218,18 @@ async def send_settings_refresh_failure(  # noqa: PLR0913
         f"Reference: `{reference}`"
     )
     if clear_current_message:
-        await interaction.response.edit_message(content=content, embed=None, view=None)
+        if interaction.response.is_done():
+            await interaction.edit_original_response(
+                content=content,
+                embed=None,
+                view=None,
+            )
+        else:
+            await interaction.response.edit_message(
+                content=content,
+                embed=None,
+                view=None,
+            )
     else:
         await interaction.followup.send(content, ephemeral=True)
 

@@ -133,7 +133,10 @@ class ConfiguredManager:
         self.service_account_path = service_account_path
 
     async def get_sheet_config_or_none(self) -> SimpleNamespace:
-        return SimpleNamespace(sheet_url="https://sheet.example")
+        return SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        )
 
 
 class MissingConfigManager(ConfiguredManager):

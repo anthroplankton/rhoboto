@@ -5,10 +5,11 @@ import asyncio
 import datetime as dt
 import logging
 import re
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from discord import Embed, HTTPException, NotFound
+from discord import Embed, File, HTTPException, NotFound
 from tortoise.exceptions import DBConnectionError
 
 from bot import config
@@ -26,7 +27,7 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
 )
 from cogs.shift import Shift
-from cogs.shift_register import ShiftRegister
+from cogs.shift_register import ShiftRegister, _format_generate_draft_confirmation
 from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
@@ -45,12 +46,429 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.shift_register_structs import Shift as RegisterShift, ShiftParser
+from utils.shift_register_manager import (
+    TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING,
+    TEAM_SOURCE_UNSET_DRAFT_WARNING,
+    DraftGenerationResult,
+    TeamSourceStatus,
+)
+from utils.shift_register_structs import (
+    DraftWorksheetMetadata,
+    RecruitmentTimeRanges,
+    Shift as RegisterShift,
+    ShiftParser,
+)
+from utils.shift_scheduler import DraftSchedule, HourShiftAssignment
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 from utils.team_register_structs import Team as RegisterTeam, TeamParser
 
 PRIVATE_DATABASE_ERROR = "private database"
+
+
+def test_generate_draft_requires_non_negative_power_threshold() -> None:
+    parameters = {
+        parameter.name: parameter
+        for parameter in ShiftRegister.generate_draft.parameters
+    }
+
+    threshold = parameters["encore_power_threshold"]
+    assert threshold.required is True
+    assert threshold.min_value == 0
+    assert parameters["runner"].required is False
+
+
+def test_generate_draft_confirmation_formats_new_destinations() -> None:
+    ranges = RecruitmentTimeRanges.from_json(
+        [{"start": 4, "end": 12}, {"start": 20, "end": 28}]
+    )
+
+    content = _format_generate_draft_confirmation(
+        ranges,
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+    )
+
+    assert (
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        in content
+    )
+    assert content.startswith(
+        "### ‼️ 確認產生班表草稿\n"
+        "請先備份需要保留的內容。確認後將覆蓋 "
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        " 的以下位置："  # noqa: RUF001
+    )
+    assert (
+        content.count(
+            "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        )
+        == 1
+    )
+    assert "`A1:G31`" in content
+    assert "`A27`" in content
+    assert "`I1`" in content
+    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content  # noqa: RUF001
+    assert "`J28:L30`" in content
+    assert "`J31`" in content
+    assert "#REF!" in content
+
+
+def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4, 5, 6, 7, 8, 9, 10, 11],
+        assignments=[
+            HourShiftAssignment(
+                hour=4,
+                supporter_usernames_by_slot={"encore": "alice"},
+                unassigned_usernames=["carol", "dave"],
+            ),
+            HourShiftAssignment(
+                hour=5,
+                supporter_usernames_by_slot={"honso_1": "bob", "encore": "alice"},
+            ),
+            HourShiftAssignment(
+                hour=6,
+                supporter_usernames_by_slot={
+                    "encore": "alice",
+                    "honso_1": "bob",
+                    "honso_2": "eve",
+                    "honso_3": "frank",
+                    "standby": "grace",
+                },
+            ),
+            HourShiftAssignment(
+                hour=7,
+                supporter_usernames_by_slot={"honso_1": "bob"},
+            ),
+            HourShiftAssignment(hour=8),
+            HourShiftAssignment(
+                hour=9,
+                supporter_usernames_by_slot={"encore": "alice", "standby": "grace"},
+            ),
+            HourShiftAssignment(
+                hour=10,
+                supporter_usernames_by_slot={"standby": "grace", "honso_1": "bob"},
+            ),
+            HourShiftAssignment(
+                hour=11,
+                supporter_usernames_by_slot={"standby": "grace"},
+            ),
+        ],
+        display_names={
+            "alice": "Alice",
+            "bob": "Bob",
+            "carol": "Carol",
+            "dave": "Dave",
+            "eve": "E`ve",
+            "frank": "Frank",
+            "grace": "Grace",
+        },
+    )
+
+    report = ShiftRegister._format_draft_report(
+        schedule,
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {"alice": "<@111>", "bob": "<@222>", "carol": "<@333>"},
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.from_json(
+            [{"start": 4, "end": 8}, {"start": 9, "end": 12}]
+        ),
+        team_source_warning=None,
+        unregistered_usernames=("carol", "eve"),
+    )
+
+    assert report == (
+        "### ✅ 班表草稿已產生\n"
+        "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
+        "- 安可綜合力閾值：35\n"  # noqa: RUF001
+        "‼️ 已將班表寫入 "
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        "，並覆蓋原有內容。\n"  # noqa: RUF001
+        "⚠️ 編成未登録：<@333>、E\\`ve\n"  # noqa: RUF001
+        "- 募集時間【4-8・9-12】\n"
+        "- 已排入（安可｜本走；待機）：\n"  # noqa: RUF001
+        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"  # noqa: RUF001
+        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
+        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
+        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
+        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"  # noqa: RUF001
+        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"  # noqa: RUF001
+        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"  # noqa: RUF001
+        "- 未排入（位置已滿）：\n"  # noqa: RUF001
+        "  - -# `4-5`：<@333>、`Dave`\n"  # noqa: RUF001
+        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
+    )
+    assert "`8-9`" not in report
+    assert "`7-8`" in report
+    assert "`9-10`" in report
+    assert "`8` 個小時" not in report
+
+
+def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
+    report = ShiftRegister._format_draft_report(
+        DraftSchedule(
+            None,
+            [4, 5],
+            [HourShiftAssignment(4), HourShiftAssignment(5)],
+            {},
+        ),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {},
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        team_source_warning=None,
+    )
+
+    assert "- 已排入（安可｜本走；待機）：なし" in report  # noqa: RUF001
+    assert "`4-5`" not in report
+    assert "`5-6`" not in report
+    assert "募集時間【4-6】" in report
+    assert "附件是生成時資料的 Notes 快照" in report
+
+
+@pytest.mark.parametrize(
+    "warning",
+    [TEAM_SOURCE_UNSET_DRAFT_WARNING, TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING],
+)
+def test_format_shift_draft_report_places_team_warning_before_assignments(
+    warning: str,
+) -> None:
+    report = ShiftRegister._format_draft_report(
+        DraftSchedule(None, [], [], {}),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {},
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.default(),
+        team_source_warning=warning,
+    )
+
+    assert report.index(warning) < report.index("募集時間") < report.index("已排入")
+    assert report.index("已排入") < report.index("附件是生成時資料")
+
+
+@pytest.mark.asyncio
+async def test_generate_shift_draft_links_to_draft_worksheet_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    schedule = DraftSchedule(
+        None,
+        [4],
+        [HourShiftAssignment(4, unassigned_usernames=["carol"])],
+        {"carol": "Carol"},
+    )
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+    )
+    ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
+    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
+
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            events.append("sheet")
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            _metadata: object,
+        ) -> SimpleNamespace:
+            return metadata
+
+        async def generate_draft(
+            self,
+            _metadata: object,
+            *,
+            encore_power_threshold: float,
+            runner: str | None,
+        ) -> DraftGenerationResult:
+            assert encore_power_threshold == 35
+            assert runner is None
+            return DraftGenerationResult(
+                schedule=schedule,
+                team_source_status=TeamSourceStatus.AVAILABLE,
+                team_source_warning=None,
+                recruitment_ranges=ranges,
+                notes_snapshot=notes_snapshot,
+                unregistered_usernames=("carol",),
+            )
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager(), feature_config=config)
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+            assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
+
+        async def wait(self) -> None:
+            events.append("wait")
+
+    @asynccontextmanager
+    async def recording_lock(_channel_id: int) -> object:
+        events.append("lock")
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    subject.sheet_write_lock = recording_lock
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction(
+        guild=SimpleNamespace(
+            id=111,
+            members=[SimpleNamespace(name="carol", mention="<@333>")],
+        )
+    )
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert events[:3] == ["wait", "lock", "sheet"]
+    prompt, prompt_kwargs = interaction.original_response_edits[0]
+    assert "`A1:G31`" in prompt
+    assert isinstance(prompt_kwargs["view"], ConfirmView)
+    content, kwargs = interaction.followup.messages[0]
+    assert "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)" in (
+        content or ""
+    )
+    assert "<@333>" in (content or "")
+    assert "募集時間【4-5】" in (content or "")
+    assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
+    attachment = kwargs["file"]
+    assert isinstance(attachment, File)
+    assert attachment.filename == "shift-draft-notes.txt"
+    attachment.fp.seek(0)
+    assert attachment.fp.read().decode("utf-8") == notes_snapshot
+    assert kwargs["ephemeral"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmation", [False, None])
+async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    confirmation: bool | None,
+) -> None:
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> None:
+            msg = "Google Sheets must not be accessed before confirmation"
+            raise AssertionError(msg)
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            manager=Manager(),
+            feature_config=SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 5}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
+            ),
+        )
+
+    class ConfirmView:
+        value = confirmation
+
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+            assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert interaction.followup.messages == []
+    assert "`A1:G31`" in interaction.original_response_edits[0][0]
+    if confirmation is False:
+        assert interaction.original_response_edits[-1][1] == {"view": None}
+    else:
+        assert interaction.original_response_edits[-1] == (
+            "✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+            {"view": None},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_changed_destinations_skip_google_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feature_context_calls = 0
+
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> None:
+            msg = "changed destinations must abort before Google Sheets"
+            raise AssertionError(msg)
+
+    async def get_feature_channel_context(_source: object) -> object:
+        nonlocal feature_context_calls
+        feature_context_calls += 1
+        return object()
+
+    configs = iter(
+        [
+            SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 5}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
+            ),
+            SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 6}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
+            ),
+        ]
+    )
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager(), feature_config=next(configs))
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+            assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert feature_context_calls == 2
+    assert interaction.followup.messages == []
+    assert interaction.original_response_edits[-1] == (
+        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",  # noqa: RUF001
+        {"view": None},
+    )
 
 
 async def fake_feature_channel_get(
@@ -200,7 +618,18 @@ class ConfiguredHelpUrlManager(ConfiguredManager):
             ),
             summary_worksheet_id=333,
             entry_worksheet_id=444,
+            landing_worksheet_id=333,
         )
+
+
+class ConfiguredShiftHelpUrlManager(ConfiguredHelpUrlManager):
+    async def get_sheet_config_or_none(self) -> SimpleNamespace:
+        config = await super().get_sheet_config_or_none()
+        config.landing_worksheet_id = config.entry_worksheet_id
+        return config
+
+    async def get_saved_team_source_channel_id(self) -> int:
+        return 987
 
 
 class AutoGuideMessage:
@@ -299,6 +728,7 @@ def shift_auto_guide_config() -> SimpleNamespace:
     return SimpleNamespace(
         sheet_url="https://docs.google.com/spreadsheets/d/abc/edit?usp=sharing#gid=999",
         entry_worksheet_id=444,
+        landing_worksheet_id=444,
         day_number=2,
         event_date=dt.date(2026, 8, 12),
         submission_deadline_at=dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
@@ -572,10 +1002,12 @@ class OrderedShiftUpsertManager(ConfiguredManager):
         shift: RegisterShift | None,
         *,
         metadata: object,
+        recruitment_ranges: RecruitmentTimeRanges,
     ) -> None:
         assert user_info.username == "alice"
         assert shift is not None
         assert metadata is self.ensured_metadata
+        assert recruitment_ranges.to_json() == [{"start": 4, "end": 28}]
         self.events.append("upsert")
         if self.upsert_error is not None:
             raise self.upsert_error
@@ -677,8 +1109,8 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_send_missing_config_followup",
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
-        "_guide_worksheet_id",
         "_guide_sheet_url",
+        "_guide_template_values",
         "_auto_guide_is_enabled",
         "_auto_guide_template_values",
         "_render_auto_guide_embeds",
@@ -709,7 +1141,10 @@ def ordered_team_upsert_context(
             feature_name="team_register",
         ),
         manager=manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
 
 
@@ -2309,8 +2744,8 @@ async def test_latest_guide_toggle_enable_saves_before_refresh_and_warns(
 
     assert events == ["get_context", "state", "save:True", "build_panel", "refresh"]
     assert current_view.is_finished()
-    assert len(interaction.response.edits) == 1
-    edit_kwargs = interaction.response.edits[0][1]
+    assert len(interaction.original_response_edits) == 1
+    edit_kwargs = interaction.original_response_edits[0][1]
     assert edit_kwargs["embed"] is panel.embed
     assert edit_kwargs["view"] is panel.view
     assert interaction.followup.messages == [
@@ -2569,7 +3004,10 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     old_message = AutoGuideMessage(1234)
     channel = AutoGuideChannel(old_messages=[old_message])
@@ -2684,7 +3122,10 @@ async def test_auto_guide_delete_failure_logs_and_keeps_new_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     old_message = AutoGuideMessage(1234, delete_error=fake_http_exception())
     channel = AutoGuideChannel(old_messages=[old_message])
@@ -2775,7 +3216,10 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel(send_errors=[fake_http_exception()])
     auto_state = SaveableAutoGuideState()
@@ -2870,7 +3314,10 @@ async def test_auto_guide_buttons_use_first_announcement_language(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel()
     auto_state = SaveableAutoGuideState()
@@ -2952,7 +3399,10 @@ async def test_auto_guide_save_id_failure_keeps_new_message(
         channel_id=222,
         feature_channel=context.feature_channel,
         manager=context.manager,
-        feature_config=SimpleNamespace(sheet_url="https://sheet.example"),
+        feature_config=SimpleNamespace(
+            sheet_url="https://sheet.example",
+            landing_worksheet_id=None,
+        ),
     )
     channel = AutoGuideChannel()
     auto_state = SaveableAutoGuideState(save_error=RuntimeError("save failed"))
@@ -3116,8 +3566,8 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
-    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredHelpUrlManager)
-    captured_sheet_urls: list[object] = []
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ConfiguredShiftHelpUrlManager)
+    captured_values: dict[str, object] = {}
 
     async def fake_render_announcement_messages(
         template_key: str,
@@ -3127,7 +3577,7 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
     ) -> list[RenderedAnnouncement]:
         assert template_key == "shift.guide"
         assert guild_id == 111
-        captured_sheet_urls.append(values["sheet_url"])
+        captured_values.update(values)
         return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
@@ -3146,9 +3596,10 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
 
     await subject.send_guide_message(interaction)
 
-    assert captured_sheet_urls == [
+    assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
-    ]
+    )
+    assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [
         ("en guide", {"ephemeral": False, "wait": True})
     ]
@@ -3196,7 +3647,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
-    monkeypatch.setattr(Shift, "ManagerType", ConfiguredHelpUrlManager)
+    monkeypatch.setattr(Shift, "ManagerType", ConfiguredShiftHelpUrlManager)
     captured_values: dict[str, object] = {}
 
     def fake_render_message_template(
@@ -3223,6 +3674,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
     assert captured_values["sheet_url"] == (
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=444"
     )
+    assert captured_values["team_source_channel_id"] == 987
     assert interaction.followup.messages == [
         ("rendered shift guide", {"ephemeral": True})
     ]
@@ -4246,7 +4698,7 @@ async def test_delete_callback_uses_feature_catalog_in_ja_copy(
     )
 
     assert result == (
-        "✅ Google Sheets 上の編成登録の入力データを正常に削除しました。"
+        "✅ Google Sheets 上の編成登録のデータを正常に削除しました。"
         "Discord 上の元の登録メッセージも削除したい場合は、"
         "ご自身で削除してください。"
     )

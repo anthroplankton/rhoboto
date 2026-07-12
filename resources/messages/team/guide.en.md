@@ -4,7 +4,7 @@ Enter one team per line in the format `LeaderSkill/InternalSkill/TeamPower`.
 Labels or notes may also be added before or after each team's values.
 Send the message in the team registration channel.
 
-**Only lines in the team format are registered from top to bottom, but if any team entry has an invalid format, the message cannot be registered.**
+**The formations you enter will be registered from top to bottom. If even one entry has an invalid format, the entire message cannot be registered.**
 
 - 1st team → Main Team
 - 2nd team → Encore Team, if you have one
@@ -22,4 +22,4 @@ Example:
 > -# {{ bot }} treats that message as the latest data and **overwrites all previous team registrations**. Teams not included in the new message will be cleared.
 > -# Editing an old message does not update your registration.
 
-After registration, {{ bot }} will automatically process your teams. If the message receives ✅, the result has been recorded in [Google Sheets]({{ sheet_url }}) for you to view and confirm. If it receives ⚠️, the registration may not have completed successfully.
+After submission, {{ bot }} will process the formations automatically. If the message receives a ✅, the results have been recorded in [Google Sheets]({{ sheet_url }}) for you to view and confirm. If it receives ⚠️, the registration may not have completed successfully.

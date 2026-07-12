@@ -26,5 +26,9 @@ class TeamRegisterConfig(SheetConfigBase):
     class Meta:
         table = "team_register"
 
+    @property
+    def landing_worksheet_id(self) -> int:
+        return self.summary_worksheet_id
+
     def get_worksheet_ids(self) -> list[int]:
         return [*self.team_worksheet_ids, self.summary_worksheet_id]

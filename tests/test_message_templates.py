@@ -247,12 +247,63 @@ def test_guide_templates_render_jinja_values(key: str, locale: str) -> None:
         locale,
         bot="@Rhoboto",
         sheet_url="https://docs.google.com/spreadsheets/d/example",
+        team_source_channel_id=123,
     )
 
     assert "@Rhoboto" in content
     assert "https://docs.google.com/spreadsheets/d/example" in content
     assert "{bot}" not in content
     assert "{sheet_url}" not in content
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_mention", "expected_fallback"),
+    [
+        (
+            "ja",
+            "シフトを提出する前に、編成は <#123> へご提出ください。",
+            "シフトを提出する前に、編成は登録用のチャンネルへご提出ください。",
+        ),
+        (
+            "zh_tw",
+            "提交班表前，請先將編成提交至 <#123>。",  # noqa: RUF001
+            "提交班表前，請先將編成提交至編成登記用頻道。",  # noqa: RUF001
+        ),
+        (
+            "en",
+            "Before submitting your shifts, please submit your teams in <#123>.",
+            "Before submitting your shifts, please submit your teams in the team "
+            "registration channel.",
+        ),
+    ],
+)
+def test_shift_guide_team_source_channel_copy(
+    locale: str,
+    expected_mention: str,
+    expected_fallback: str,
+) -> None:
+    values = {
+        "bot": "@Rhoboto",
+        "sheet_url": "https://docs.google.com/spreadsheets/d/example",
+    }
+
+    mention_content = render_message_template(
+        "shift.guide",
+        locale,
+        team_source_channel_id=123,
+        **values,
+    )
+    fallback_content = render_message_template(
+        "shift.guide",
+        locale,
+        team_source_channel_id=None,
+        **values,
+    )
+
+    assert expected_mention in mention_content
+    assert expected_fallback not in mention_content
+    assert expected_fallback in fallback_content
+    assert "<#" not in fallback_content
 
 
 @pytest.mark.parametrize("feature", ["team", "shift"])
@@ -313,15 +364,15 @@ def test_auto_guide_runtime_templates_render(
         (
             "zh_tw",
             (
-                "若訊息上出現 ✅，代表結果已記錄到 "  # noqa: RUF001
+                "若訊息出現 ✅，結果就會記錄在 "  # noqa: RUF001
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example)"
-                "，可供查看與確認。若出現 ⚠️，代表登記可能未正常完成。"  # noqa: RUF001
+                " 中，可前往確認。若出現 ⚠️，表示登錄可能未正常完成。"  # noqa: RUF001
             ),
         ),
         (
             "en",
             (
-                "If the message receives ✅, the result has been recorded in "
+                "If the message receives a ✅, the results have been recorded in "
                 "[Google Sheets](https://docs.google.com/spreadsheets/d/example) "
                 "for you to view and confirm. If it receives ⚠️, "
                 "the registration may not have completed successfully."

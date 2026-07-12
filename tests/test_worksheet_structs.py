@@ -4,11 +4,13 @@ import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
+from utils import shift_register_structs
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetContent,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
+    Shift,
     ShiftRegisterGoogleSheetsMetadata,
 )
 from utils.structs_base import (
@@ -134,15 +136,100 @@ def test_team_worksheet_content_upsert_delete_and_padding() -> None:
     assert deleted.empty
 
 
-def test_shift_entry_columns_use_0_30_hour_axis() -> None:
+def test_shift_entry_layout_places_team_before_0_30_hour_axis() -> None:
     expected_columns = [
         "username",
         "display_name",
+        "Main ISV",
+        "Encore ISV",
+        "Team Info",
         *[f"{hour}-{hour + 1}" for hour in range(30)],
         "original_message",
     ]
 
     assert expected_columns == EntryWorksheetContent.COLUMNS
+    assert EntryWorksheetContent.COLUMN_COUNT == 36
+
+
+def test_shift_entry_count_row_targets_f_through_ai() -> None:
+    row = EntryWorksheetContent.count_row()
+
+    assert row[0] == "count"
+    assert row[1:5] == ["", "", "", ""]
+    assert row[5] == "=COUNTIF(F$3:F, 1)"
+    assert row[34] == "=COUNTIF(AI$3:AI, 1)"
+    assert row[35] == ""
+
+
+def test_shift_entry_serializes_only_owned_value_ranges() -> None:
+    shift = Shift(
+        username="alice",
+        display_name="Alice",
+        original_message="0-2",
+        slots={0, 1},
+    )
+
+    updates = EntryWorksheetContent.shift_value_ranges(shift, row=7)
+
+    assert updates == [
+        {"range": "A7:B7", "values": [["alice", "Alice"]]},
+        {
+            "range": "F7:AJ7",
+            "values": [[1, 1, *([0] * 28), "0-2"]],
+        },
+    ]
+
+
+def test_team_formula_uses_pipe_and_row_reference() -> None:
+    formula = shift_register_structs.build_team_summary_formula(
+        row=7,
+        sheet_url="https://docs.google.com/spreadsheets/d/source",
+        worksheet_title="Team Summary",
+        username_column=1,
+        roles_column=3,
+        main_isv_column=4,
+        encore_isv_column=6,
+        import_last_column="G",
+    )
+
+    assert "$A7" in formula
+    assert "found, COUNTIF(username, $A7) > 0" in formula
+    assert '"No team yet"' in formula
+    assert '"｜Main fallback"' in formula  # noqa: RUF001
+    assert '"No role"' in formula
+    assert "Encore Team" not in formula
+    assert formula.startswith("=LET(")
+
+
+def test_team_formula_without_encore_column_uses_blank() -> None:
+    formula = shift_register_structs.build_team_summary_formula(
+        row=3,
+        sheet_url="https://docs.google.com/spreadsheets/d/source",
+        worksheet_title="Only Main",
+        username_column=1,
+        roles_column=3,
+        main_isv_column=4,
+        encore_isv_column=None,
+        import_last_column="E",
+    )
+
+    assert 'encoreTeam, ""' in formula
+
+
+def test_team_formula_escapes_formula_strings_and_sheet_title() -> None:
+    formula = shift_register_structs.build_team_summary_formula(
+        row=3,
+        sheet_url='https://sheet.example/a"b',
+        worksheet_title='Manager\'s "Summary"',
+        username_column=1,
+        roles_column=3,
+        main_isv_column=4,
+        encore_isv_column=6,
+        import_last_column="G",
+    )
+
+    assert 'IMPORTRANGE("https://sheet.example/a""b"' in formula
+    assert '"\'Manager\'\'s ""Summary""\'!A:G"' in formula
 
 
 def test_shift_entry_dtypes_use_0_30_hour_axis() -> None:

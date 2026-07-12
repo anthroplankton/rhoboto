@@ -226,6 +226,7 @@ class LatestGuideButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
+        await interaction.response.defer()
         await self.toggle_callback(
             interaction,
             enabled=not self.enabled,

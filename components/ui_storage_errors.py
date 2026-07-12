@@ -13,6 +13,8 @@ from utils.storage_errors import (
 )
 
 if TYPE_CHECKING:
+    from types import TracebackType
+
     from discord import Interaction, Message
     from discord.abc import Snowflake
 
@@ -49,6 +51,7 @@ async def send_storage_error(
         context.channel_id,
         error.kind.value,
         error.log_hint,
+        **_safe_storage_log_kwargs(error),
     )
     content = storage_error_content(error, reference_id=reference)
     try:
@@ -88,6 +91,7 @@ async def mark_storage_message_failure(  # noqa: PLR0913
         message_id,
         error.kind.value,
         error.log_hint,
+        **_safe_storage_log_kwargs(error),
     )
     if bot_user is not None:
         await remove_reaction_if_present(
@@ -101,3 +105,25 @@ async def mark_storage_message_failure(  # noqa: PLR0913
         STORAGE_FAILURE_REACTIONS,
         log=active_logger,
     )
+
+
+def _safe_storage_exc_info(
+    error: StorageError,
+) -> tuple[type[BaseException], BaseException, TracebackType | None] | None:
+    cause = error.__cause__
+    if cause is None:
+        return None
+    names = []
+    traceback = None
+    while cause is not None:
+        names.append(type(cause).__name__)
+        if cause.__traceback__ is not None:
+            traceback = cause.__traceback__
+        cause = cause.__cause__
+    safe_error = RuntimeError(f"Storage exception chain: {' -> '.join(names)}")
+    return RuntimeError, safe_error, traceback
+
+
+def _safe_storage_log_kwargs(error: StorageError) -> dict[str, object]:
+    exc_info = _safe_storage_exc_info(error)
+    return {} if exc_info is None else {"exc_info": exc_info}

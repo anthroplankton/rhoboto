@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from discord import ButtonStyle, Embed, Interaction, TextStyle
-from discord.ui import Button, Modal, TextInput
+from discord import ButtonStyle, Embed, Interaction, Object, TextStyle
+from discord.ui import Button, ChannelSelect, Modal, TextInput, View
 
 from bot import config
 from components.ui_auto_guide import (
@@ -22,13 +22,21 @@ from components.ui_settings_flow import (
     SETTINGS_STORAGE_EXCEPTIONS,
     SettingsPanel,
     SettingsTimeoutView,
+    prepare_replacement_settings_view,
     send_current_panel_followup,
     send_settings_partial_success,
     send_settings_refresh_failure,
     send_settings_storage_error,
+    send_settings_view_followup,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
+)
+from utils.google_sheets_urls import google_sheet_url_with_gid
+from utils.shift_register_manager import (
+    SHIFT_REGISTER_SHEET_WRITE_LOCK,
+    TeamSourceResolution,
+    TeamSourceStatus,
 )
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -67,11 +75,87 @@ SHIFT_REGISTER_FEATURE_NAME = "shift_register"
 logger = logging.getLogger(__name__)
 
 
+class GenerateDraftConfirmView(View):
+    """Confirm one administrator's Shift Draft generation request."""
+
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        draft_sheet_url: str,
+        timeout: float = 20.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.requesting_user_id = requesting_user_id
+        self.draft_sheet_url = draft_sheet_url
+        self.value: bool | None = None
+        self.add_item(GenerateDraftConfirmButton())
+        self.add_item(GenerateDraftCancelButton())
+
+    async def authorize(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.requesting_user_id:
+            await interaction.response.send_message(
+                "⚠️ 只有執行此 command 的管理員可以操作。",
+                ephemeral=True,
+            )
+            return False
+        if await require_settings_permissions(interaction):
+            return True
+        self.value = False
+        self.stop()
+        return False
+
+
+class GenerateDraftConfirmButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="確認生成", style=ButtonStyle.danger)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
+            interaction
+        ):
+            return
+        view.value = True
+        await interaction.response.edit_message(
+            content=(
+                "已確認生成，正在處理 "  # noqa: RUF001
+                f"[Shift Draft]({view.draft_sheet_url})。"
+            ),
+            view=None,
+        )
+        view.stop()
+
+
+class GenerateDraftCancelButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="取消", style=ButtonStyle.secondary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
+            interaction
+        ):
+            return
+        view.value = False
+        await interaction.response.edit_message(
+            content="✖️ 已取消生成，未變更 Shift Draft。",  # noqa: RUF001
+            view=None,
+        )
+        view.stop()
+
+
 async def send_shift_settings_missing(interaction: Interaction) -> None:
-    await interaction.response.send_message(
-        SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE,
-        ephemeral=True,
-    )
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE,
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            SHIFT_REGISTER_SETTINGS_MISSING_MESSAGE,
+            ephemeral=True,
+        )
 
 
 async def get_fresh_shift_register_config_or_respond(
@@ -118,6 +202,7 @@ async def build_shift_register_settings_panel(
         enabled=latest_guide_enabled,
         state_resolver=latest_guide_state_resolver,
     )
+    team_source = await shift_register_manager.resolve_team_source()
     embed = build_current_settings_embed(
         sheet_url=shift_register.sheet_url,
         metadata=active_metadata,
@@ -126,6 +211,7 @@ async def build_shift_register_settings_panel(
         color=config.DEFAULT_EMBED_COLOR,
         is_save_action=is_save_action,
         latest_guide_enabled=latest_guide_enabled,
+        team_source=team_source,
     )
     view = ShiftRegisterView(
         shift_register_manager=shift_register_manager,
@@ -135,6 +221,12 @@ async def build_shift_register_settings_panel(
         draft_worksheet_title=active_metadata.draft_worksheet.title,
         final_schedule_worksheet_title=active_metadata.final_schedule_worksheet.title,
         final_schedule_anchor_cell=final_schedule_anchor_cell,
+        selected_team_channel_id=(
+            team_source.source.config.feature_channel.channel_id
+            if team_source.status is TeamSourceStatus.AVAILABLE
+            and team_source.source is not None
+            else None
+        ),
         latest_guide_enabled=latest_guide_enabled,
         latest_guide_toggle_callback=latest_guide_toggle_callback,
         latest_guide_state_resolver=latest_guide_state_resolver,
@@ -171,6 +263,52 @@ def _format_settings_datetime(value: datetime | None) -> str:
     if value is None:
         return "Not set"
     return format_iso_hour(value)
+
+
+def _format_team_source(  # noqa: PLR0911
+    resolution: TeamSourceResolution,
+) -> str:
+    source = resolution.source
+    if resolution.status is TeamSourceStatus.AVAILABLE and source is not None:
+        worksheet = next(
+            (
+                worksheet
+                for worksheet in source.metadata
+                if worksheet.id == source.config.landing_worksheet_id
+            ),
+            None,
+        )
+        if worksheet is None or worksheet.id is None:
+            return (
+                "- The configured Team source is invalid. Repair its worksheet "
+                "settings."
+            )
+        worksheet_url = google_sheet_url_with_gid(
+            source.config.sheet_url,
+            worksheet.id,
+        )
+        return (
+            f"- **Channel** = <#{source.config.feature_channel.channel_id}>\n"
+            f"- **Google Sheet** = [Open Team Register Sheet]({worksheet_url})"
+        )
+    if resolution.status is TeamSourceStatus.UNSET:
+        return (
+            "- No Team source is selected. Shift registrations will continue without "
+            "Team references."
+        )
+    if resolution.status is TeamSourceStatus.MISSING:
+        return "- No configured Team Register exists in this server."
+    if resolution.status is TeamSourceStatus.AMBIGUOUS:
+        return (
+            "- Multiple Team Registers are configured. Use Edit Team Source "
+            "to select one."
+        )
+    if resolution.status is TeamSourceStatus.INVALID:
+        return (
+            "- The configured Team source is invalid. Repair its worksheet "
+            "settings or header."
+        )
+    return "- The Team source could not be read at this time."
 
 
 def _timeline_defaults_from_config(shift_register: object) -> dict[str, str]:
@@ -367,14 +505,16 @@ class ShiftRegisterSheetModal(Modal):
         final_schedule_anchor_cell = self.final_schedule_anchor_cell.value
 
         try:
-            metadata = (
-                await self.shift_register_manager.upsert_sheet_config_and_worksheets(
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                self.shift_register_manager.feature_channel.channel_id
+            ):
+                upsert = self.shift_register_manager.upsert_sheet_config_and_worksheets
+                metadata = await upsert(
                     sheet_url=sheet_url,
                     entry_worksheet_title=entry_worksheet_title,
                     draft_worksheet_title=draft_worksheet_title,
                     final_schedule_worksheet_title=final_schedule_worksheet_title,
                 )
-            )
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_partial_success(
                 interaction,
@@ -400,16 +540,28 @@ class ShiftRegisterSheetModal(Modal):
 
         try:
             shift_register = await self.shift_register_manager.get_sheet_config()
-            panel = await build_shift_register_settings_panel(
-                self.shift_register_manager,
-                shift_register,
-                is_save_action=True,
-                metadata=metadata,
-                latest_guide_enabled=self.latest_guide_enabled,
-                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
-                latest_guide_state_resolver=self.latest_guide_state_resolver,
-                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
-            )
+            if self.requires_existing_settings:
+                panel = await build_shift_register_settings_panel(
+                    self.shift_register_manager,
+                    shift_register,
+                    is_save_action=True,
+                    metadata=metadata,
+                    latest_guide_enabled=self.latest_guide_enabled,
+                    latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=self.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+                )
+            else:
+                team_source_content, team_source_view = await build_team_source_view(
+                    self.shift_register_manager,
+                    selected_channel_id=None,
+                    return_label="Set Later",
+                    is_save_action=True,
+                    latest_guide_enabled=self.latest_guide_enabled,
+                    latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                    latest_guide_state_resolver=self.latest_guide_state_resolver,
+                    latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+                )
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_refresh_failure(
                 interaction,
@@ -419,7 +571,14 @@ class ShiftRegisterSheetModal(Modal):
                 log=logger,
             )
             return
-        await send_current_panel_followup(interaction, panel)
+        if self.requires_existing_settings:
+            await send_current_panel_followup(interaction, panel)
+        else:
+            await send_settings_view_followup(
+                interaction,
+                content=team_source_content,
+                view=team_source_view,
+            )
         await refresh_latest_guide_after_settings_save(
             interaction,
             shift_register,
@@ -621,7 +780,10 @@ class ShiftRecruitmentRangeModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
         try:
-            await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                self.shift_register_manager.feature_channel.channel_id
+            ):
+                await self.shift_register_manager.update_recruitment_time_ranges(ranges)
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_storage_error(
                 interaction,
@@ -829,6 +991,271 @@ class ShiftRecruitmentRangeButton(Button):
         )
 
 
+class TeamSourceSelect(ChannelSelect):
+    """Draft a Team Register channel without saving it."""
+
+    def __init__(self, selected_channel_id: int | None = None) -> None:
+        super().__init__(
+            placeholder="Select a Team Register channel",
+            min_values=1,
+            max_values=1,
+            default_values=(
+                [Object(id=selected_channel_id)]
+                if selected_channel_id is not None
+                else None
+            ),
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        if not isinstance(self.view, TeamSourceView):
+            return
+        self.view.selected_channel_id = self.values[0].id
+        await interaction.response.edit_message(view=self.view)
+
+
+async def build_team_source_view(
+    shift_register_manager: ShiftRegisterManager,
+    *,
+    selected_channel_id: int | None,
+    return_label: str,
+    is_save_action: bool = False,
+    latest_guide_enabled: bool = False,
+    latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+    latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+    latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
+) -> tuple[str, TeamSourceView]:
+    """Build the optional Team Source selection view for a Shift Register."""
+    candidate_channel_ids = (
+        await shift_register_manager.get_team_source_candidate_channel_ids()
+    )
+    if not candidate_channel_ids:
+        return (
+            "⚠️ No Team Register is configured in this server. "
+            "Shift registrations will continue without Team references.",
+            TeamSourceView(
+                shift_register_manager,
+                has_candidates=False,
+                return_label=return_label,
+                is_save_action=is_save_action,
+                latest_guide_enabled=latest_guide_enabled,
+                latest_guide_toggle_callback=latest_guide_toggle_callback,
+                latest_guide_state_resolver=latest_guide_state_resolver,
+                latest_guide_refresh_callback=latest_guide_refresh_callback,
+            ),
+        )
+    return (
+        "Team Source is optional. Shift registrations will continue without Team "
+        "references until you apply one.",
+        TeamSourceView(
+            shift_register_manager,
+            selected_channel_id=(
+                selected_channel_id
+                if selected_channel_id is not None
+                else candidate_channel_ids[0]
+                if len(candidate_channel_ids) == 1
+                else None
+            ),
+            has_candidates=True,
+            return_label=return_label,
+            is_save_action=is_save_action,
+            latest_guide_enabled=latest_guide_enabled,
+            latest_guide_toggle_callback=latest_guide_toggle_callback,
+            latest_guide_state_resolver=latest_guide_state_resolver,
+            latest_guide_refresh_callback=latest_guide_refresh_callback,
+        ),
+    )
+
+
+class ReturnToShiftSettingsButton(Button):
+    def __init__(self, label: str) -> None:
+        super().__init__(label=label, style=ButtonStyle.secondary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        if not isinstance(self.view, TeamSourceView):
+            return
+        await interaction.response.defer()
+        try:
+            panel = await self.view.build_settings_panel()
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="shift_register_team_source_return",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+                clear_current_message=True,
+            )
+            return
+        view = prepare_replacement_settings_view(self.view, panel.view)
+        await interaction.edit_original_response(
+            content=None,
+            embed=panel.embed,
+            view=view,
+        )
+
+
+class ApplyTeamSourceButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="Apply & Repair", style=ButtonStyle.primary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        if not isinstance(self.view, TeamSourceView):
+            return
+        channel_id = self.view.selected_channel_id
+        if channel_id is None:
+            await interaction.response.send_message(
+                "⚠️ Select a Team Register channel first.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        manager = self.view.shift_register_manager
+        try:
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                manager.feature_channel.channel_id
+            ):
+                resolution = await manager.select_team_source_and_repair(channel_id)
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="shift_register_team_source_repair",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
+
+        if resolution.status is not TeamSourceStatus.AVAILABLE:
+            await interaction.followup.send(
+                _team_source_apply_error(resolution.status),
+                ephemeral=True,
+            )
+            return
+
+        try:
+            panel = await self.view.build_settings_panel()
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_refresh_failure(
+                interaction,
+                exc,
+                operation="shift_register_team_source_refresh",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
+        await interaction.followup.send(
+            "✅ Team source saved and references repaired.",
+            embed=panel.embed,
+            view=panel.view,
+            ephemeral=True,
+        )
+
+
+class TeamSourceView(SettingsTimeoutView):
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        selected_channel_id: int | None = None,
+        has_candidates: bool = True,
+        return_label: str = "Back to Settings",
+        is_save_action: bool = False,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
+    ) -> None:
+        super().__init__()
+        self.shift_register_manager = shift_register_manager
+        self.selected_channel_id = selected_channel_id
+        self.is_save_action = is_save_action
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
+        if has_candidates:
+            self.add_item(TeamSourceSelect(selected_channel_id))
+            self.add_item(ApplyTeamSourceButton())
+        self.add_item(ReturnToShiftSettingsButton(return_label))
+
+    async def build_settings_panel(self) -> SettingsPanel:
+        shift_register = await self.shift_register_manager.get_sheet_config()
+        return await build_shift_register_settings_panel(
+            self.shift_register_manager,
+            shift_register,
+            is_save_action=self.is_save_action,
+            latest_guide_enabled=self.latest_guide_enabled,
+            latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+            latest_guide_state_resolver=self.latest_guide_state_resolver,
+            latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+        )
+
+
+class ManageTeamSourceButton(Button):
+    def __init__(
+        self,
+        shift_register_manager: ShiftRegisterManager,
+        *,
+        selected_channel_id: int | None = None,
+        latest_guide_enabled: bool = False,
+        latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
+        latest_guide_state_resolver: LatestGuideStateResolver | None = None,
+        latest_guide_refresh_callback: LatestGuideRefreshCallback | None = None,
+    ) -> None:
+        super().__init__(label="Edit Team Source", style=ButtonStyle.secondary)
+        self.shift_register_manager = shift_register_manager
+        self.selected_channel_id = selected_channel_id
+        self.latest_guide_enabled = latest_guide_enabled
+        self.latest_guide_toggle_callback = latest_guide_toggle_callback
+        self.latest_guide_state_resolver = latest_guide_state_resolver
+        self.latest_guide_refresh_callback = latest_guide_refresh_callback
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        await interaction.response.defer()
+        try:
+            content, view = await build_team_source_view(
+                self.shift_register_manager,
+                selected_channel_id=self.selected_channel_id,
+                return_label="Back to Settings",
+                latest_guide_enabled=self.latest_guide_enabled,
+                latest_guide_toggle_callback=self.latest_guide_toggle_callback,
+                latest_guide_state_resolver=self.latest_guide_state_resolver,
+                latest_guide_refresh_callback=self.latest_guide_refresh_callback,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await send_settings_storage_error(
+                interaction,
+                exc,
+                operation="shift_register_team_source_candidates",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
+        view = prepare_replacement_settings_view(self.view, view)
+        await interaction.edit_original_response(
+            content=content,
+            embed=None,
+            view=view,
+        )
+
+
+def _team_source_apply_error(status: TeamSourceStatus) -> str:
+    if status is TeamSourceStatus.AMBIGUOUS:
+        return "⚠️ More than one Team Register matches this channel."
+    if status is TeamSourceStatus.MISSING:
+        return "⚠️ No configured Team Register was found in this channel."
+    return "⚠️ The selected Team source or Summary worksheet is invalid."
+
+
 class ShiftTimelineEditAgainButton(Button):
     """Button that reopens an invalid Shift Timeline modal submission."""
 
@@ -1000,6 +1427,7 @@ class ShiftRegisterView(SettingsTimeoutView):
         draft_worksheet_title: str | None = None,
         final_schedule_worksheet_title: str | None = None,
         final_schedule_anchor_cell: str = "A1",
+        selected_team_channel_id: int | None = None,
         latest_guide_enabled: bool = False,
         latest_guide_toggle_callback: LatestGuideToggleCallback | None = None,
         latest_guide_state_resolver: LatestGuideStateResolver | None = None,
@@ -1038,6 +1466,16 @@ class ShiftRegisterView(SettingsTimeoutView):
         self.add_item(button)
         if has_existing_settings:
             self.add_item(
+                ManageTeamSourceButton(
+                    shift_register_manager,
+                    selected_channel_id=selected_team_channel_id,
+                    latest_guide_enabled=latest_guide_enabled,
+                    latest_guide_toggle_callback=latest_guide_toggle_callback,
+                    latest_guide_state_resolver=latest_guide_state_resolver,
+                    latest_guide_refresh_callback=latest_guide_refresh_callback,
+                )
+            )
+            self.add_item(
                 ShiftTimelineButton(
                     shift_register_manager,
                     latest_guide_enabled=latest_guide_enabled,
@@ -1066,6 +1504,7 @@ def build_current_settings_embed(
     *,
     is_save_action: bool = False,
     latest_guide_enabled: bool = False,
+    team_source: TeamSourceResolution,
 ) -> Embed:
     """
     Build an embed showing the current shift register settings.
@@ -1081,6 +1520,8 @@ def build_current_settings_embed(
         color (int): Embed color.
         is_save_action (bool):
             If True, this is a settings save, otherwise a settings query (view).
+        team_source (TeamSourceResolution):
+            Resolved same-guild Team source status.
 
     Returns:
         Embed: The constructed embed.
@@ -1118,6 +1559,11 @@ def build_current_settings_embed(
     embed.add_field(
         name="Worksheets & IDs",
         value="\n".join(worksheet_rows),
+        inline=False,
+    )
+    embed.add_field(
+        name="Team Source",
+        value=_format_team_source(team_source),
         inline=False,
     )
 

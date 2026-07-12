@@ -1,7 +1,10 @@
 import datetime as dt
 
 from tortoise import fields
-from tortoise.fields.relational import ForeignKeyRelation
+from tortoise.fields.relational import (
+    ForeignKeyNullableRelation,
+    ForeignKeyRelation,
+)
 
 from models.base.sheet_config_base import SheetConfigBase
 from models.feature_channel import FeatureChannel
@@ -10,6 +13,14 @@ from models.feature_channel import FeatureChannel
 class ShiftRegisterConfig(SheetConfigBase):
     feature_channel: ForeignKeyRelation[FeatureChannel] = fields.ForeignKeyField(
         "models.FeatureChannel", related_name="shift_register"
+    )
+    team_source_feature_channel: ForeignKeyNullableRelation[FeatureChannel] = (
+        fields.ForeignKeyField(
+            "models.FeatureChannel",
+            related_name="source_for_shift_registers",
+            null=True,
+            on_delete=fields.SET_NULL,
+        )
     )
 
     entry_worksheet_id = fields.BigIntField(
@@ -58,6 +69,10 @@ class ShiftRegisterConfig(SheetConfigBase):
 
     class Meta:
         table = "shift_register"
+
+    @property
+    def landing_worksheet_id(self) -> int:
+        return self.entry_worksheet_id
 
     def get_worksheet_ids(self) -> list[int]:
         return [
