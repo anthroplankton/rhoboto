@@ -825,6 +825,7 @@ class DraftNotesTeamSource:
     worksheet_title: str
     import_last_column: str
     username_header: str
+    roles_header: str
     main_isv_header: str
     main_power_header: str
     encore_isv_header: str | None
@@ -835,6 +836,20 @@ def _draft_team_value(isv: float | None, power: float | None) -> str:
     if isv is None and power is None:
         return ""
     return "/".join("—" if value is None else f"{value:g}" for value in (isv, power))
+
+
+def _draft_identity_bindings(entry_worksheet_title: str) -> str:
+    title = entry_worksheet_title.replace("'", "''")
+    return (
+        f"usernames, IFERROR(FILTER('{title}'!A3:A, "
+        f'\'{title}\'!A3:A <> ""), ""), '
+        f"names, IFERROR(FILTER('{title}'!B3:B, "
+        f'\'{title}\'!A3:A <> ""), ""), '
+        'pattern, "⟨@[a-z0-9._]{2,32}⟩$", '
+        "keys, MAP(names, usernames, LAMBDA(name, username, "
+        "IF(OR(SUMPRODUCT(N(names = name)) > 1, REGEXMATCH(name, pattern)), "
+        'name & " ⟨@" & username & "⟩", name))), '
+    )
 
 
 class DraftWorksheetContent:
@@ -856,6 +871,11 @@ class DraftWorksheetContent:
         "付きます。シフトを調整するときは、名前全体をコピーしてください。"
     )
     TEAM_VALUE_LEGEND: ClassVar[str] = "編成欄の表示順：実効値/総合力"  # noqa: RUF001
+    HONSO_CANDIDATE_HEADER: ClassVar[str] = "本走候補（実効値：高→低）"  # noqa: RUF001
+    HONSO_FALLBACK_HEADER: ClassVar[str] = "本走候補（登録順）"  # noqa: RUF001
+    ENCORE_CANDIDATE_HEADER: ClassVar[str] = "アンコ候補（実効値：高→低）"  # noqa: RUF001
+    UNREGISTERED_HEADER: ClassVar[str] = "編成未登録"
+    CANDIDATE_THRESHOLD_LABEL: ClassVar[str] = "アンコ候補閾値"
     NOTES_COLUMNS: ClassVar[tuple[str, ...]] = (
         "名前",
         "シフト合計（h）",  # noqa: RUF001
@@ -904,6 +924,268 @@ class DraftWorksheetContent:
                 row[column] = schedule.display_for(assignment, supporter_slot)
             rows.append(row)
         return pd.DataFrame(rows, columns=cls.COLUMNS)
+
+    @classmethod
+    def candidate_formula(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        entry_worksheet_title: str,
+        recruitment_slots: set[int],
+        encore_power_threshold_cell: str,
+        team_source: DraftNotesTeamSource | None,
+    ) -> str:
+        """Build the live per-hour candidate block spill formula."""
+        title = entry_worksheet_title.replace("'", "''")
+        hour_slots = "{" + ";".join(map(str, schedule.hours or [0])) + "}"
+        active_slots = "{" + ";".join(map(str, sorted(recruitment_slots))) + "}"
+        runner = _formula_string(schedule.runner or "")
+        if team_source is None:
+            team_bindings = (
+                "mainIsvs, MAP(usernames, LAMBDA(username, 0)), "
+                "effectiveIsvs, MAP(usernames, LAMBDA(username, 0)), "
+                "honsoEligible, MAP(usernames, LAMBDA(username, TRUE)), "
+                "encoreEligible, MAP(usernames, LAMBDA(username, FALSE)), "
+                "unregistered, MAP(usernames, LAMBDA(username, FALSE)), "
+            )
+            honso_header = cls.HONSO_FALLBACK_HEADER
+        else:
+            source_title = team_source.worksheet_title.replace("'", "''")
+            source_range = _formula_string(
+                f"'{source_title}'!A:{team_source.import_last_column}"
+            )
+            encore_isv_binding = (
+                (
+                    "encoreIsvHeader, "
+                    f"{_formula_string(team_source.encore_isv_header)}, "
+                    "encoreIsvValues, CHOOSECOLS(team, XMATCH(encoreIsvHeader, "
+                    "teamHeaders, 0)), "
+                    "encoreIsvs, MAP(usernames, LAMBDA(username, "
+                    'XLOOKUP(username, teamUsernames, encoreIsvValues, ""))), '
+                )
+                if team_source.encore_isv_header is not None
+                else 'encoreIsvs, MAP(usernames, LAMBDA(username, "")), '
+            )
+            encore_power_binding = (
+                (
+                    "encorePowerHeader, "
+                    f"{_formula_string(team_source.encore_power_header)}, "
+                    "encorePowerValues, CHOOSECOLS(team, XMATCH(encorePowerHeader, "
+                    "teamHeaders, 0)), "
+                    "encorePowers, MAP(usernames, LAMBDA(username, "
+                    'XLOOKUP(username, teamUsernames, encorePowerValues, ""))), '
+                )
+                if team_source.encore_power_header is not None
+                else 'encorePowers, MAP(usernames, LAMBDA(username, "")), '
+            )
+            team_bindings = (
+                f"teamSourceUrl, {_formula_string(team_source.sheet_url)}, "
+                f"team, IMPORTRANGE(teamSourceUrl, {source_range}), "
+                f"teamUsernameHeader, {_formula_string(team_source.username_header)}, "
+                f"rolesHeader, {_formula_string(team_source.roles_header)}, "
+                f"mainIsvHeader, {_formula_string(team_source.main_isv_header)}, "
+                f"mainPowerHeader, {_formula_string(team_source.main_power_header)}, "
+                "teamHeaders, CHOOSEROWS(team, 1), "
+                "teamUsernames, CHOOSECOLS(team, XMATCH(teamUsernameHeader, "
+                "teamHeaders, 0)), "
+                "roleValues, CHOOSECOLS(team, XMATCH(rolesHeader, teamHeaders, 0)), "
+                "mainIsvValues, CHOOSECOLS(team, XMATCH(mainIsvHeader, "
+                "teamHeaders, 0)), "
+                "mainPowerValues, CHOOSECOLS(team, XMATCH(mainPowerHeader, "
+                "teamHeaders, 0)), "
+                "roles, MAP(usernames, LAMBDA(username, "
+                'XLOOKUP(username, teamUsernames, roleValues, ""))), '
+                "mainIsvs, MAP(usernames, LAMBDA(username, "
+                'XLOOKUP(username, teamUsernames, mainIsvValues, ""))), '
+                "mainPowers, MAP(usernames, LAMBDA(username, "
+                'XLOOKUP(username, teamUsernames, mainPowerValues, ""))), '
+                f"{encore_isv_binding}{encore_power_binding}"
+                "effectiveIsvs, MAP(mainIsvs, encoreIsvs, encorePowers, "
+                "LAMBDA(mainIsv, encoreIsv, encorePower, "
+                'IF(OR(encoreIsv <> "", encorePower <> ""), encoreIsv, mainIsv))), '
+                "effectivePowers, MAP(mainPowers, encoreIsvs, encorePowers, "
+                "LAMBDA(mainPower, encoreIsv, encorePower, "
+                'IF(OR(encoreIsv <> "", encorePower <> ""), '
+                "encorePower, mainPower))), "
+                'honsoEligible, MAP(mainIsvs, LAMBDA(mainIsv, mainIsv <> "")), '
+                "encoreEligible, MAP(roles, effectivePowers, effectiveIsvs, "
+                "LAMBDA(role, effectivePower, effectiveIsv, "
+                'AND(role <> "", effectivePower <> "", effectivePower > '
+                'threshold, effectiveIsv <> ""))), '
+                'unregistered, MAP(mainIsvs, LAMBDA(mainIsv, mainIsv = "")), '
+            )
+            honso_header = cls.HONSO_CANDIDATE_HEADER
+        return (
+            "=LET("
+            f"threshold, IF(ISNUMBER({encore_power_threshold_cell}), "
+            f"{encore_power_threshold_cell}, NA()), "
+            f"{_draft_identity_bindings(entry_worksheet_title)}"
+            f"availability, IFERROR(FILTER('{title}'!F3:AI, "
+            f"'{title}'!A3:A <> \"\"), MAKEARRAY(1, 30, "
+            "LAMBDA(row, column, 0))), "
+            "entryOrder, SEQUENCE(ROWS(usernames)), "
+            f"hourSlots, {hour_slots}, "
+            f"recruitmentSlots, {active_slots}, "
+            f'runnerEligible, N(usernames <> "") * N(names <> {runner}), '
+            f"{team_bindings}"
+            "activeHour, LAMBDA(hour, ISNUMBER(XMATCH(hour, recruitmentSlots, 0))), "
+            "availableMask, LAMBDA(hour, N(activeHour(hour)) * runnerEligible * "
+            "N(CHOOSECOLS(availability, hour + 1) = 1)), "
+            "honsoMask, LAMBDA(hour, availableMask(hour) * N(honsoEligible)), "
+            "encoreMask, LAMBDA(hour, availableMask(hour) * N(encoreEligible)), "
+            "unregisteredMask, LAMBDA(hour, availableMask(hour) * N(unregistered)), "
+            "honsoCounts, MAP(hourSlots, LAMBDA(hour, SUMPRODUCT(honsoMask(hour)))), "
+            "encoreCounts, MAP(hourSlots, LAMBDA(hour, SUMPRODUCT(encoreMask(hour)))), "
+            "unregisteredCounts, MAP(hourSlots, LAMBDA(hour, "
+            "SUMPRODUCT(unregisteredMask(hour)))), "
+            "honsoWidth, MAX(1, MAX(honsoCounts)), "
+            "encoreWidth, MAX(1, MAX(encoreCounts)), "
+            "unregisteredWidth, MAX(1, MAX(unregisteredCounts)), "
+            "candidateNames, LAMBDA(mask, scores, IFERROR(CHOOSECOLS(SORT("
+            "FILTER(HSTACK(keys, scores, entryOrder), mask), "
+            '2, FALSE, 3, TRUE), 1), "")), '
+            "honsoBlock, MAKEARRAY(ROWS(hourSlots) + 1, honsoWidth, "
+            "LAMBDA(row, column, IF(row = 1, "
+            f'IF(column = 1, {_formula_string(honso_header)}, ""), '
+            'IF(column > INDEX(honsoCounts, row - 1), "", INDEX('
+            "candidateNames(honsoMask(INDEX(hourSlots, row - 1)), mainIsvs), "
+            "column))))), "
+            "encoreBlock, MAKEARRAY(ROWS(hourSlots) + 1, encoreWidth, "
+            "LAMBDA(row, column, IF(row = 1, "
+            f'IF(column = 1, {_formula_string(cls.ENCORE_CANDIDATE_HEADER)}, ""), '
+            'IF(column > INDEX(encoreCounts, row - 1), "", INDEX('
+            "candidateNames(encoreMask(INDEX(hourSlots, row - 1)), "
+            "effectiveIsvs), column))))), "
+            "unregisteredBlock, MAKEARRAY(ROWS(hourSlots) + 1, unregisteredWidth, "
+            "LAMBDA(row, column, IF(row = 1, "
+            f'IF(column = 1, {_formula_string(cls.UNREGISTERED_HEADER)}, ""), '
+            'IF(column > INDEX(unregisteredCounts, row - 1), "", INDEX('
+            "candidateNames(unregisteredMask(INDEX(hourSlots, row - 1)), "
+            "MAP(usernames, LAMBDA(username, 0))), column))))), "
+            "blankColumn, MAKEARRAY(ROWS(hourSlots) + 1, 1, "
+            'LAMBDA(row, column, "")), '
+            "HSTACK(honsoBlock, blankColumn, encoreBlock, blankColumn, "
+            "unregisteredBlock)"
+            ")"
+        )
+
+    @classmethod
+    def lookup_updates(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        old_lookup_row: int | None,
+        entry_worksheet_title: str,
+        team_source: DraftNotesTeamSource | None,
+    ) -> tuple[list[dict[str, object]], set[str]]:
+        """Build exact reverse-lookup cleanup, labels, and formula updates."""
+        lookup_row = len(schedule.assignments) + 4
+        input_cell = f"K{lookup_row}"
+        status_cell = f"L{lookup_row}"
+        time_cell = f"K{lookup_row + 1}"
+        message_cell = f"K{lookup_row + 2}"
+        team_label_cell = f"J{lookup_row + 3}"
+        team_cell = f"J{lookup_row + 4}"
+        updates: list[dict[str, object]] = []
+        if old_lookup_row is not None:
+            updates.append(
+                {
+                    "range": f"J{old_lookup_row}:L{old_lookup_row + 4}",
+                    "values": [],
+                }
+            )
+        identity_bindings = _draft_identity_bindings(entry_worksheet_title)
+        title = entry_worksheet_title.replace("'", "''")
+        status_formula = (
+            "=LET("
+            f"{identity_bindings}"
+            f"inputName, {input_cell}, "
+            'IF(inputName = "", "", IF(ISNUMBER(XMATCH(inputName, keys, 0)), "", '
+            '"⚠️ 参加者を特定できません"))'
+            ")"
+        )
+        time_formula = (
+            "=LET("
+            f"{identity_bindings}"
+            f"inputName, {input_cell}, "
+            'matchedUsername, XLOOKUP(inputName, keys, usernames, ""), '
+            "participantRow, IFERROR(XMATCH(matchedUsername, usernames, 0), 0), "
+            f"availability, IFERROR(FILTER('{title}'!F3:AI, "
+            f"'{title}'!A3:A <> \"\"), MAKEARRAY(1, 30, "
+            "LAMBDA(row, column, 0))), "
+            "selected, IF(participantRow = 0, MAKEARRAY(1, 30, "
+            "LAMBDA(row, column, 0)), CHOOSEROWS(availability, participantRow)), "
+            "slots, IFERROR(FILTER(SEQUENCE(30, 1, 0), "
+            'TRANSPOSE(selected) = 1), ""), '
+            'slotCount, SUMPRODUCT(N(slots <> "")), '
+            'IF(OR(inputName = "", participantRow = 0, slotCount = 0), "", LET('
+            "positions, SEQUENCE(ROWS(slots)), "
+            "starts, MAP(positions, LAMBDA(i, IF(i = 1, 1, "
+            "--(INDEX(slots, i) <> INDEX(slots, i - 1) + 1)))), "
+            "groups, SCAN(0, starts, LAMBDA(total, start, total + start)), "
+            "groupIds, UNIQUE(groups), "
+            'TEXTJOIN("・", TRUE, MAP(groupIds, LAMBDA(group, '
+            'MIN(FILTER(slots, groups = group)) & "-" & '
+            "(MAX(FILTER(slots, groups = group)) + 1))))))"
+            ")"
+        )
+        message_formula = (
+            "=LET("
+            f"{identity_bindings}"
+            f"inputName, {input_cell}, "
+            'matchedUsername, XLOOKUP(inputName, keys, usernames, ""), '
+            f"messages, IFERROR(FILTER('{title}'!AJ3:AJ, "
+            f'\'{title}\'!A3:A <> ""), ""), '
+            'IF(inputName = "", "", XLOOKUP(matchedUsername, usernames, '
+            'messages, ""))'
+            ")"
+        )
+        updates.extend(
+            [
+                {
+                    "range": f"J{lookup_row}:K{lookup_row}",
+                    "values": [["名前を貼り付け", ""]],
+                },
+                {"range": status_cell, "values": [[status_formula]]},
+                {"range": f"J{lookup_row + 1}", "values": [["シフト時間"]]},
+                {"range": time_cell, "values": [[time_formula]]},
+                {
+                    "range": f"J{lookup_row + 2}",
+                    "values": [["シフト元メッセージ"]],
+                },
+                {"range": message_cell, "values": [[message_formula]]},
+            ]
+        )
+        formula_ranges = {status_cell, time_cell, message_cell}
+        if team_source is not None:
+            source_title = team_source.worksheet_title.replace("'", "''")
+            source_range = _formula_string(
+                f"'{source_title}'!A:{team_source.import_last_column}"
+            )
+            team_formula = (
+                "=LET("
+                f"{identity_bindings}"
+                f"inputName, {input_cell}, "
+                'matchedUsername, XLOOKUP(inputName, keys, usernames, ""), '
+                f"team, IMPORTRANGE({_formula_string(team_source.sheet_url)}, "
+                f"{source_range}), "
+                "teamHeaders, CHOOSEROWS(team, 1), "
+                "teamUsernames, CHOOSECOLS(team, XMATCH("
+                f"{_formula_string(team_source.username_header)}, teamHeaders, 0)), "
+                'matchCount, IF(matchedUsername = "", 0, '
+                "SUMPRODUCT(N(teamUsernames = matchedUsername))), "
+                "blankRow, MAKEARRAY(1, COLUMNS(teamHeaders), "
+                'LAMBDA(row, column, "")), '
+                "matchedRow, IF(matchCount = 0, blankRow, IF(matchCount = 1, "
+                "XLOOKUP(matchedUsername, teamUsernames, team, blankRow), NA())), "
+                'VSTACK(teamHeaders, IF(OR(inputName = "", '
+                'matchedUsername = ""), blankRow, matchedRow))'
+                ")"
+            )
+            updates.append({"range": team_label_cell, "values": [["編成一覧"]]})
+            updates.append({"range": team_cell, "values": [[team_formula]]})
+            formula_ranges.add(team_cell)
+        return updates, formula_ranges
 
     @classmethod
     def notes_formula(
@@ -987,16 +1269,9 @@ class DraftWorksheetContent:
             f"shifts, C2:G{last_row}, "
             f"encore, C2:C{last_row}, "
             f"hourSlots, {hour_slots}, "
-            f"usernames, IFERROR(FILTER('{title}'!A3:A, "
-            f'\'{title}\'!A3:A <> ""), ""), '
-            f"names, IFERROR(FILTER('{title}'!B3:B, "
-            f'\'{title}\'!A3:A <> ""), ""), '
+            f"{_draft_identity_bindings(entry_worksheet_title)}"
             f"messages, IFERROR(FILTER('{title}'!AJ3:AJ, "
             f'\'{title}\'!A3:A <> ""), ""), '
-            'pattern, "⟨@[a-z0-9._]{2,32}⟩$", '
-            "keys, MAP(names, usernames, LAMBDA(name, username, "
-            "IF(OR(SUMPRODUCT(N(names = name)) > 1, REGEXMATCH(name, pattern)), "
-            'name & " ⟨@" & username & "⟩", name))), '
             'people, IFERROR(UNIQUE(TOCOL(shifts, 1)), ""), '
             "knownMask, MAP(people, LAMBDA(person, "
             "ISNUMBER(XMATCH(person, keys, 0)))), "

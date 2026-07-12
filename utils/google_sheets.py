@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import NoReturn
+import re
+from typing import TYPE_CHECKING, NoReturn
 
 import gspread_asyncio
 import pandas as pd
@@ -13,6 +14,19 @@ from utils.google_sheets_errors import (
     GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS,
     GoogleSheetsError,
     classify_google_sheets_exception,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+RGB_CHANNEL_MAX = 0xFF
+BORDER_NAMES = (
+    "top",
+    "bottom",
+    "left",
+    "right",
+    "innerHorizontal",
+    "innerVertical",
 )
 
 
@@ -148,8 +162,11 @@ class AsyncioGspreadWorksheet:
         data: list[dict[str, object]],
         *,
         formula_ranges: set[str],
+        background_updates: Sequence[tuple[str, str]] = (),
+        border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        frozen_column_count: int | None = None,
     ) -> None:
-        """Atomically write ranges with explicit cell value types."""
+        """Atomically write typed values plus narrow grid formatting."""
         requests = []
         for item in data:
             range_name = str(item["range"])
@@ -176,6 +193,51 @@ class AsyncioGspreadWorksheet:
                             for row in values
                         ],
                         "fields": "userEnteredValue",
+                    }
+                }
+            )
+        for range_name, color in background_updates:
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": a1_range_to_grid_range(range_name, self.id),
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColorStyle": {"rgbColor": _hex_rgb(color)}
+                            }
+                        },
+                        "fields": "userEnteredFormat.backgroundColorStyle",
+                    }
+                }
+            )
+        for range_name, color, style, sides in border_updates:
+            border = (
+                {"style": "NONE"}
+                if color is None
+                else {
+                    "style": style,
+                    "colorStyle": {"rgbColor": _hex_rgb(color)},
+                }
+            )
+            requests.append(
+                {
+                    "updateBorders": {
+                        "range": a1_range_to_grid_range(range_name, self.id),
+                        **dict.fromkeys(sides, border),
+                    }
+                }
+            )
+        if frozen_column_count is not None:
+            requests.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": self.id,
+                            "gridProperties": {
+                                "frozenColumnCount": frozen_column_count
+                            },
+                        },
+                        "fields": "gridProperties.frozenColumnCount",
                     }
                 }
             )
@@ -223,6 +285,16 @@ def _extended_value(value: object, *, formulas: bool) -> dict[str, object]:
     if isinstance(value, int | float):
         return {"numberValue": value}
     return {"stringValue": "" if value is None else str(value)}
+
+
+def _hex_rgb(value: str) -> dict[str, float]:
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+        msg = f"Invalid RGB color: {value!r}."
+        raise ValueError(msg)
+    return {
+        name: int(value[start : start + 2], 16) / RGB_CHANNEL_MAX
+        for name, start in (("red", 1), ("green", 3), ("blue", 5))
+    }
 
 
 class GoogleSheet:

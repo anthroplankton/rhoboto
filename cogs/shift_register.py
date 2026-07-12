@@ -481,6 +481,9 @@ class ShiftRegister(
             )
         lines.append(f"- 募集時間【{recruitment_ranges.announcement_display()}】")
         lines.append("- 已排入（安可｜本走；待機）：")  # noqa: RUF001
+        if not schedule.display_names:
+            lines[-1] += "なし"
+            report_assignments = []
         for assignment in report_assignments:
             encore_username = assignment.supporter_usernames_by_slot.get(
                 ENCORE_SUPPORTER_SLOT

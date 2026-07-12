@@ -577,6 +577,7 @@ async def test_shift_manager_reads_draft_profiles_from_selected_team_source(
         worksheet_title="Team Summary",
         import_last_column="G",
         username_header="username",
+        roles_header="encore_roles",
         main_isv_header="Main Team ISV",
         main_power_header="Main Team Power",
         encore_isv_header="Encore Team ISV",

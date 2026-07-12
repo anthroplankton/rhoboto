@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, overload, override
 
 from models.feature_channel import FeatureChannel
 from models.team_register import TeamRegisterConfig
-from utils.google_sheets import GoogleSheet
+from utils.google_sheets import BORDER_NAMES, GoogleSheet
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.structs_base import validate_anchor_cell
 from utils.team_register_structs import Summary, TeamRegisterGoogleSheetsMetadata
@@ -28,6 +28,7 @@ from utils.shift_register_structs import (
     EntryWorksheetContent,
     RecruitmentTimeRanges,
     Shift,
+    ShiftParser,
     ShiftRegisterGoogleSheetsMetadata,
     build_team_summary_formula,
     column_letter,
@@ -41,6 +42,7 @@ from utils.storage_errors import (
 
 ENTRY_READ_RANGES = ["1:2", "A3:C"]
 SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
+OUTER_BORDER_SIDES = ("top", "bottom", "left", "right")
 
 
 class TeamSourceStatus(StrEnum):
@@ -193,6 +195,7 @@ class ShiftRegisterManager(
             worksheet_title=summary_title,
             import_last_column=columns.import_last_column,
             username_header="username",
+            roles_header="encore_roles",
             main_isv_header=Summary.isv_title(main_title),
             main_power_header=Summary.power_title(main_title),
             encore_isv_header=(
@@ -612,6 +615,21 @@ class ShiftRegisterManager(
             error.__cause__ = exc
             raise error from exc
 
+        (
+            old_axis_rows,
+            old_threshold_labels,
+            old_lookup_labels,
+        ) = await draft_worksheet.batch_get_values(["A1:A31", "I1:I32", "J1:J37"])
+        old_last_row = _old_draft_last_row(old_axis_rows)
+        old_threshold_row = _old_candidate_threshold_row(
+            old_last_row=old_last_row,
+            threshold_labels=old_threshold_labels,
+        )
+        old_lookup_row = _old_lookup_row(
+            old_last_row=old_last_row,
+            lookup_labels=old_lookup_labels,
+        )
+
         shift_register_config = await self.get_sheet_config()
         recruitment_ranges = RecruitmentTimeRanges.from_json(
             shift_register_config.recruitment_time_ranges
@@ -650,12 +668,28 @@ class ShiftRegisterManager(
         )
         draft_df = DraftWorksheetContent.from_schedule(schedule)
         team_source_warning = _draft_team_source_warning(profile_resolution.status)
+        new_last_row = len(schedule.assignments) + 1
+        threshold_row = new_last_row + 1
+        threshold_cell = f"J{threshold_row}"
         notes_formula = DraftWorksheetContent.notes_formula(
             schedule,
             entry_worksheet_title=entry_worksheet.title,
             recruitment_time_range=recruitment_time_range,
             team_source=profile_resolution.notes_team_source,
             team_source_warning=team_source_warning,
+        )
+        candidate_formula = DraftWorksheetContent.candidate_formula(
+            schedule,
+            entry_worksheet_title=entry_worksheet.title,
+            recruitment_slots=active_slots,
+            encore_power_threshold_cell=threshold_cell,
+            team_source=profile_resolution.notes_team_source,
+        )
+        lookup_updates, lookup_formula_ranges = DraftWorksheetContent.lookup_updates(
+            schedule,
+            old_lookup_row=old_lookup_row,
+            entry_worksheet_title=entry_worksheet.title,
+            team_source=profile_resolution.notes_team_source,
         )
         notes_snapshot = DraftWorksheetContent.notes_snapshot(
             schedule,
@@ -670,6 +704,38 @@ class ShiftRegisterManager(
         )
         notes_row = len(schedule.assignments) + 3
         notes_cell = f"A{notes_row}"
+        notes_clear_row = _draft_notes_clear_row(
+            old_last_row=old_last_row,
+            new_notes_row=notes_row,
+        )
+        background_updates, border_updates = _draft_format_updates(
+            schedule=schedule,
+            active_slots=active_slots,
+            old_last_row=old_last_row,
+            new_last_row=new_last_row,
+            old_threshold_row=old_threshold_row,
+            threshold_row=threshold_row,
+            old_lookup_row=old_lookup_row,
+            lookup_row=notes_row + 1,
+            has_team_source=profile_resolution.notes_team_source is not None,
+        )
+        candidate_control_updates = []
+        if old_threshold_row is not None:
+            candidate_control_updates.append(
+                {"range": f"I{old_threshold_row}:K{old_threshold_row}", "values": []}
+            )
+        candidate_control_updates.append(
+            {
+                "range": f"I{threshold_row}:K{threshold_row}",
+                "values": [
+                    [
+                        DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL,
+                        encore_power_threshold,
+                        "万総合力",
+                    ]
+                ],
+            }
+        )
         await draft_worksheet.batch_update_typed_values(
             [
                 {
@@ -679,10 +745,16 @@ class ShiftRegisterManager(
                         *draft_df.fillna("").to_numpy().tolist(),
                     ],
                 },
-                {"range": f"H{notes_row}:H", "values": []},
+                {"range": f"H{notes_clear_row}:H", "values": []},
+                *candidate_control_updates,
                 {"range": notes_cell, "values": [[notes_formula]]},
+                {"range": "I1", "values": [[candidate_formula]]},
+                *lookup_updates,
             ],
-            formula_ranges={notes_cell},
+            formula_ranges={notes_cell, "I1", *lookup_formula_ranges},
+            background_updates=background_updates,
+            border_updates=border_updates,
+            frozen_column_count=1,
         )
         self.logger.info(
             "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
@@ -698,6 +770,163 @@ class ShiftRegisterManager(
             notes_snapshot=notes_snapshot,
             unregistered_usernames=unregistered_usernames,
         )
+
+
+def _old_draft_last_row(rows: list[list[object]]) -> int:
+    if not rows or not rows[0] or rows[0][0] != DraftWorksheetContent.JST_COLUMN:
+        return 1
+    valid_labels = set(ShiftParser.HOUR_LABELS)
+    last_row = 1
+    for row_number, row in enumerate(rows[1:], start=2):
+        if not row or row[0] not in valid_labels:
+            break
+        last_row = row_number
+    return last_row
+
+
+def _old_candidate_threshold_row(
+    *,
+    old_last_row: int,
+    threshold_labels: list[list[object]],
+) -> int | None:
+    row = old_last_row + 1
+    value = (
+        threshold_labels[row - 1][0]
+        if row <= len(threshold_labels) and threshold_labels[row - 1]
+        else ""
+    )
+    return row if value == DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL else None
+
+
+def _old_lookup_row(
+    *,
+    old_last_row: int,
+    lookup_labels: list[list[object]],
+) -> int | None:
+    expected = ("名前を貼り付け", "シフト時間", "シフト元メッセージ")
+    for lookup_row in (old_last_row + 3, old_last_row + 2):
+        actual = tuple(
+            lookup_labels[row - 1][0]
+            if row <= len(lookup_labels) and lookup_labels[row - 1]
+            else ""
+            for row in range(lookup_row, lookup_row + len(expected))
+        )
+        if actual == expected:
+            return lookup_row
+    return None
+
+
+def _draft_notes_clear_row(*, old_last_row: int, new_notes_row: int) -> int:
+    return min(old_last_row + 2, new_notes_row)
+
+
+def _draft_format_updates(  # noqa: PLR0913
+    *,
+    schedule: DraftSchedule,
+    active_slots: set[int],
+    old_last_row: int,
+    new_last_row: int,
+    old_threshold_row: int | None,
+    threshold_row: int,
+    old_lookup_row: int | None,
+    lookup_row: int,
+    has_team_source: bool,
+) -> tuple[
+    list[tuple[str, str]],
+    list[tuple[str, str | None, str, tuple[str, ...]]],
+]:
+    format_last_row = max(old_last_row, new_last_row)
+    background_updates = [(f"A1:G{format_last_row}", "#FFFFFF")]
+    background_updates.extend(
+        (f"B{row}:G{row}", "#CCCCCC")
+        for row, assignment in enumerate(schedule.assignments, start=2)
+        if assignment.hour not in active_slots
+    )
+    if old_threshold_row is not None:
+        background_updates.append(
+            (f"I{old_threshold_row}:K{old_threshold_row}", "#FFFFFF")
+        )
+    background_updates.extend(
+        [
+            (f"I{threshold_row}", "#A4C2F4"),
+            (f"J{threshold_row}", "#FFF2CC"),
+            (f"K{threshold_row}", "#A4C2F4"),
+        ]
+    )
+    if old_lookup_row is not None:
+        background_updates.append(
+            (f"J{old_lookup_row}:L{old_lookup_row + 4}", "#FFFFFF")
+        )
+    background_updates.extend(
+        [
+            (f"J{lookup_row}:L{lookup_row + 2}", "#FFFFFF"),
+            (f"J{lookup_row}:J{lookup_row + 2}", "#A4C2F4"),
+            (f"K{lookup_row}", "#FFF2CC"),
+        ]
+    )
+    if has_team_source:
+        background_updates.append((f"J{lookup_row + 3}:L{lookup_row + 3}", "#A4C2F4"))
+
+    border_updates = [
+        (f"A1:G{format_last_row}", None, "NONE", BORDER_NAMES),
+        (
+            f"A1:G{new_last_row}",
+            "#000000",
+            "SOLID",
+            OUTER_BORDER_SIDES,
+        ),
+        ("A1:G1", "#000000", "SOLID", ("bottom",)),
+        (
+            f"I1:I{max(old_last_row + 1, threshold_row)}",
+            None,
+            "NONE",
+            BORDER_NAMES,
+        ),
+    ]
+    if old_threshold_row is not None:
+        border_updates.append(
+            (f"J{old_threshold_row}:K{old_threshold_row}", None, "NONE", BORDER_NAMES)
+        )
+    border_updates.extend(
+        [
+            (f"I1:I{threshold_row}", "#000000", "SOLID", ("left",)),
+            (
+                f"I{threshold_row}:K{threshold_row}",
+                "#000000",
+                "SOLID",
+                ("bottom",),
+            ),
+            (
+                f"J{threshold_row}",
+                "#FF0000",
+                "SOLID_MEDIUM",
+                OUTER_BORDER_SIDES,
+            ),
+        ]
+    )
+    if old_lookup_row is not None:
+        border_updates.append(
+            (
+                f"J{old_lookup_row}:L{old_lookup_row + 2}",
+                None,
+                "NONE",
+                BORDER_NAMES,
+            )
+        )
+    border_updates.extend(
+        [
+            (f"J{lookup_row}:L{lookup_row + 2}", None, "NONE", BORDER_NAMES),
+            (f"J{lookup_row}:L{lookup_row}", "#000000", "SOLID", ("top",)),
+            (f"J{lookup_row}:J{lookup_row + 2}", "#000000", "SOLID", ("left",)),
+            (
+                f"K{lookup_row}",
+                "#FF0000",
+                "SOLID_MEDIUM",
+                OUTER_BORDER_SIDES,
+            ),
+        ]
+    )
+    return background_updates, border_updates
 
 
 async def _read_entry_state(

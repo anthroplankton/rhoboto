@@ -169,6 +169,28 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
     assert "`8` 個小時" not in report
 
 
+def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
+    report = ShiftRegister._format_draft_report(
+        DraftSchedule(
+            None,
+            [4, 5],
+            [HourShiftAssignment(4), HourShiftAssignment(5)],
+            {},
+        ),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        {},
+        encore_power_threshold=35,
+        recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        team_source_warning=None,
+    )
+
+    assert "- 已排入（安可｜本走；待機）：なし" in report  # noqa: RUF001
+    assert "`4-5`" not in report
+    assert "`5-6`" not in report
+    assert "募集時間【4-6】" in report
+    assert "附件是生成時資料的 Notes 快照" in report
+
+
 @pytest.mark.parametrize(
     "warning",
     [TEAM_SOURCE_UNSET_DRAFT_WARNING, TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING],

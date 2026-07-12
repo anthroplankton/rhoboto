@@ -2,16 +2,21 @@
 
 ## Status
 
-The base design and the recruitment-time and Notes snapshot follow-up are
-implemented and covered by automated validation. Live Discord and Google Sheets
-checks remain part of the manual integration checklist.
+The base design, recruitment-time and Notes snapshot follow-up, and right-side
+candidate, reverse-lookup, and Draft-formatting extension are implemented and
+covered by automated validation. Live Discord and Google Sheets checks remain part
+of the manual integration checklist. The outer-border and lookup-card visual
+hierarchy refinement is also implemented and covered by automated validation.
+The revised colors, directional borders, shifted lookup, and editable candidate
+threshold are also implemented and covered by automated validation.
 
 ## Goal
 
 Improve `/shift_register generate_draft` so the generated Shift Draft uses the
 configured Team Source for Encore eligibility and ISV-first scheduling, remains
 usable when Team data is unavailable, preserves visually continuous assignments,
-and records dynamic workload notes below the draft.
+records dynamic workload notes below the draft, and provides live candidate and
+participant lookup references beside it.
 
 The design also establishes the canonical participant-name contract that a future
 Draft-to-Final workflow can reuse before posting hourly Discord mention updates.
@@ -28,13 +33,14 @@ This change includes:
 - A deterministic no-ISV fallback when Team Source data is unavailable.
 - Canonical Draft participant names that remain reversible through Shift Entry.
 - Dynamic Notes below the Draft schedule.
+- Live per-hour Honso, Encore, and unregistered candidate blocks.
+- Exact canonical-name reverse lookup for Shift Entry and Team Summary data.
+- Draft-body borders and visible non-recruitment gap-row formatting.
 - One atomic Google Sheets batch update for the bot-owned Draft area.
 
 This change does not include:
 
 - Scheduled or automatic Draft generation.
-- Candidate Honso, candidate Encore, or no-team-yet sections to the right of the
-  Draft.
 - Draft-to-Final generation.
 - Hourly Discord handoff announcements or mentions.
 - A hard consecutive-hours limit or weighted ISV/load scoring.
@@ -249,12 +255,143 @@ The ownership boundary is:
 
 - `A:G`: bot-owned Draft schedule.
 - `A:H` below the schedule: bot-owned dynamic Notes spill.
-- `I+`: untouched by this change and reserved for future candidate Honso, candidate
-  Encore, and no-team-yet sections.
+- `I+`: shared candidate and reverse-lookup display region. The bot owns only the
+  candidate anchor at `I1`, the signed candidate-threshold control below the Draft,
+  and the exact lookup labels, input, status, and formula anchors derived from the
+  old and new Draft row extents. Other user-entered values remain untouched.
 
-Future candidate Honso and candidate Encore sections may order candidates visually
-by ISV from high to low in opposite horizontal directions. That layout is deferred
-and must not be scaffolded in this implementation.
+The candidate formula is anchored at `I1` and spills through the final Draft hour
+row. It emits three horizontal blocks with one blank separator column between
+blocks and no trailing separator:
+
+```text
+本走候補（実効値：高→低） | [blank] | アンコ候補（実効値：高→低） | [blank] | 編成未登録
+```
+
+Each block is at least one column wide and expands only to the maximum candidate
+count present in one of its JST rows. Every row lists only participants available
+in that configured recruitment hour; continuous-axis gap rows stay empty even if
+Shift Entry contains a stale or manual value outside the configured slots.
+Participants already assigned in `C:G` remain listed, and one participant may
+appear in both Honso and Encore. Runner is excluded from all three blocks.
+Candidate cells contain only the complete canonical Draft name so a human can copy
+the cell directly into `C:G`.
+
+With an available Team Source, Honso candidates require Main ISV and sort by Main
+ISV descending. Encore candidates require nonblank `encore_roles`, strict effective
+Power greater than the editable Sheet threshold, and usable effective ISV. Encore Team
+ISV and Power are effective when that team exists; otherwise Main values apply.
+Encore sorts by effective ISV descending. Equal ISV values use Shift Entry row
+order. `編成未登録` contains available participants without a matching Team Summary
+row or usable Main ISV and also uses Shift Entry row order.
+
+When Team Source is unavailable, the Honso header becomes `本走候補（登録順）` and
+lists all available non-runner participants in Shift Entry row order. Encore and
+unregistered blocks retain their headers but have blank participant rows. A
+source-level failure must not label every participant unregistered. Later
+`IMPORTRANGE` or formula failures remain visible instead of silently changing the
+formula to fallback behavior; regeneration re-resolves Team Source status.
+
+If `R` is the final schedule row, `I{R+1}:K{R+1}` contains
+`アンコ候補閾値 | [editable numeric input] | 万総合力`. Generation seeds the
+input with the slash command's required threshold, and the live candidate formula
+references that cell rather than embedding the command value. Editing a number
+recalculates Encore candidates immediately. Blank or nonnumeric input intentionally
+produces a visible candidate-formula error instead of being treated as zero or
+silently falling back to the command value. Regeneration replaces the input with
+the newly supplied command threshold. This editable value changes only the live
+`アンコ候補` block; the already generated left Draft schedule is not reassigned
+until the command runs again.
+
+After the blank row below the schedule, Notes still own `A:H`; column `I` separates
+Notes from the reverse lookup. The lookup begins at `J` one row below the Notes
+heading. If `R` is the final schedule row, the lookup layout is:
+
+```text
+J{R+3} 名前を貼り付け       | K{R+3} [manual canonical name] | L{R+3} [status]
+J{R+4} シフト時間           | K{R+4} [formula]
+J{R+5} シフト元メッセージ   | K{R+5} [formula]
+J{R+6} 編成一覧
+J{R+7} [Team Summary headers, horizontal spill]
+J{R+8} [matching Team Summary row]
+```
+
+Lookup accepts only an exact canonical-name match. A nonblank unresolved input
+leaves result cells blank and shows `⚠️ 参加者を特定できません` in `L{R+3}` without
+repeating the adjacent input. `シフト時間` is reconstructed from current Shift
+Entry hour cells as compact ranges such as `2-4・10-12`; `シフト元メッセージ`
+preserves the stored message unchanged. With Team Source available, one two-row
+spill returns its complete current header and matching row. A participant missing
+from Team Summary receives the headers and a blank data row. Without Team Source,
+Shift lookup still works but the Team Summary spill is not written.
+
+The three-row lookup control has only a thin black top border over `J:L` and a thin
+black left border down `J{R+3}:J{R+5}`. Its label cells in column `J` use
+`#A4C2F4`. The manual input cell `K{R+3}` uses `#FFF2CC` plus a medium solid
+`#FF0000` border on all four sides; result and status cells remain white.
+`編成一覧` occupies the row
+between the Shift fields and imported Team Summary so the following `username`,
+`display_name`, `encore_roles`, and other source columns are visibly identified as
+Team Summary data. When Team Source is available, the `編成一覧` row uses
+`#A4C2F4` across the same fixed `J:L` width. It is omitted with the Team
+Summary spill when Team Source is unavailable.
+
+Candidate and lookup formulas import the exact Team Summary width resolved at
+generation. Existing values remain live; Team Summary schema-width changes require
+regeneration. The implementation relies on Google Sheets' native array spill to
+expand into empty cells and add columns as needed; it does not pre-size the grid or
+reserve speculative participant capacity. Writing an anchor formula does not clear
+other cells. User-entered blockers in a spill path are intentionally preserved so
+Sheets displays `#REF!` rather than silently deleting them. Regeneration replaces
+`I1`, clears only a signed old threshold control and the exact old lookup
+labels/input/formula anchors and their bot-owned formatting, and writes the new
+controls. Cleanup covers both the
+legacy Team Summary anchor directly below `シフト元メッセージ` and the new
+`編成一覧` plus shifted Team Summary anchor. Removing an old array anchor lets
+Sheets remove its calculated spill output while preserving unrelated user values.
+A live API-generated spill beyond the current last column is part of manual
+validation. Add `ensure_size()` only if that validation demonstrates that
+API-written formulas do not receive the same native expansion as formulas entered
+in the web UI.
+
+The old lookup cells are treated as bot-owned only when the three expected labels
+`名前を貼り付け`, `シフト時間`, and `シフト元メッセージ` appear at either the
+legacy or shifted exact rows derived from the old Draft extent. The old candidate
+threshold is bot-owned only when `アンコ候補閾値` appears at its exact row. One
+Any other label is preserved as unrelated user content.
+A first pre-feature run or manually occupied `I+` area without the corresponding
+signature is preserved and may visibly block the new output.
+
+No threshold is persisted in the database and setup does not initialize these
+formulas. An administrator may call generate with zero Shift Entry rows to seed the
+editable Sheet threshold and initialize the formulas.
+
+The left Draft body has a `#000000` thin solid outer border over dynamic range
+`A1:G{R}` plus one bottom border under the header row `A1:G1`. It has no inner
+body grid. Active recruitment rows use background `#FFFFFF`; visible min-max-axis
+rows outside the configured recruitment slots use `#CCCCCC` only in `B:G`, leaving
+the JST label in column `A` white. Rows are not hidden. Before overwriting,
+generation reads `A1:A31` and defines the old body
+as the consecutive valid JST labels beginning at `A2`. It clears only border and
+background fields over the union of old and new body extents, then reapplies the
+new body formatting. This prevents stale gray rows and borders after a shorter
+regeneration without changing font, bold, alignment, column width, validation, or
+cell notes.
+
+Every successful Draft generation freezes exactly the leftmost column with
+`gridProperties.frozenColumnCount = 1`, keeping JST visible during horizontal
+scrolling. The field mask targets only `gridProperties.frozenColumnCount`, so any
+existing frozen-row setting is preserved.
+
+The candidate spill keeps no background fill. A thin black left border runs from
+`I1` through the threshold-control row. One thin black bottom border is applied
+across `I{R+1}:K{R+1}`. The label and `万総合力` suffix cells use `#A4C2F4`;
+the middle input uses `#FFF2CC` plus the same medium solid four-sided `#FF0000`
+border as the lookup input, applied after the black bottom border so red wins at
+the shared edge. No border follows the candidate spill's dynamic right edge. The formula's
+blank separator columns and explicit Japanese headings provide the remaining
+grouping. Dynamic Notes keep no generated borders or fills because warning rows
+can move the participant-table header after manual Draft edits.
 
 ## Dynamic Notes
 
@@ -323,25 +460,39 @@ and `実効値/総合力` legends.
 
 ## Atomic Draft Write
 
-Draft generation reuses
-`AsyncioGspreadWorksheet.batch_update_typed_values()` and performs one underlying
+Draft generation extends the typed worksheet batch boundary so values, formulas,
+exact old lookup cleanup, background cleanup, and borders use one underlying
 `spreadsheets.batchUpdate` call with ordered subrequests:
 
 1. Update range `A:G` with the raw header and schedule rows. Because the specified
    range is larger than the supplied rows, remaining `userEnteredValue` cells in
    `A:G` are cleared, removing stale schedules and Notes.
-2. Clear `H` from the Notes anchor row downward so stale values cannot block the
-   eight-column spill while preserving the future `I+` candidate area.
-3. Write the Notes formula to its calculated cell as a formula.
+2. Clear `H` from the earlier of the old and new Notes anchor rows downward so
+   stale values cannot remain beside a longer schedule or block the new
+   eight-column spill.
+3. Clear only a signed old candidate-threshold control and the exact old
+   reverse-lookup labels, pasted input, formula anchors, and bot-owned formatting
+   calculated from the old Draft extent. Unrelated `I+` values remain untouched;
+   a value blocking a new spill produces visible `#REF!`.
+4. Clear old Draft background and all borders over the old/new body union, then
+   apply the new white body, `B:G` gap backgrounds, thin outer border, and header
+   separator. Apply the candidate-control, lookup-control, and `編成一覧`
+   formatting at their new rows.
+5. Write the command threshold, Notes, candidate, lookup-status, Shift-time,
+   Shift-message, and optional Team Summary formulas to their exact anchor cells.
+6. Set the Draft worksheet's frozen column count to `1` with an
+   `updateSheetProperties` subrequest whose field mask is only
+   `gridProperties.frozenColumnCount`.
 
 The first range is not listed in `formula_ranges`, so user-derived display names
-that start with `=` remain strings. Only the Notes cell is formula-enabled. The
-field mask remains `userEnteredValue`, preserving formatting, validation, and cell
-notes. Columns `I+` are outside the request.
+that start with `=` remain strings. Only exact formula anchors are formula-enabled.
+Cell-value requests retain the `userEnteredValue` field mask; format requests name
+only background and border fields, preserving unrelated cell properties.
 
-Google Sheets applies all subrequests atomically. An invalid subrequest causes the
-entire batch to fail, so a successful clear cannot be followed by a failed partial
-replacement.
+All value, formula, clear, background, border, and frozen-column subrequests are
+members of this same spreadsheet batch request. Google Sheets applies them
+atomically. An invalid subrequest causes the entire batch to fail, so a successful
+clear cannot be followed by a failed partial replacement.
 
 ## Discord Report
 
@@ -354,6 +505,12 @@ lists every Draft candidate without a usable Main ISV using the same Discord
 mention/canonical-name formatter as assigned and unassigned participants. When
 Team Source is unavailable, only the existing source warning is shown so every
 candidate is not falsely labeled unregistered.
+
+When Shift Entry contains no participants, the report keeps Runner, threshold,
+overwrite notice, source warning, recruitment time, and attachment, but replaces
+the repetitive per-hour all-shortage lines with
+`- 已排入（安可｜本走；待機）：なし`. Normal per-hour output resumes when participants
+exist.
 
 The ephemeral reply also attaches UTF-8 `shift-draft-notes.txt`. The attachment is
 a self-contained snapshot of the generation-time Notes inputs: the `メモ` heading,
@@ -394,7 +551,8 @@ Expected application changes:
   - Reuse `resolve_team_source()`.
   - Read purpose-specific Team Summary profiles.
   - Fall back safely for unavailable auxiliary Team data.
-  - Write the schedule and Notes through one typed batch.
+  - Read the old Draft extent and write schedule, formulas, clears, and formats
+    through one typed batch.
 - `utils/shift_scheduler.py`
   - Add the Draft team profile boundary.
   - Implement eligibility, ISV ordering, cross-role continuity, standby selection,
@@ -402,6 +560,11 @@ Expected application changes:
 - `utils/shift_register_structs.py`
   - Render canonical Draft names.
   - Build the dynamic Notes formula and combined Draft write rows.
+  - Build candidate and reverse-lookup formulas from shared canonical-name and Team
+    Source metadata.
+- `utils/google_sheets.py`
+  - Support the narrow border-side selection required for outer borders and header
+    separators in the existing typed batch request.
 
 Expected automated-test changes:
 
@@ -409,6 +572,7 @@ Expected automated-test changes:
 - `tests/test_shift_draft.py`
 - `tests/test_feature_channel_interactions.py`
 - `tests/test_manager_fakes.py`
+- `tests/test_google_sheets_adapter.py`
 - Any shared fake requiring the new Team Summary Power columns or typed Draft batch.
 
 Documentation changes:
@@ -440,10 +604,22 @@ Focused tests must cover:
 - Exact initial semantic parity between the Sheet Notes content and the UTF-8 text
   attachment, including the complete stored original messages.
 - One atomic typed batch, stale `A:G` and Notes-column `H` clearing, raw
-  user-derived strings, and no
-  `I+` mutation.
+  user-derived strings, exact old lookup-anchor cleanup, unrelated `I+` value
+  preservation, and narrowly scoped formatting.
 - Discord report ordering, recruitment-time display, configured-slot filtering,
   existing shortage/unassigned behavior, and snapshot notice.
+- Per-hour candidate availability, scheduled-person inclusion, runner exclusion,
+  cross-block overlap, ISV ordering, row-order ties, and no-source fallback.
+- Candidate spill padding, one-column minimum blocks, separator columns, native
+  column expansion, and structural Team Summary regeneration boundaries.
+- Exact reverse lookup, compact Shift ranges, preserved original message, unknown
+  input warning, complete Team Summary row, and source-unavailable behavior.
+- Dynamic `#000000` Draft outer/header borders, directional candidate/lookup
+  borders, colored controls, `#FFFFFF`/`#CCCCCC` row fills, and
+  shorter-regeneration cleanup.
+- One atomic `updateSheetProperties` subrequest freezes column `A` without changing
+  frozen rows.
+- Zero-participant initialization output without repetitive hourly shortages.
 
 ## Manual Validation
 
@@ -460,17 +636,25 @@ Implementation must add corresponding cases to
 - Confirming the attachment remains the generation-time snapshot after a manual
   Draft rearrangement while Sheet Notes update dynamically.
 - Duplicate and reserved-suffix display names.
-- Shorter regeneration clearing stale `A:G` values while preserving `I+`.
+- Shorter regeneration clearing stale `A:G` values, removing the old lookup block,
+  rebuilding it at the new row, and preserving unrelated `I+` values.
+- Candidate and reverse-lookup recalculation after Shift Entry and Team Summary
+  value edits, including a new participant that expands beyond the prior last
+  worksheet column.
+- Exact-name copy from candidates into Draft and reverse lookup of the same value.
+- Visible gray non-recruitment `B:G` cells, Draft outer/header borders,
+  candidate/lookup controls, `編成一覧` styling, and no stale formatting after a
+  shorter regeneration.
+- Column `A` remains frozen after regeneration while any existing frozen-row count
+  is unchanged.
+- API-generated spill expansion beyond the worksheet's previous final column; add
+  explicit resizing only if this live check fails.
+- A user value in each spill path remains intact and produces visible `#REF!`
+  rather than being deleted during regeneration.
 - Google Sheets write-failure injection confirming atomic preservation of the old
   Draft.
 
 ## Future Compatibility
-
-The future right-side candidate sections must reuse canonical Draft names and Team
-profiles rather than create a second participant identity format. Candidate Honso
-and candidate Encore may contain the same participant, and already-scheduled
-participants remain listed. The future no-team-yet section lists Shift participants
-without usable Team profiles.
 
 Draft-to-Final must validate every nonblank schedule cell against the canonical
 name mapping before producing a Final schedule. Final-to-Discord handoff messages

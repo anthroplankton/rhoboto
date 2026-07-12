@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
+from utils import shift_register_manager
 from utils.shift_register_manager import (
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftTeamProfileResolution,
@@ -33,7 +34,7 @@ from utils.shift_scheduler import (
 from utils.storage_errors import StorageError, StorageErrorKind
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Iterable, Sequence
 
 
 def make_feature_channel() -> SimpleNamespace:
@@ -41,19 +42,55 @@ def make_feature_channel() -> SimpleNamespace:
 
 
 class DraftBatchFakeWorksheet(FakeWorksheet):
-    def __init__(self, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        old_axis_rows: list[list[object]] | None = None,
+        old_threshold_labels: list[list[object]] | None = None,
+        old_lookup_labels: list[list[object]] | None = None,
+        **kwargs: object,
+    ) -> None:
         super().__init__(**kwargs)
+        self.old_axis_rows = old_axis_rows or []
+        self.old_threshold_labels = old_threshold_labels or []
+        self.old_lookup_labels = old_lookup_labels or []
+        self.batch_get_calls: list[list[str]] = []
         self.typed_batches: list[list[dict[str, object]]] = []
         self.formula_ranges: list[set[str]] = []
+        self.background_updates: list[list[tuple[str, str]]] = []
+        self.border_updates: list[list[tuple[str, str | None, str, Sequence[str]]]] = []
+        self.frozen_column_counts: list[int | None] = []
+        self.ensure_calls: list[tuple[int, int]] = []
+
+    async def batch_get_values(
+        self,
+        ranges: list[str],
+    ) -> list[list[list[object]]]:
+        self.batch_get_calls.append(ranges)
+        assert ranges == ["A1:A31", "I1:I32", "J1:J37"]
+        return [
+            self.old_axis_rows,
+            self.old_threshold_labels,
+            self.old_lookup_labels,
+        ]
 
     async def batch_update_typed_values(
         self,
         data: list[dict[str, object]],
         *,
         formula_ranges: set[str],
+        background_updates: Sequence[tuple[str, str]] = (),
+        border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        frozen_column_count: int | None = None,
     ) -> None:
         self.typed_batches.append(data)
         self.formula_ranges.append(formula_ranges)
+        self.background_updates.append(list(background_updates))
+        self.border_updates.append(list(border_updates))
+        self.frozen_column_counts.append(frozen_column_count)
+
+    async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
+        self.ensure_calls.append((min_rows, min_cols))
 
 
 class EntryRangeFakeWorksheet(FakeWorksheet):
@@ -223,6 +260,7 @@ def test_notes_formula_uses_exact_canonical_keys_and_dynamic_schedule() -> None:
             worksheet_title="Team Summary",
             import_last_column="G",
             username_header="username",
+            roles_header="encore_roles",
             main_isv_header="Main Team ISV",
             main_power_header="Main Team Power",
             encore_isv_header="Encore Team ISV",
@@ -308,6 +346,241 @@ def test_notes_formula_resets_consecutive_run_across_hour_gaps() -> None:
 
     assert "hourSlots, {4;5;20;21}" in formula
     assert "INDEX(hourSlots, MAX(1, i - 1)) + 1" in formula
+
+
+def test_candidate_formula_uses_hourly_availability_and_team_rules() -> None:
+    schedule = DraftSchedule(
+        runner="Run",
+        hours=[4, 5, 6],
+        assignments=[HourShiftAssignment(hour) for hour in (4, 5, 6)],
+        display_names={},
+    )
+
+    formula = DraftWorksheetContent.candidate_formula(
+        schedule,
+        entry_worksheet_title="Shift Entry",
+        recruitment_slots={4, 6},
+        encore_power_threshold_cell="J5",
+        team_source=DraftNotesTeamSource(
+            sheet_url="https://team.example",
+            worksheet_title="Team Summary",
+            import_last_column="G",
+            username_header="username",
+            roles_header="encore_roles",
+            main_isv_header="Main Team ISV",
+            main_power_header="Main Team Power",
+            encore_isv_header="Encore Team ISV",
+            encore_power_header="Encore Team Power",
+        ),
+    )
+
+    assert formula.startswith("=LET(")
+    assert "本走候補（実効値：高→低）" in formula  # noqa: RUF001
+    assert "アンコ候補（実効値：高→低）" in formula  # noqa: RUF001
+    assert "編成未登録" in formula
+    assert 'rolesHeader, "encore_roles"' in formula
+    assert "threshold, IF(ISNUMBER(J5), J5, NA())" in formula
+    assert "effectivePower > threshold" in formula
+    assert "> 35" not in formula
+    assert "recruitmentSlots, {4;6}" in formula
+    assert "'Shift Entry'!F3:AI" in formula
+    assert 'names <> "Run"' in formula
+    assert "SORT(" in formula
+    assert (
+        "HSTACK(honsoBlock, blankColumn, encoreBlock, blankColumn, unregisteredBlock)"
+    ) in formula
+    assert formula.count("(") == formula.count(")")
+
+
+def test_candidate_formula_falls_back_to_entry_order_without_team_source() -> None:
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4],
+        assignments=[HourShiftAssignment(4)],
+        display_names={},
+    )
+
+    formula = DraftWorksheetContent.candidate_formula(
+        schedule,
+        entry_worksheet_title="Shift Entry",
+        recruitment_slots={4},
+        encore_power_threshold_cell="J5",
+        team_source=None,
+    )
+
+    assert "本走候補（登録順）" in formula  # noqa: RUF001
+    assert "IMPORTRANGE" not in formula
+    assert "honsoEligible, MAP(usernames, LAMBDA(username, TRUE))" in formula
+    assert "encoreEligible, MAP(usernames, LAMBDA(username, FALSE))" in formula
+    assert "unregistered, MAP(usernames, LAMBDA(username, FALSE))" in formula
+    assert formula.count("(") == formula.count(")")
+
+
+def test_lookup_updates_build_exact_layout_and_cleanup() -> None:
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4, 5],
+        assignments=[HourShiftAssignment(4), HourShiftAssignment(5)],
+        display_names={},
+    )
+    team_source = DraftNotesTeamSource(
+        sheet_url="https://team.example",
+        worksheet_title="Team Summary",
+        import_last_column="G",
+        username_header="username",
+        roles_header="encore_roles",
+        main_isv_header="Main Team ISV",
+        main_power_header="Main Team Power",
+        encore_isv_header="Encore Team ISV",
+        encore_power_header="Encore Team Power",
+    )
+
+    updates, formula_ranges = DraftWorksheetContent.lookup_updates(
+        schedule,
+        old_lookup_row=9,
+        entry_worksheet_title="Shift Entry",
+        team_source=team_source,
+    )
+
+    assert {"range": "J9:L13", "values": []} in updates
+    assert {"range": "J6:K6", "values": [["名前を貼り付け", ""]]} in updates
+    assert {"range": "J7", "values": [["シフト時間"]]} in updates
+    assert {"range": "J8", "values": [["シフト元メッセージ"]]} in updates
+    assert {"range": "J9", "values": [["編成一覧"]]} in updates
+    assert {"L6", "K7", "K8", "J10"} <= formula_ranges
+    assert "J9" not in formula_ranges
+
+    formulas = {
+        str(update["range"]): str(update["values"][0][0])
+        for update in updates
+        if str(update["range"]) in formula_ranges
+    }
+    assert "⚠️ 参加者を特定できません" in formulas["L6"]
+    assert "K6" in formulas["L6"]
+    assert "XMATCH(inputName, keys, 0)" in formulas["L6"]
+    assert 'TEXTJOIN("・", TRUE' in formulas["K7"]
+    assert "AJ3:AJ" in formulas["K8"]
+    assert "IMPORTRANGE" in formulas["J10"]
+    assert "'Team Summary'!A:G" in formulas["J10"]
+    assert "VSTACK(teamHeaders" in formulas["J10"]
+    assert (
+        'matchCount, IF(matchedUsername = "", 0, '
+        "SUMPRODUCT(N(teamUsernames = matchedUsername)))"
+    ) in formulas["J10"]
+    assert all(
+        formula.count("(") == formula.count(")") for formula in formulas.values()
+    )
+
+
+def test_lookup_updates_omit_team_formula_and_old_cleanup_without_source() -> None:
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4],
+        assignments=[HourShiftAssignment(4)],
+        display_names={},
+    )
+
+    updates, formula_ranges = DraftWorksheetContent.lookup_updates(
+        schedule,
+        old_lookup_row=None,
+        entry_worksheet_title="Shift Entry",
+        team_source=None,
+    )
+
+    assert not any(update["values"] == [] for update in updates)
+    assert formula_ranges == {"L5", "K6", "K7"}
+    assert not any(update["range"] == "J8" for update in updates)
+    assert not any(update["values"] == [["編成一覧"]] for update in updates)
+
+
+def test_old_draft_layout_detection_requires_owned_labels() -> None:
+    assert (
+        shift_register_manager._old_draft_last_row(  # noqa: SLF001
+            [["JST"], ["4-5"], ["5-6"], [], ["メモ"]]
+        )
+        == 3
+    )
+    assert shift_register_manager._old_draft_last_row([]) == 1  # noqa: SLF001
+    assert (
+        shift_register_manager._old_draft_last_row(  # noqa: SLF001
+            [["manual"], ["4-5"]]
+        )
+        == 1
+    )
+
+    lookup_labels = [
+        [""],
+        [""],
+        [""],
+        [""],
+        ["名前を貼り付け"],
+        ["シフト時間"],
+        ["シフト元メッセージ"],
+    ]
+    assert (
+        shift_register_manager._old_lookup_row(  # noqa: SLF001
+            old_last_row=3,
+            lookup_labels=lookup_labels,
+        )
+        == 5
+    )
+    lookup_labels.insert(4, [""])
+    assert (
+        shift_register_manager._old_lookup_row(  # noqa: SLF001
+            old_last_row=3,
+            lookup_labels=lookup_labels,
+        )
+        == 6
+    )
+    assert (
+        shift_register_manager._old_lookup_row(  # noqa: SLF001
+            old_last_row=3,
+            lookup_labels=[["manual"]],
+        )
+        is None
+    )
+    threshold_labels = [[""] for _ in range(4)]
+    threshold_labels[3] = [DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL]
+    assert (
+        shift_register_manager._old_candidate_threshold_row(  # noqa: SLF001
+            old_last_row=3,
+            threshold_labels=threshold_labels,
+        )
+        == 4
+    )
+    assert (
+        shift_register_manager._old_candidate_threshold_row(  # noqa: SLF001
+            old_last_row=3,
+            threshold_labels=[["manual"] for _ in range(4)],
+        )
+        is None
+    )
+    assert (
+        shift_register_manager._old_candidate_threshold_row(  # noqa: SLF001
+            old_last_row=3,
+            threshold_labels=[
+                [""],
+                [""],
+                [""],
+                ["アンコ候補総合力閾値"],
+            ],
+        )
+        is None
+    )
+    assert (
+        shift_register_manager._draft_notes_clear_row(  # noqa: SLF001
+            old_last_row=3,
+            new_notes_row=21,
+        )
+        == 5
+    )
+    assert (
+        shift_register_manager._draft_notes_clear_row(  # noqa: SLF001
+            old_last_row=23,
+            new_notes_row=21,
+        )
+        == 21
+    )
 
 
 def test_notes_snapshot_matches_initial_schedule_and_complete_messages() -> None:
@@ -400,7 +673,24 @@ async def test_generate_draft_writes_draft_worksheet(
     )
     entry_ranges[2][0][-1] = "4-7 ⏎  20-22／希望あり"  # noqa: RUF001
     entry_worksheet = EntryRangeFakeWorksheet(entry_ranges)
-    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    old_axis_rows = [
+        ["JST"],
+        *([f"{hour}-{hour + 1}"] for hour in range(2, 24)),
+    ]
+    old_lookup_labels = [[""] for _ in range(36)]
+    old_lookup_labels[24:27] = [
+        ["名前を貼り付け"],
+        ["シフト時間"],
+        ["シフト元メッセージ"],
+    ]
+    old_threshold_labels = [[""] for _ in range(32)]
+    old_threshold_labels[23] = [DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL]
+    draft_worksheet = DraftBatchFakeWorksheet(
+        title="Shift Draft",
+        old_axis_rows=old_axis_rows,
+        old_threshold_labels=old_threshold_labels,
+        old_lookup_labels=old_lookup_labels,
+    )
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
@@ -427,6 +717,7 @@ async def test_generate_draft_writes_draft_worksheet(
                 worksheet_title="Team Summary",
                 import_last_column="G",
                 username_header="username",
+                roles_header="encore_roles",
                 main_isv_header="Main Team ISV",
                 main_power_header="Main Team Power",
                 encore_isv_header="Encore Team ISV",
@@ -451,10 +742,67 @@ async def test_generate_draft_writes_draft_worksheet(
         f"{hour}-{hour + 1}" for hour in range(4, 22)
     ]
     assert data[1] == {"range": "H21:H", "values": []}
-    assert data[2]["range"] == "A21"
-    assert draft_worksheet.formula_ranges[-1] == {"A21"}
-    assert str(data[2]["values"][0][0]).startswith("=LET(")
-    assert "募集時間【4-7・20-22】" in str(data[2]["values"][0][0])
+    assert {"range": "I24:K24", "values": []} in data
+    assert {
+        "range": "I20:K20",
+        "values": [["アンコ候補閾値", 35, "万総合力"]],
+    } in data
+    assert {"range": "J25:L29", "values": []} in data
+    assert {"range": "J25", "values": [["編成一覧"]]} in data
+    notes_update = next(item for item in data if item["range"] == "A21")
+    candidate_update = next(item for item in data if item["range"] == "I1")
+    assert str(notes_update["values"][0][0]).startswith("=LET(")
+    assert "募集時間【4-7・20-22】" in str(notes_update["values"][0][0])
+    assert "本走候補（実効値：高→低）" in str(  # noqa: RUF001
+        candidate_update["values"][0][0]
+    )
+    assert "threshold, IF(ISNUMBER(J20), J20, NA())" in str(
+        candidate_update["values"][0][0]
+    )
+    assert {"A21", "I1", "L22", "K23", "K24", "J26"} <= (
+        draft_worksheet.formula_ranges[-1]
+    )
+    assert not any(str(item["range"]).startswith("I:") for item in data)
+    assert draft_worksheet.background_updates[-1][0] == ("A1:G23", "#FFFFFF")
+    assert draft_worksheet.background_updates[-1][1:] == [
+        *((f"B{row}:G{row}", "#CCCCCC") for row in range(5, 18)),
+        ("I24:K24", "#FFFFFF"),
+        ("I20", "#A4C2F4"),
+        ("J20", "#FFF2CC"),
+        ("K20", "#A4C2F4"),
+        ("J25:L29", "#FFFFFF"),
+        ("J22:L24", "#FFFFFF"),
+        ("J22:J24", "#A4C2F4"),
+        ("K22", "#FFF2CC"),
+        ("J25:L25", "#A4C2F4"),
+    ]
+    assert draft_worksheet.border_updates[-1] == [
+        ("A1:G23", None, "NONE", shift_register_manager.BORDER_NAMES),
+        (
+            "A1:G19",
+            "#000000",
+            "SOLID",
+            shift_register_manager.OUTER_BORDER_SIDES,
+        ),
+        ("A1:G1", "#000000", "SOLID", ("bottom",)),
+        ("I1:I24", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J24:K24", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("I1:I20", "#000000", "SOLID", ("left",)),
+        ("I20:K20", "#000000", "SOLID", ("bottom",)),
+        ("J20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
+        ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J22:L22", "#000000", "SOLID", ("top",)),
+        ("J22:J24", "#000000", "SOLID", ("left",)),
+        (
+            "K22",
+            "#FF0000",
+            "SOLID_MEDIUM",
+            ("top", "bottom", "left", "right"),
+        ),
+    ]
+    assert draft_worksheet.frozen_column_counts[-1] == 1
+    assert draft_worksheet.ensure_calls == []
     assert result.schedule.hours == list(range(4, 22))
     assert all(
         not assignment.supporter_usernames_by_slot
@@ -470,6 +818,7 @@ async def test_generate_draft_writes_draft_worksheet(
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
     assert entry_worksheet.batch_get_calls == [["2:2", "A3:B", "F3:AJ"]]
+    assert draft_worksheet.batch_get_calls == [["A1:A31", "I1:I32", "J1:J37"]]
 
 
 @pytest.mark.asyncio
@@ -520,8 +869,32 @@ async def test_generate_draft_falls_back_without_team_profiles(
     assert result.unregistered_usernames == ()
     expected_marker = "⚠️ " if status is TeamSourceStatus.UNSET else "⚠️🛠️ "
     assert result.team_source_warning.startswith(expected_marker)
-    formula = str(draft_worksheet.typed_batches[-1][2]["values"][0][0])
+    notes_update = next(
+        item for item in draft_worksheet.typed_batches[-1] if item["range"] == "A4"
+    )
+    formula = str(notes_update["values"][0][0])
     assert result.team_source_warning in formula
+    assert draft_worksheet.background_updates[-1][-6:] == [
+        ("I3", "#A4C2F4"),
+        ("J3", "#FFF2CC"),
+        ("K3", "#A4C2F4"),
+        ("J5:L7", "#FFFFFF"),
+        ("J5:J7", "#A4C2F4"),
+        ("K5", "#FFF2CC"),
+    ]
+    assert ("J8:L8", "#A4C2F4") not in draft_worksheet.background_updates[-1]
+    assert draft_worksheet.border_updates[-1][-4:] == [
+        ("J5:L7", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J5:L5", "#000000", "SOLID", ("top",)),
+        ("J5:J7", "#000000", "SOLID", ("left",)),
+        (
+            "K5",
+            "#FF0000",
+            "SOLID_MEDIUM",
+            ("top", "bottom", "left", "right"),
+        ),
+    ]
+    assert draft_worksheet.frozen_column_counts[-1] == 1
 
 
 @pytest.mark.asyncio

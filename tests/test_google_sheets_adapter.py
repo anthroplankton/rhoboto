@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from gspread.exceptions import WorksheetNotFound
 
-from utils.google_sheets import AsyncioGspreadWorksheet, GoogleSheet
+from utils.google_sheets import BORDER_NAMES, AsyncioGspreadWorksheet, GoogleSheet
 
 
 class RawWorksheet:
@@ -272,6 +272,91 @@ async def test_adapter_batch_updates_mixed_cell_types_atomically() -> None:
         {"numberValue": 1},
         {"boolValue": False},
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_batch_updates_values_and_draft_formats_atomically() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.batch_update_typed_values(
+        [{"range": "A1", "values": [["JST"]]}],
+        formula_ranges=set(),
+        background_updates=[
+            ("A1:G5", "#FFFFFF"),
+            ("A3:G3", "#CCCCCC"),
+        ],
+        border_updates=[
+            ("A1:G8", None, "NONE", BORDER_NAMES),
+            (
+                "A1:G5",
+                "#000000",
+                "SOLID",
+                ("top", "bottom", "left", "right"),
+            ),
+            ("K5", "#FF0000", "SOLID_MEDIUM", BORDER_NAMES[:4]),
+        ],
+        frozen_column_count=1,
+    )
+
+    assert len(raw.spreadsheet_batch_update_calls) == 1
+    requests = raw.spreadsheet_batch_update_calls[0]["requests"]
+    assert [next(iter(request)) for request in requests] == [
+        "updateCells",
+        "repeatCell",
+        "repeatCell",
+        "updateBorders",
+        "updateBorders",
+        "updateBorders",
+        "updateSheetProperties",
+    ]
+    white, gray = (request["repeatCell"] for request in requests[1:3])
+    assert white["range"] == {
+        "sheetId": 1,
+        "startRowIndex": 0,
+        "endRowIndex": 5,
+        "startColumnIndex": 0,
+        "endColumnIndex": 7,
+    }
+    assert white["cell"]["userEnteredFormat"]["backgroundColorStyle"] == {
+        "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+    }
+    assert gray["range"]["startRowIndex"] == 2
+    assert gray["range"]["endRowIndex"] == 3
+    assert gray["cell"]["userEnteredFormat"]["backgroundColorStyle"] == {
+        "rgbColor": {"red": 0.8, "green": 0.8, "blue": 0.8}
+    }
+    clear_borders, outer_borders, input_borders = (
+        request["updateBorders"] for request in requests[3:6]
+    )
+    assert all(clear_borders[name] == {"style": "NONE"} for name in BORDER_NAMES)
+    expected_border = {
+        "style": "SOLID",
+        "colorStyle": {"rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}},
+    }
+    assert set(outer_borders) == {"range", "top", "bottom", "left", "right"}
+    assert all(
+        outer_borders[name] == expected_border
+        for name in ("top", "bottom", "left", "right")
+    )
+    assert set(input_borders) == {"range", *BORDER_NAMES[:4]}
+    assert all(
+        input_borders[name]
+        == {
+            "style": "SOLID_MEDIUM",
+            "colorStyle": {"rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}},
+        }
+        for name in BORDER_NAMES[:4]
+    )
+    assert requests[-1] == {
+        "updateSheetProperties": {
+            "properties": {
+                "sheetId": 1,
+                "gridProperties": {"frozenColumnCount": 1},
+            },
+            "fields": "gridProperties.frozenColumnCount",
+        }
+    }
 
 
 @pytest.mark.asyncio
