@@ -94,7 +94,7 @@ earliest-to-latest recruitment axis, including the header row. The confirmation
 lists only the new write destinations:
 
 ```text
-‼️ Shift Draft の次の範囲を上書きします。
+‼️ [Shift Draft](draft worksheet URL) の次の範囲を上書きします。
 班表：A1:G31
 Notes：A{R+2}
 候補：I1、閾値 I{R+1}:K{R+1}

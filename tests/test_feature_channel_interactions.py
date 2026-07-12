@@ -83,8 +83,15 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
         [{"start": 4, "end": 12}, {"start": 20, "end": 28}]
     )
 
-    content = _format_generate_draft_confirmation(ranges)
+    content = _format_generate_draft_confirmation(
+        ranges,
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+    )
 
+    assert (
+        "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
+        in content
+    )
     assert "`A1:G31`" in content
     assert "`A27`" in content
     assert "`I1`" in content
@@ -281,7 +288,11 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
     async def get_feature_channel_context(_source: object) -> object:
         return object()
 
-    config = SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 5}])
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
         return SimpleNamespace(manager=Manager(), feature_config=config)
@@ -352,7 +363,9 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
         return SimpleNamespace(
             manager=Manager(),
             feature_config=SimpleNamespace(
-                recruitment_time_ranges=[{"start": 4, "end": 5}]
+                recruitment_time_ranges=[{"start": 4, "end": 5}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
             ),
         )
 
@@ -402,8 +415,16 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
 
     configs = iter(
         [
-            SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 5}]),
-            SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 6}]),
+            SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 5}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
+            ),
+            SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 6}],
+                sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+                draft_worksheet_id=222,
+            ),
         ]
     )
 

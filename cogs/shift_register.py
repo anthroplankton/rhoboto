@@ -58,13 +58,16 @@ def _format_display_name(name: str) -> str:
 
 def _format_generate_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
+    draft_sheet_url: str,
 ) -> str:
     ranges = recruitment_ranges.ranges.ranges
     final_row = ranges[-1].end - ranges[0].start + 1
     return "\n".join(
         [
             "### ‼️ 確認產生班表草稿",
-            "即將覆蓋 Shift Draft 的以下位置：",  # noqa: RUF001
+            (
+                f"即將覆蓋 [Shift Draft]({draft_sheet_url}) 的以下位置："  # noqa: RUF001
+            ),
             "- 班表：`A1:G31`",  # noqa: RUF001
             f"- Notes：`A{final_row + 2}`",  # noqa: RUF001
             (
@@ -424,8 +427,13 @@ class ShiftRegister(
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 context.feature_config.recruitment_time_ranges
             )
+            draft_sheet_url = google_sheet_url_with_gid(
+                context.feature_config.sheet_url,
+                context.feature_config.draft_worksheet_id,
+            )
             confirmation_content = _format_generate_draft_confirmation(
-                recruitment_ranges
+                recruitment_ranges,
+                draft_sheet_url,
             )
             view = GenerateDraftConfirmView(requesting_user_id=interaction.user.id)
             await interaction.edit_original_response(
@@ -453,8 +461,16 @@ class ShiftRegister(
             fresh_ranges = RecruitmentTimeRanges.from_json(
                 context.feature_config.recruitment_time_ranges
             )
-            if _format_generate_draft_confirmation(fresh_ranges) != (
-                confirmation_content
+            fresh_draft_sheet_url = google_sheet_url_with_gid(
+                context.feature_config.sheet_url,
+                context.feature_config.draft_worksheet_id,
+            )
+            if (
+                _format_generate_draft_confirmation(
+                    fresh_ranges,
+                    fresh_draft_sheet_url,
+                )
+                != confirmation_content
             ):
                 await interaction.edit_original_response(
                     content=(
