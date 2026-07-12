@@ -1138,6 +1138,28 @@ async def test_empty_shift_entry_presentation_initializes_without_participant() 
 
 
 @pytest.mark.asyncio
+async def test_entry_presentation_sync_ignores_duplicate_usernames() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    worksheet = FakeEntryWorksheet(
+        current_entry_rows(
+            entry_participant_row("alice", "Alice"),
+            entry_participant_row("alice", "Duplicate"),
+        )
+    )
+
+    await manager.sync_entry_presentation(
+        make_shift_metadata(worksheet),
+        RecruitmentTimeRanges.default(),
+        force=True,
+    )
+
+    assert len(worksheet.typed_batch_updates) == 1
+    assert worksheet.presentation_updates[-1]["frozen_column_count"] == 5
+
+
+@pytest.mark.asyncio
 async def test_current_shift_entry_rules_do_not_repeat_presentation_updates() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"

@@ -520,11 +520,7 @@ class ShiftRegisterManager(
                 "Repair the Shift Register worksheet settings.",
             )
         try:
-            (
-                layout_updates,
-                _participant_values,
-                _participants,
-            ) = await _read_entry_state(worksheet)
+            layout_updates, _participant_values = await _read_entry_layout(worksheet)
         except ValueError as exc:
             error = StorageError(StorageErrorKind.MALFORMED_SHEET)
             error.__cause__ = exc
@@ -1273,16 +1269,23 @@ async def _read_entry_state(
     list[list[object]],
     list[tuple[int, str, str]],
 ]:
+    layout_updates, participant_values = await _read_entry_layout(worksheet)
+    return (
+        layout_updates,
+        participant_values,
+        _entry_participants(participant_values),
+    )
+
+
+async def _read_entry_layout(
+    worksheet: AsyncioGspreadWorksheet,
+) -> tuple[list[dict[str, object]], list[list[object]]]:
     range_values = await worksheet.batch_get_values(ENTRY_READ_RANGES)
     if len(range_values) != len(ENTRY_READ_RANGES):
         msg = "Shift Entry batch read did not return both requested ranges."
         raise ValueError(msg)
     header_rows, participant_values = range_values
-    return (
-        _entry_layout_updates(header_rows, participant_values),
-        participant_values,
-        _entry_participants(participant_values),
-    )
+    return _entry_layout_updates(header_rows, participant_values), participant_values
 
 
 def _entry_layout_updates(
