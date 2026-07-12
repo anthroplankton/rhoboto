@@ -138,7 +138,9 @@ Use this structure when advising:
    Files: <paths>
    Why: <brief reason>
    Commands:
-   git add -- <paths>
+   git add -- \
+     <path-1> \
+     <path-2>
    git commit -m "<type(scope): subject>"
 
 Validation:
