@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import pairwise
 from typing import TYPE_CHECKING, overload, override
 
 from models.feature_channel import FeatureChannel
@@ -43,6 +44,7 @@ from utils.storage_errors import (
 ENTRY_READ_RANGES = ["1:2", "A3:C"]
 SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
 OUTER_BORDER_SIDES = ("top", "bottom", "left", "right")
+ENTRY_RULE_MARKER = "rhoboto:shift-entry:"
 
 
 class TeamSourceStatus(StrEnum):
@@ -93,6 +95,16 @@ class DraftGenerationResult:
     recruitment_ranges: RecruitmentTimeRanges
     notes_snapshot: str
     unregistered_usernames: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EntryPresentationPlan:
+    format_updates: tuple[tuple[str, dict[str, object], str], ...]
+    border_updates: tuple[tuple[str, str, str, tuple[str, ...]], ...]
+    column_width_updates: tuple[tuple[str, int], ...]
+    hidden_column_updates: tuple[tuple[str, bool], ...]
+    conditional_format_rules: tuple[dict[str, object], ...]
+    frozen_column_count: int = 5
 
 
 TEAM_SOURCE_UNSET_DRAFT_WARNING = (
@@ -428,9 +440,13 @@ class ShiftRegisterManager(
                 f"but got {len(worksheet_titles)}: {worksheet_titles!r}"
             )
             raise ValueError(msg)
-        return await super().upsert_sheet_config_and_worksheets(
+        metadata = await super().upsert_sheet_config_and_worksheets(
             sheet_url, worksheet_titles
         )
+        config = await self.get_sheet_config()
+        ranges = RecruitmentTimeRanges.from_json(config.recruitment_time_ranges)
+        await self.sync_entry_presentation(metadata, ranges, force=True)
+        return metadata
 
     async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
         """
@@ -480,12 +496,75 @@ class ShiftRegisterManager(
         await shift_register_config.save(
             update_fields=["recruitment_time_ranges", "updated_at"]
         )
+        try:
+            metadata = await self.fetch_google_sheets_metadata()
+            await self.sync_entry_presentation(metadata, ranges, force=True)
+        except Exception as exc:
+            partial = partial_success_storage_error(exc)
+            if partial is None:
+                raise
+            raise partial from partial.__cause__
+
+    async def sync_entry_presentation(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        ranges: RecruitmentTimeRanges,
+        *,
+        force: bool,
+    ) -> None:
+        """Initialize or repair Shift Entry presentation."""
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        try:
+            (
+                layout_updates,
+                _participant_values,
+                _participants,
+            ) = await _read_entry_state(worksheet)
+        except ValueError as exc:
+            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
+            error.__cause__ = exc
+            raise error from exc
+
+        presentation = _entry_presentation_plan(ranges, worksheet_id=worksheet.id)
+        current_rules = await worksheet.get_conditional_format_rules()
+        rule_deletes, rule_adds, presentation_is_current = _entry_rule_updates(
+            current_rules,
+            presentation.conditional_format_rules,
+        )
+        if presentation_is_current and not force and not layout_updates:
+            return
+        await worksheet.ensure_size(
+            min_rows=EntryWorksheetContent.FIRST_DATA_ROW,
+            min_cols=EntryWorksheetContent.COLUMN_COUNT,
+        )
+        await worksheet.batch_update_typed_values(
+            layout_updates,
+            formula_ranges={
+                str(item["range"])
+                for item in layout_updates
+                if item["range"] == "A1:AJ1"
+            },
+            border_updates=presentation.border_updates,
+            format_updates=presentation.format_updates,
+            column_width_updates=presentation.column_width_updates,
+            hidden_column_updates=presentation.hidden_column_updates,
+            conditional_format_rule_deletes=rule_deletes,
+            conditional_format_rule_adds=rule_adds,
+            frozen_column_count=presentation.frozen_column_count,
+        )
 
     async def upsert_or_delete_user_shift(
         self,
         user: UserInfo,
         shift: Shift | None,
         metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        recruitment_ranges: RecruitmentTimeRanges | None = None,
     ) -> None:
         worksheet = metadata.entry_worksheets.worksheet
         if worksheet is None and shift is None:
@@ -566,8 +645,18 @@ class ShiftRegisterManager(
             EntryWorksheetContent.shift_value_ranges(shift, row=target_row)[1:]
         )
 
+        presentation = _entry_presentation_plan(
+            recruitment_ranges or RecruitmentTimeRanges.default(),
+            worksheet_id=worksheet.id,
+        )
+        current_rules = await worksheet.get_conditional_format_rules()
+        rule_deletes, rule_adds, presentation_is_current = _entry_rule_updates(
+            current_rules,
+            presentation.conditional_format_rules,
+        )
+
         await worksheet.ensure_size(
-            min_rows=target_row,
+            min_rows=max(target_row, EntryWorksheetContent.FIRST_DATA_ROW),
             min_cols=EntryWorksheetContent.COLUMN_COUNT,
         )
         formula_ranges = {
@@ -578,6 +667,23 @@ class ShiftRegisterManager(
         await worksheet.batch_update_typed_values(
             updates,
             formula_ranges=formula_ranges,
+            border_updates=(
+                () if presentation_is_current else presentation.border_updates
+            ),
+            format_updates=(
+                () if presentation_is_current else presentation.format_updates
+            ),
+            column_width_updates=(
+                () if presentation_is_current else presentation.column_width_updates
+            ),
+            hidden_column_updates=(
+                () if presentation_is_current else presentation.hidden_column_updates
+            ),
+            conditional_format_rule_deletes=rule_deletes,
+            conditional_format_rule_adds=rule_adds,
+            frozen_column_count=(
+                None if presentation_is_current else presentation.frozen_column_count
+            ),
         )
 
         self.logger.info(
@@ -944,6 +1050,220 @@ def _draft_format_updates(  # noqa: PLR0913
         ]
     )
     return background_updates, border_updates
+
+
+def _entry_presentation_plan(
+    ranges: RecruitmentTimeRanges,
+    *,
+    worksheet_id: int,
+) -> EntryPresentationPlan:
+    configured = ranges.ranges.ranges
+    first_hour = configured[0].start
+    last_hour = configured[-1].end
+    hidden = [("F:AI", False)]
+    if first_hour:
+        hidden.append((_entry_hour_columns(0, first_hour), True))
+    if last_hour < len(EntryWorksheetContent.HOUR_COLUMNS):
+        hidden.append(
+            (
+                _entry_hour_columns(
+                    last_hour,
+                    len(EntryWorksheetContent.HOUR_COLUMNS),
+                ),
+                True,
+            )
+        )
+
+    identity_ranges = [
+        _entry_rule_range(worksheet_id, 0, 5),
+        _entry_rule_range(worksheet_id, 35, 36),
+    ]
+    active_ranges = [
+        _entry_rule_range(worksheet_id, 5 + item.start, 5 + item.end)
+        for item in configured
+    ]
+    gap_ranges = [
+        _entry_rule_range(worksheet_id, 5 + left.end, 5 + right.start)
+        for left, right in pairwise(configured)
+        if left.end < right.start
+    ]
+    visible_index = "SUBTOTAL(103,$A$3:$A3)"
+    rules = []
+    if gap_ranges:
+        rules.append(
+            _entry_conditional_rule(
+                gap_ranges,
+                '=N("rhoboto:shift-entry:gap:v1")=0',
+                background="#CCCCCC",
+                foreground="#B7B7B7",
+            )
+        )
+    rules.extend(
+        [
+            _entry_conditional_rule(
+                identity_ranges,
+                (
+                    '=AND(N("rhoboto:shift-entry:row-orange:v1")=0,'
+                    f'$A3<>"",ISODD({visible_index}))'
+                ),
+                background="#F8CBAD",
+            ),
+            _entry_conditional_rule(
+                identity_ranges,
+                (
+                    '=AND(N("rhoboto:shift-entry:row-pink:v1")=0,'
+                    f'$A3<>"",ISEVEN({visible_index}))'
+                ),
+                background="#F4B6D2",
+            ),
+            _entry_conditional_rule(
+                active_ranges,
+                (
+                    '=AND(N("rhoboto:shift-entry:one-orange:v1")=0,'
+                    'INDIRECT("RC",FALSE)=1,'
+                    f"ISODD({visible_index}))"
+                ),
+                background="#F8CBAD",
+                foreground="#E6B89C",
+            ),
+            _entry_conditional_rule(
+                active_ranges,
+                (
+                    '=AND(N("rhoboto:shift-entry:one-pink:v1")=0,'
+                    'INDIRECT("RC",FALSE)=1,'
+                    f"ISEVEN({visible_index}))"
+                ),
+                background="#F4B6D2",
+                foreground="#DDA3BD",
+            ),
+            _entry_conditional_rule(
+                active_ranges,
+                ('=AND(N("rhoboto:shift-entry:zero:v1")=0,INDIRECT("RC",FALSE)=0)'),
+                background="#FFFFFF",
+                foreground="#E6E6E6",
+            ),
+        ]
+    )
+    header_format = {
+        "backgroundColorStyle": {"rgbColor": _entry_rgb("#3C78D8")},
+        "textFormat": {
+            "bold": True,
+            "foregroundColorStyle": {"rgbColor": _entry_rgb("#FFFFFF")},
+        },
+    }
+    return EntryPresentationPlan(
+        format_updates=(
+            (
+                "A1",
+                header_format,
+                "userEnteredFormat(backgroundColorStyle,textFormat)",
+            ),
+            (
+                "A2:AJ2",
+                header_format,
+                "userEnteredFormat(backgroundColorStyle,textFormat)",
+            ),
+        ),
+        border_updates=(
+            ("A2:AJ2", "#000000", "SOLID", ("top", "bottom")),
+            ("B:B", "#000000", "SOLID", ("right",)),
+            ("E:E", "#000000", "SOLID", ("right",)),
+            ("AI:AI", "#000000", "SOLID", ("right",)),
+        ),
+        column_width_updates=(
+            ("A:B", 100),
+            ("C:D", 60),
+            ("E:E", 60),
+            ("F:AI", 40),
+        ),
+        hidden_column_updates=tuple(hidden),
+        conditional_format_rules=tuple(rules),
+    )
+
+
+def _entry_rule_updates(
+    current: list[dict[str, object]],
+    desired: tuple[dict[str, object], ...],
+) -> tuple[tuple[int, ...], tuple[dict[str, object], ...], bool]:
+    marked = [
+        (index, rule)
+        for index, rule in enumerate(current)
+        if ENTRY_RULE_MARKER in _entry_conditional_formula(rule)
+    ]
+    if [rule for _index, rule in marked] == list(desired):
+        return (), (), True
+    return (
+        tuple(sorted((index for index, _rule in marked), reverse=True)),
+        tuple(reversed(desired)),
+        False,
+    )
+
+
+def _entry_conditional_formula(rule: dict[str, object]) -> str:
+    try:
+        boolean_rule = rule["booleanRule"]
+        if not isinstance(boolean_rule, dict):
+            return ""
+        condition = boolean_rule["condition"]
+        if not isinstance(condition, dict):
+            return ""
+        values = condition["values"]
+        if not isinstance(values, list) or not values:
+            return ""
+        value = values[0]
+        return str(value.get("userEnteredValue", "")) if isinstance(value, dict) else ""
+    except KeyError:
+        return ""
+
+
+def _entry_conditional_rule(
+    ranges: list[dict[str, int]],
+    formula: str,
+    *,
+    background: str,
+    foreground: str | None = None,
+) -> dict[str, object]:
+    cell_format: dict[str, object] = {
+        "backgroundColorStyle": {"rgbColor": _entry_rgb(background)}
+    }
+    if foreground is not None:
+        cell_format["textFormat"] = {
+            "foregroundColorStyle": {"rgbColor": _entry_rgb(foreground)}
+        }
+    return {
+        "ranges": ranges,
+        "booleanRule": {
+            "condition": {
+                "type": "CUSTOM_FORMULA",
+                "values": [{"userEnteredValue": formula}],
+            },
+            "format": cell_format,
+        },
+    }
+
+
+def _entry_rule_range(
+    worksheet_id: int,
+    start_column: int,
+    end_column: int,
+) -> dict[str, int]:
+    return {
+        "sheetId": worksheet_id,
+        "startRowIndex": EntryWorksheetContent.FIRST_DATA_ROW - 1,
+        "startColumnIndex": start_column,
+        "endColumnIndex": end_column,
+    }
+
+
+def _entry_hour_columns(start: int, end: int) -> str:
+    return f"{column_letter(6 + start)}:{column_letter(5 + end)}"
+
+
+def _entry_rgb(color: str) -> dict[str, float]:
+    return {
+        name: int(color[start : start + 2], 16) / 255
+        for name, start in (("red", 1), ("green", 3), ("blue", 5))
+    }
 
 
 async def _read_entry_state(

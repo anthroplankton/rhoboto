@@ -116,6 +116,39 @@ Recommended migration:
 Do not manually copy only visible values during this migration; doing so can detach
 formulas, validation, formatting, or notes from their participant row.
 
+### Shift Entry presentation
+
+The bot owns the presentation of `A:AJ` while leaving administrator columns from
+`AK` onward unchanged. `A1` and `A2:AJ2` use a `#3C78D8` background with bold
+white text. Row 2 has black top and bottom borders, with additional right borders
+after `display_name`, `Team Info`, and `29-30`. Columns `A:E` are frozen. Column
+widths are 100 px for `A:B`, 60 px for `C:E`, and 40 px for
+`F:AI`; the bot does not change the width of `AJ`.
+
+Participant rows use native conditional formatting so Filter views retain visible
+orange/pink alternation after filtering or sorting. `A:E` and `AJ` receive the
+row color. Availability value `1` uses the same row color, while `0` remains
+white; both digits use a nearby low-contrast font color so they remain legible at
+close range without dominating the color blocks. Columns outside the configured
+recruitment min-max range are hidden. Hour columns inside min-max gaps remain
+visible with a `#CCCCCC` background, preserving the continuous time axis.
+
+Rhoboto conditional-format formulas contain a no-op
+`rhoboto:shift-entry:` marker. Before initialization or repair, the bot reads the
+worksheet rule metadata. If the marked rules exactly match the desired rules, it
+does not add them again. Otherwise, one atomic Sheets batch deletes only marked
+rules in descending index order and adds the complete replacement set; unmarked
+administrator rules remain unchanged. The same Sheet write lock covers the
+metadata read and atomic write.
+
+Initial Sheet setup applies the layout even when no participant rows exist. It
+writes the count and header rows, installs formatting from row 3 onward, and does
+not create a placeholder participant. Existing Sheets are repaired on the next
+Shift submission or recruitment-range save. Saving a recruitment range updates
+the database first and then immediately applies its visibility and gap formatting;
+if the Sheet write fails, the setting remains saved and Discord reports partial
+success so the same value can be retried safely.
+
 ## Settings Migration
 
 After database and sheet migration:

@@ -236,6 +236,7 @@ class ShiftRegister(
             user_info,
             shift,
             context.manager,
+            recruitment_ranges,
         )
 
     async def _write_shift_registration(
@@ -244,6 +245,7 @@ class ShiftRegister(
         user_info: UserInfo,
         shift: Shift,
         manager: ShiftRegisterManager,
+        recruitment_ranges: RecruitmentTimeRanges,
     ) -> Shift:
         self.logger.info(
             "Parsed shift in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%r)",
@@ -270,7 +272,10 @@ class ShiftRegister(
                     metadata
                 )
                 await manager.upsert_or_delete_user_shift(
-                    user_info, shift, metadata=metadata
+                    user_info,
+                    shift,
+                    metadata=metadata,
+                    recruitment_ranges=recruitment_ranges,
                 )
             except Exception as exc:
                 error = partial_success_storage_error(exc)

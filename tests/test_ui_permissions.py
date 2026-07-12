@@ -10,6 +10,7 @@ from tortoise.exceptions import DBConnectionError, IntegrityError
 
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
+from components import ui_shift_register
 from components.ui_auto_guide import (
     AUTO_GUIDE_BUTTON_VIEW_TIMEOUT_SECONDS,
     AUTO_GUIDE_DELETE_CUSTOM_ID_PREFIX,
@@ -103,6 +104,23 @@ def team_source_resolution(
             ),
         ),
     )
+
+
+class RecordingAsyncLock:
+    def __init__(self) -> None:
+        self.keys: list[int] = []
+        self.entered = 0
+        self.exited = 0
+
+    def __call__(self, key: int) -> RecordingAsyncLock:
+        self.keys.append(key)
+        return self
+
+    async def __aenter__(self) -> None:
+        self.entered += 1
+
+    async def __aexit__(self, *_args: object) -> None:
+        self.exited += 1
 
 
 class RecordingTeamRegisterManager:
@@ -2553,8 +2571,16 @@ async def test_shift_modal_submit_denies_unauthorized_user() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shift_modal_submit_allows_authorized_user() -> None:
+async def test_shift_modal_submit_allows_authorized_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manager = RecordingShiftRegisterManager()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
@@ -2568,6 +2594,8 @@ async def test_shift_modal_submit_allows_authorized_user() -> None:
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
+    assert sheet_lock.keys == [222]
+    assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
     assert len(manager.upsert_calls) == 1
     assert manager.anchor_updates == ["B2"]
     assert len(interaction.followup.messages) == 1
@@ -3166,14 +3194,24 @@ async def test_shift_timeline_modal_invalid_submit_sends_edit_again_view() -> No
 
 
 @pytest.mark.asyncio
-async def test_shift_recruitment_range_modal_submit_updates_range() -> None:
+async def test_shift_recruitment_range_modal_submit_updates_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manager = RecordingShiftRegisterManager()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
     interaction = FakeInteraction()
     modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-8, 8-12")
 
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
+    assert sheet_lock.keys == [222]
+    assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
     assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
         [{"start": 4, "end": 12}]
     ]

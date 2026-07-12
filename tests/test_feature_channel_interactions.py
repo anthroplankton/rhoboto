@@ -987,10 +987,12 @@ class OrderedShiftUpsertManager(ConfiguredManager):
         shift: RegisterShift | None,
         *,
         metadata: object,
+        recruitment_ranges: RecruitmentTimeRanges,
     ) -> None:
         assert user_info.username == "alice"
         assert shift is not None
         assert metadata is self.ensured_metadata
+        assert recruitment_ranges.to_json() == [{"start": 4, "end": 28}]
         self.events.append("upsert")
         if self.upsert_error is not None:
             raise self.upsert_error

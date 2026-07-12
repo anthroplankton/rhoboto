@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+from unittest.mock import AsyncMock
 
 import pytest
 from tortoise import Tortoise
@@ -19,8 +20,10 @@ from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
 from utils.db import close_db, get_model_modules, init_db
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import RecruitmentTimeRanges
+from utils.storage_errors import StorageError, StorageErrorKind
 
 
 @pytest.mark.asyncio
@@ -304,11 +307,19 @@ async def test_shift_manager_updates_recruitment_time_ranges() -> None:
         )
         manager = ShiftRegisterManager(feature_channel, "service.json")
         ranges = RecruitmentTimeRanges.from_modal_input("4-8, 8-12")
+        metadata = object()
+        manager.fetch_google_sheets_metadata = AsyncMock(return_value=metadata)
+        manager.sync_entry_presentation = AsyncMock()
 
         await manager.update_recruitment_time_ranges(ranges)
 
         await config.refresh_from_db()
         assert config.recruitment_time_ranges == [{"start": 4, "end": 12}]
+        manager.sync_entry_presentation.assert_awaited_once_with(
+            metadata,
+            ranges,
+            force=True,
+        )
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 
@@ -331,6 +342,8 @@ async def test_shift_manager_update_ranges_preserves_fresh_timeline_fields() -> 
             final_schedule_worksheet_id=3,
         )
         manager = ShiftRegisterManager(feature_channel, "service.json")
+        manager.fetch_google_sheets_metadata = AsyncMock(return_value=object())
+        manager.sync_entry_presentation = AsyncMock()
         await manager.get_sheet_config()
         deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
         fresh_config = await ShiftRegisterConfig.get(id=config.id)
@@ -347,6 +360,48 @@ async def test_shift_manager_update_ranges_preserves_fresh_timeline_fields() -> 
         assert fetched.day_number == 2
         assert fetched.event_date == dt.date(2026, 8, 12)
         assert fetched.submission_deadline_at == deadline
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_range_sheet_failure_is_partial_after_database_save() -> (
+    None
+):
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1006,
+            channel_id=2007,
+            feature_name="shift_register",
+        )
+        config = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        manager = ShiftRegisterManager(feature_channel, "service.json")
+        manager.fetch_google_sheets_metadata = AsyncMock(return_value=object())
+        manager.sync_entry_presentation = AsyncMock(
+            side_effect=GoogleSheetsError(
+                GoogleSheetsErrorKind.TRANSIENT,
+                "temporary",
+            )
+        )
+        ranges = RecruitmentTimeRanges.from_modal_input("4-12, 20-28")
+
+        with pytest.raises(StorageError) as exc_info:
+            await manager.update_recruitment_time_ranges(ranges)
+
+        assert exc_info.value.kind is StorageErrorKind.PARTIAL_SUCCESS
+        await config.refresh_from_db()
+        assert config.recruitment_time_ranges == [
+            {"start": 4, "end": 12},
+            {"start": 20, "end": 28},
+        ]
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 

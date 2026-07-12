@@ -13,12 +13,14 @@ from models.team_register import TeamRegisterConfig
 from tests.fakes import FakeWorksheet
 from utils import shift_register_manager
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.manager_base import ManagerBase
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetContent,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
+    RecruitmentTimeRanges,
     ShiftParser,
     ShiftRegisterGoogleSheetsMetadata,
     build_team_summary_formula,
@@ -210,6 +212,8 @@ class FakeEntryWorksheet:
         self.batch_updates: list[list[dict[str, object]]] = []
         self.typed_batch_updates: list[list[dict[str, object]]] = []
         self.typed_formula_ranges: list[set[str]] = []
+        self.conditional_format_rules: list[dict[str, object]] = []
+        self.presentation_updates: list[dict[str, object]] = []
         self.ensure_calls: list[tuple[int, int]] = []
         self.deleted_rows: list[int] = []
 
@@ -225,18 +229,43 @@ class FakeEntryWorksheet:
         for item in data:
             self._apply_range(str(item["range"]), item["values"])
 
-    async def batch_update_typed_values(
+    async def batch_update_typed_values(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
         formula_ranges: set[str],
+        background_updates: object = (),
+        border_updates: object = (),
+        format_updates: object = (),
+        column_width_updates: object = (),
+        hidden_column_updates: object = (),
+        conditional_format_rule_deletes: object = (),
+        conditional_format_rule_adds: object = (),
+        frozen_column_count: int | None = None,
     ) -> None:
         copied = copy.deepcopy(data)
         self.batch_updates.append(copied)
         self.typed_batch_updates.append(copied)
         self.typed_formula_ranges.append(formula_ranges)
+        self.presentation_updates.append(
+            {
+                "background_updates": list(background_updates),
+                "border_updates": list(border_updates),
+                "format_updates": list(format_updates),
+                "column_width_updates": list(column_width_updates),
+                "hidden_column_updates": list(hidden_column_updates),
+                "conditional_format_rule_deletes": list(
+                    conditional_format_rule_deletes
+                ),
+                "conditional_format_rule_adds": list(conditional_format_rule_adds),
+                "frozen_column_count": frozen_column_count,
+            }
+        )
         for item in data:
             self._apply_range(str(item["range"]), item["values"])
+
+    async def get_conditional_format_rules(self) -> list[dict[str, object]]:
+        return copy.deepcopy(self.conditional_format_rules)
 
     async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
         self.ensure_calls.append((min_rows, min_cols))
@@ -916,6 +945,40 @@ async def test_team_manager_upserts_and_deletes_user_team_with_fake_worksheet() 
 
 
 @pytest.mark.asyncio
+async def test_shift_sheet_setup_initializes_entry_presentation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    metadata = make_shift_metadata(FakeEntryWorksheet(rows=[]))
+    parent_upsert = AsyncMock(return_value=metadata)
+    monkeypatch.setattr(
+        ManagerBase,
+        "upsert_sheet_config_and_worksheets",
+        parent_upsert,
+    )
+    manager.get_sheet_config = AsyncMock(
+        return_value=SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 28}])
+    )
+    manager.sync_entry_presentation = AsyncMock()
+
+    result = await manager.upsert_sheet_config_and_worksheets(
+        "https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+    )
+
+    assert result is metadata
+    manager.sync_entry_presentation.assert_awaited_once()
+    sync_metadata, sync_ranges = manager.sync_entry_presentation.await_args.args
+    assert sync_metadata is metadata
+    assert sync_ranges.to_json() == [{"start": 4, "end": 28}]
+    assert manager.sync_entry_presentation.await_args.kwargs == {"force": True}
+
+
+@pytest.mark.asyncio
 async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
@@ -947,6 +1010,167 @@ async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
     assert worksheet.rows[2][9] == 1
     assert worksheet.rows[2][13] == 0
     assert worksheet.ensure_calls == [(3, 36)]
+
+
+def test_entry_presentation_plan_matches_approved_sheet_contract() -> None:
+    ranges = RecruitmentTimeRanges.from_modal_input("4-12, 20-28")
+
+    plan = shift_register_manager._entry_presentation_plan(  # noqa: SLF001
+        ranges,
+        worksheet_id=1,
+    )
+
+    assert plan.frozen_column_count == 5
+    assert plan.column_width_updates == (
+        ("A:B", 100),
+        ("C:D", 60),
+        ("E:E", 60),
+        ("F:AI", 40),
+    )
+    assert plan.hidden_column_updates == (
+        ("F:AI", False),
+        ("F:I", True),
+        ("AH:AI", True),
+    )
+    assert ("A2:AJ2", "#000000", "SOLID", ("top", "bottom")) in (plan.border_updates)
+    assert ("B:B", "#000000", "SOLID", ("right",)) in plan.border_updates
+    assert ("E:E", "#000000", "SOLID", ("right",)) in plan.border_updates
+    assert ("AI:AI", "#000000", "SOLID", ("right",)) in plan.border_updates
+    formulas = [
+        rule["booleanRule"]["condition"]["values"][0]["userEnteredValue"]
+        for rule in plan.conditional_format_rules
+    ]
+    assert all("rhoboto:shift-entry:" in formula for formula in formulas)
+    assert any("ISODD(SUBTOTAL(103,$A$3:$A3))" in formula for formula in formulas)
+    assert any("ISEVEN(SUBTOTAL(103,$A$3:$A3))" in formula for formula in formulas)
+    gap_rule = next(
+        rule for rule in plan.conditional_format_rules if "gap:v1" in str(rule)
+    )
+    assert gap_rule["ranges"] == [
+        {
+            "sheetId": 1,
+            "startRowIndex": 2,
+            "startColumnIndex": 17,
+            "endColumnIndex": 25,
+        }
+    ]
+    assert gap_rule["booleanRule"]["format"]["backgroundColorStyle"] == {
+        "rgbColor": {"red": 0.8, "green": 0.8, "blue": 0.8}
+    }
+
+
+def test_entry_rule_updates_replace_only_marked_rules_in_descending_order() -> None:
+    desired = shift_register_manager._entry_presentation_plan(  # noqa: SLF001
+        RecruitmentTimeRanges.default(),
+        worksheet_id=1,
+    ).conditional_format_rules
+    stale = copy.deepcopy(desired[0])
+    stale["booleanRule"]["condition"]["values"][0]["userEnteredValue"] = (
+        '=N("rhoboto:shift-entry:stale:v0")=0'
+    )
+    manual = {"booleanRule": {"condition": {"type": "TEXT_EQ"}}}
+
+    deletes, adds, current = shift_register_manager._entry_rule_updates(  # noqa: SLF001
+        [stale, manual, copy.deepcopy(stale)],
+        desired,
+    )
+
+    assert deletes == (2, 0)
+    assert adds == tuple(reversed(desired))
+    assert current is False
+
+
+@pytest.mark.asyncio
+async def test_shift_entry_style_repair_shares_participant_atomic_batch() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    configure_row_source(
+        manager,
+        shift_register_manager.TeamSourceResolution(
+            shift_register_manager.TeamSourceStatus.MISSING
+        ),
+    )
+    worksheet = FakeEntryWorksheet(current_entry_rows())
+    shift = ShiftParser.parse_submission(make_user(), ["4-8"]).shift
+    assert shift is not None
+
+    await manager.upsert_or_delete_user_shift(
+        make_user(),
+        shift,
+        make_shift_metadata(worksheet),
+        recruitment_ranges=RecruitmentTimeRanges.from_modal_input("4-12, 20-28"),
+    )
+
+    presentation = worksheet.presentation_updates[-1]
+    assert presentation["frozen_column_count"] == 5
+    assert presentation["conditional_format_rule_adds"]
+    assert presentation["hidden_column_updates"] == [
+        ("F:AI", False),
+        ("F:I", True),
+        ("AH:AI", True),
+    ]
+    assert len(worksheet.typed_batch_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_empty_shift_entry_presentation_initializes_without_participant() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    worksheet = FakeEntryWorksheet(rows=[], row_count=2, col_count=20)
+
+    await manager.sync_entry_presentation(
+        make_shift_metadata(worksheet),
+        RecruitmentTimeRanges.from_modal_input("4-12, 20-28"),
+        force=True,
+    )
+
+    assert [item["range"] for item in worksheet.typed_batch_updates[-1]] == [
+        "A1:AJ1",
+        "A2:AJ2",
+    ]
+    assert worksheet.rows[0][:36] == EntryWorksheetContent.count_row()
+    assert worksheet.rows[1][:36] == EntryWorksheetContent.COLUMNS
+    assert len(worksheet.rows) == 2
+    assert worksheet.ensure_calls == [(3, 36)]
+    assert worksheet.presentation_updates[-1]["frozen_column_count"] == 5
+
+
+@pytest.mark.asyncio
+async def test_current_shift_entry_rules_do_not_repeat_presentation_updates() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    configure_row_source(manager, available_team_source())
+    worksheet = FakeEntryWorksheet(current_entry_rows())
+    ranges = RecruitmentTimeRanges.from_modal_input("4-12, 20-28")
+    worksheet.conditional_format_rules = list(
+        shift_register_manager._entry_presentation_plan(  # noqa: SLF001
+            ranges,
+            worksheet_id=worksheet.id,
+        ).conditional_format_rules
+    )
+    shift = ShiftParser.parse_submission(make_user(), ["4-8"]).shift
+    assert shift is not None
+
+    await manager.upsert_or_delete_user_shift(
+        make_user(),
+        shift,
+        make_shift_metadata(worksheet),
+        recruitment_ranges=ranges,
+    )
+
+    assert worksheet.presentation_updates[-1] == {
+        "background_updates": [],
+        "border_updates": [],
+        "format_updates": [],
+        "column_width_updates": [],
+        "hidden_column_updates": [],
+        "conditional_format_rule_deletes": [],
+        "conditional_format_rule_adds": [],
+        "frozen_column_count": None,
+    }
 
 
 @pytest.mark.asyncio

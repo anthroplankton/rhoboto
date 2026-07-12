@@ -495,14 +495,16 @@ class ShiftRegisterSheetModal(Modal):
         final_schedule_anchor_cell = self.final_schedule_anchor_cell.value
 
         try:
-            metadata = (
-                await self.shift_register_manager.upsert_sheet_config_and_worksheets(
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                self.shift_register_manager.feature_channel.channel_id
+            ):
+                upsert = self.shift_register_manager.upsert_sheet_config_and_worksheets
+                metadata = await upsert(
                     sheet_url=sheet_url,
                     entry_worksheet_title=entry_worksheet_title,
                     draft_worksheet_title=draft_worksheet_title,
                     final_schedule_worksheet_title=final_schedule_worksheet_title,
                 )
-            )
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_partial_success(
                 interaction,
@@ -768,7 +770,10 @@ class ShiftRecruitmentRangeModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
         try:
-            await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                self.shift_register_manager.feature_channel.channel_id
+            ):
+                await self.shift_register_manager.update_recruitment_time_ranges(ranges)
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_storage_error(
                 interaction,

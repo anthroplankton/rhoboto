@@ -157,13 +157,40 @@ class AsyncioGspreadWorksheet:
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "update_worksheet")
 
-    async def batch_update_typed_values(
+    async def get_conditional_format_rules(self) -> list[dict[str, object]]:
+        """Return this worksheet's conditional-format rules."""
+        try:
+            metadata = await self._worksheet.agcm._call(  # noqa: SLF001
+                self._worksheet.ws.client.fetch_sheet_metadata,
+                self._worksheet.ws.spreadsheet_id,
+                params={"fields": "sheets(properties(sheetId),conditionalFormats)"},
+            )
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
+        sheet = next(
+            (
+                item
+                for item in metadata.get("sheets", [])
+                if item.get("properties", {}).get("sheetId") == self.id
+            ),
+            {},
+        )
+        return list(sheet.get("conditionalFormats", []))
+
+    async def batch_update_typed_values(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
         formula_ranges: set[str],
         background_updates: Sequence[tuple[str, str]] = (),
         border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        format_updates: Sequence[tuple[str, dict[str, object], str]] = (),
+        column_width_updates: Sequence[tuple[str, int]] = (),
+        hidden_column_updates: Sequence[tuple[str, bool]] = (),
+        conditional_format_rule_deletes: Sequence[int] = (),
+        conditional_format_rule_adds: Sequence[dict[str, object]] = (),
         frozen_column_count: int | None = None,
     ) -> None:
         """Atomically write typed values plus narrow grid formatting."""
@@ -227,6 +254,16 @@ class AsyncioGspreadWorksheet:
                     }
                 }
             )
+        requests.extend(
+            _presentation_requests(
+                self.id,
+                format_updates=format_updates,
+                column_width_updates=column_width_updates,
+                hidden_column_updates=hidden_column_updates,
+                conditional_format_rule_deletes=conditional_format_rule_deletes,
+                conditional_format_rule_adds=conditional_format_rule_adds,
+            )
+        )
         if frozen_column_count is not None:
             requests.append(
                 {
@@ -295,6 +332,86 @@ def _hex_rgb(value: str) -> dict[str, float]:
         name: int(value[start : start + 2], 16) / RGB_CHANNEL_MAX
         for name, start in (("red", 1), ("green", 3), ("blue", 5))
     }
+
+
+def _column_dimension_request(
+    range_name: str,
+    worksheet_id: int,
+    *,
+    properties: dict[str, object],
+    fields: str,
+) -> dict[str, object]:
+    grid_range = a1_range_to_grid_range(range_name, worksheet_id)
+    return {
+        "updateDimensionProperties": {
+            "range": {
+                "sheetId": worksheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": grid_range["startColumnIndex"],
+                "endIndex": grid_range["endColumnIndex"],
+            },
+            "properties": properties,
+            "fields": fields,
+        }
+    }
+
+
+def _presentation_requests(  # noqa: PLR0913
+    worksheet_id: int,
+    *,
+    format_updates: Sequence[tuple[str, dict[str, object], str]],
+    column_width_updates: Sequence[tuple[str, int]],
+    hidden_column_updates: Sequence[tuple[str, bool]],
+    conditional_format_rule_deletes: Sequence[int],
+    conditional_format_rule_adds: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    requests = [
+        {
+            "repeatCell": {
+                "range": a1_range_to_grid_range(range_name, worksheet_id),
+                "cell": {"userEnteredFormat": cell_format},
+                "fields": fields,
+            }
+        }
+        for range_name, cell_format, fields in format_updates
+    ]
+    requests.extend(
+        _column_dimension_request(
+            range_name,
+            worksheet_id,
+            properties={"pixelSize": pixel_size},
+            fields="pixelSize",
+        )
+        for range_name, pixel_size in column_width_updates
+    )
+    requests.extend(
+        _column_dimension_request(
+            range_name,
+            worksheet_id,
+            properties={"hiddenByUser": hidden},
+            fields="hiddenByUser",
+        )
+        for range_name, hidden in hidden_column_updates
+    )
+    requests.extend(
+        {
+            "deleteConditionalFormatRule": {
+                "sheetId": worksheet_id,
+                "index": index,
+            }
+        }
+        for index in conditional_format_rule_deletes
+    )
+    requests.extend(
+        {
+            "addConditionalFormatRule": {
+                "rule": rule,
+                "index": 0,
+            }
+        }
+        for rule in conditional_format_rule_adds
+    )
+    return requests
 
 
 class GoogleSheet:

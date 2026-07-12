@@ -15,6 +15,7 @@ class RawWorksheet:
         title: str = "Worksheet",
         values: list[list[object]] | None = None,
         batch_values: list[list[list[object]]] | None = None,
+        metadata: dict[str, object] | None = None,
         row_count: int = 100,
         col_count: int = 20,
     ) -> None:
@@ -32,7 +33,7 @@ class RawWorksheet:
         self.delete_calls: list[tuple[int, int | None]] = []
         self.spreadsheet_batch_update_calls: list[dict[str, object]] = []
         self.agcm = RawClientManager()
-        self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls)
+        self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls, metadata)
         self.extra_attribute = "delegated"
 
     async def get(self, **kwargs: object) -> list[list[object]]:
@@ -63,25 +64,49 @@ class RawWorksheet:
 
 
 class RawClientManager:
-    async def _call(self, method: object, *args: object) -> object:
+    async def _call(
+        self,
+        method: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
         assert callable(method)
-        return method(*args)
+        return method(*args, **kwargs)
 
 
 class RawWorksheetResource:
     spreadsheet_id = "spreadsheet-id"
 
-    def __init__(self, calls: list[dict[str, object]]) -> None:
-        self.client = RawSpreadsheetClient(calls)
+    def __init__(
+        self,
+        calls: list[dict[str, object]],
+        metadata: dict[str, object] | None = None,
+    ) -> None:
+        self.client = RawSpreadsheetClient(calls, metadata)
 
 
 class RawSpreadsheetClient:
-    def __init__(self, calls: list[dict[str, object]]) -> None:
+    def __init__(
+        self,
+        calls: list[dict[str, object]],
+        metadata: dict[str, object] | None,
+    ) -> None:
         self.calls = calls
+        self.metadata = metadata or {"sheets": []}
+        self.metadata_calls: list[dict[str, object]] = []
 
     def batch_update(self, spreadsheet_id: str, body: dict[str, object]) -> None:
         assert spreadsheet_id == "spreadsheet-id"
         self.calls.append(body)
+
+    def fetch_sheet_metadata(
+        self,
+        spreadsheet_id: str,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        assert spreadsheet_id == "spreadsheet-id"
+        self.metadata_calls.append(params)
+        return self.metadata
 
 
 class RawSpreadsheet:
@@ -272,6 +297,107 @@ async def test_adapter_batch_updates_mixed_cell_types_atomically() -> None:
         {"numberValue": 1},
         {"boolValue": False},
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_reads_worksheet_conditional_format_rules() -> None:
+    own_rules = [{"booleanRule": {"condition": {"type": "CUSTOM_FORMULA"}}}]
+    raw = RawWorksheet(
+        worksheet_id=42,
+        metadata={
+            "sheets": [
+                {"properties": {"sheetId": 1}, "conditionalFormats": [{"other": 1}]},
+                {"properties": {"sheetId": 42}, "conditionalFormats": own_rules},
+            ]
+        },
+    )
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    assert await adapter.get_conditional_format_rules() == own_rules
+    assert raw.ws.client.metadata_calls == [
+        {"fields": "sheets(properties(sheetId),conditionalFormats)"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_batches_entry_presentation_requests_atomically() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+    desired_rule = {
+        "ranges": [{"sheetId": 1, "startRowIndex": 2}],
+        "booleanRule": {
+            "condition": {
+                "type": "CUSTOM_FORMULA",
+                "values": [{"userEnteredValue": "=TRUE"}],
+            },
+            "format": {"backgroundColorStyle": {"rgbColor": {"red": 1.0}}},
+        },
+    }
+
+    await adapter.batch_update_typed_values(
+        [{"range": "A1", "values": [["count"]]}],
+        formula_ranges=set(),
+        format_updates=[
+            (
+                "A2:AJ2",
+                {
+                    "backgroundColorStyle": {
+                        "rgbColor": {
+                            "red": 60 / 255,
+                            "green": 120 / 255,
+                            "blue": 216 / 255,
+                        }
+                    },
+                    "textFormat": {
+                        "bold": True,
+                        "foregroundColorStyle": {
+                            "rgbColor": {"red": 1.0, "green": 1.0, "blue": 1.0}
+                        },
+                    },
+                },
+                "userEnteredFormat(backgroundColorStyle,textFormat)",
+            )
+        ],
+        column_width_updates=[("A:B", 100), ("F:AI", 40)],
+        hidden_column_updates=[("F:AI", False), ("F:I", True)],
+        conditional_format_rule_deletes=[3, 1],
+        conditional_format_rule_adds=[desired_rule],
+        frozen_column_count=5,
+    )
+
+    assert len(raw.spreadsheet_batch_update_calls) == 1
+    requests = raw.spreadsheet_batch_update_calls[0]["requests"]
+    assert [next(iter(request)) for request in requests] == [
+        "updateCells",
+        "repeatCell",
+        "updateDimensionProperties",
+        "updateDimensionProperties",
+        "updateDimensionProperties",
+        "updateDimensionProperties",
+        "deleteConditionalFormatRule",
+        "deleteConditionalFormatRule",
+        "addConditionalFormatRule",
+        "updateSheetProperties",
+    ]
+    assert requests[2]["updateDimensionProperties"] == {
+        "range": {
+            "sheetId": 1,
+            "dimension": "COLUMNS",
+            "startIndex": 0,
+            "endIndex": 2,
+        },
+        "properties": {"pixelSize": 100},
+        "fields": "pixelSize",
+    }
+    assert requests[4]["updateDimensionProperties"]["properties"] == {
+        "hiddenByUser": False
+    }
+    assert [
+        request["deleteConditionalFormatRule"]["index"] for request in requests[6:8]
+    ] == [3, 1]
+    assert requests[8] == {
+        "addConditionalFormatRule": {"rule": desired_rule, "index": 0}
+    }
 
 
 @pytest.mark.asyncio
