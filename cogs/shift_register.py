@@ -3,7 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import TYPE_CHECKING, override
 
-from discord import File, app_commands
+from discord import File, User, app_commands
 from discord.utils import escape_markdown
 
 from bot import config
@@ -43,6 +43,7 @@ from utils.shift_scheduler import (
     STANDBY_SUPPORTER_SLOT,
     hour_label,
 )
+from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -54,7 +55,6 @@ if TYPE_CHECKING:
     from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
     from utils.shift_scheduler import DraftSchedule
-    from utils.structs_base import UserInfo
 
 
 def _format_display_name(name: str) -> str:
@@ -418,7 +418,7 @@ class ShiftRegister(
         encore_power_threshold=(
             "Minimum Team Power required for Encore; Power must be greater than it."
         ),
-        runner="Nickname pinned to the runner (ランナー) lane for every hour.",
+        runner="Discord user pinned to the Runner (ランナー) lane for every hour.",
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
@@ -430,7 +430,7 @@ class ShiftRegister(
         self,
         interaction: Interaction,
         encore_power_threshold: app_commands.Range[float, 0],
-        runner: str | None = None,
+        runner: User | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
@@ -529,11 +529,19 @@ class ShiftRegister(
                 member_by_names = {
                     member.name: member for member in source.guild.members
                 }
+                runner_info = (
+                    UserInfo(
+                        username=runner.name,
+                        display_name=runner.display_name,
+                    )
+                    if runner is not None
+                    else None
+                )
                 result = await context.manager.generate_draft(
                     metadata,
                     member_by_names=member_by_names,
                     encore_power_threshold=float(encore_power_threshold),
-                    runner=runner,
+                    runner=runner_info,
                 )
                 schedule = result.schedule
                 current_config = await context.manager.get_sheet_config()

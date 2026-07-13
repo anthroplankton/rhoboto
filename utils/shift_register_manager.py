@@ -1169,7 +1169,7 @@ class ShiftRegisterManager(
         *,
         member_by_names: dict[str, Member],
         encore_power_threshold: float,
-        runner: str | None = None,
+        runner: UserInfo | None = None,
     ) -> DraftGenerationResult:
         """Build the draft schedule and overwrite the draft worksheet."""
         metadata, structure_changed = await self._ensure_current_worksheets(
@@ -1354,7 +1354,7 @@ class ShiftRegisterManager(
         entry_grid: list[list[object]],
         draft_grid: list[list[object]],
         encore_power_threshold: float,
-        runner: str | None,
+        runner: UserInfo | None,
     ) -> tuple[DraftGenerationResult, list[dict[str, object]]]:
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet

@@ -66,20 +66,30 @@ This change does not include:
 
 ## Command Contract
 
-The command accepts a required Discord-validated, non-negative float and retains
-the optional runner:
+The command accepts a required Discord-validated, non-negative float and an
+optional Discord user for the runner:
 
 ```python
 async def generate_draft(
     interaction: Interaction,
     encore_power_threshold: app_commands.Range[float, 0],
-    runner: str | None = None,
+    runner: User | None = None,
 ) -> None:
 ```
 
 Discord validates that the threshold is present, numeric, and non-negative before
-invoking the command. The success response shows the threshold after the Runner
-line. Recruitment time reuses
+invoking the command and resolves the runner through the native user picker. The
+runner is not a Shift Entry participant: the selected Discord identity supplies
+the username used for internal exclusion and the display name used to build the
+human-readable canonical Draft name. Although the runner is not a candidate, its
+identity participates in the same duplicate-name and reserved-suffix checks as
+Shift Entry identities. The canonical name is written to the Runner column for
+every configured recruitment slot and shown in the success response;
+non-recruitment rows keep the Runner column blank. The command and generation
+path do not accept a free-form runner string or retain a legacy fallback.
+
+The success response shows the threshold after the Runner line. Recruitment time
+reuses
 `RecruitmentTimeRanges.announcement_display()` and the established announcement
 copy:
 
@@ -210,7 +220,7 @@ Team pairs. Backup Teams do not affect Python scheduling or candidate ranking.
 | Encore roles | Current Discord member and configured role IDs | Refreshed Summary `encore_roles` |
 | Backup Team pairs | Shared derivation, excluded from scheduling | Refreshed complete Summary row in `編成一覧` |
 | Recruitment ranges | Shift database config | Generation-time formula constants |
-| Runner | Command option | Generation-time formula constant |
+| Runner | Discord user command option; username for identity deduplication and canonical display name for output | Live Draft Runner column for canonical-name collision checks and per-row candidate exclusion |
 | Encore threshold | Command option for Python scheduling | Editable Draft threshold cell for live candidates |
 
 ### Archived Summary Rows
@@ -297,8 +307,11 @@ Honso and standby selection.
 
 ## Hourly Scheduling
 
-The runner is excluded from supporter positions. Each username can occupy at most
-one supporter position per hour. Encore, Honso, and standby all count toward the
+The runner is separate from Shift Entry participation and is excluded from
+supporter positions by Discord username. The Runner, Encore, Honso, and standby
+columns all contain human-readable canonical Draft names; usernames remain
+internal identity keys. Each participant username can occupy at most one
+supporter position per hour. Encore, Honso, and standby all count toward the
 participant's accumulated scheduled hours.
 
 ### Encore Selection
@@ -433,9 +446,17 @@ count present in one of its JST rows. Every row lists only participants availabl
 in that configured recruitment hour; continuous-axis gap rows stay empty even if
 Shift Entry contains a stale or manual value outside the configured slots.
 Participants already assigned in `C:G` remain listed, and one participant may
-appear in both Honso and Encore. Runner is excluded from all three blocks.
-Candidate cells contain only the complete canonical Draft name so a human can copy
-the cell directly into `C:G`.
+appear in both Honso and Encore. Python deduplicates Runner and Shift Entry
+identities by username before generating canonical names. Draft formulas contain
+no Runner username or display-name constant: they read the live Runner column for
+canonical-name collision checks. Each candidate row excludes both an exact
+canonical-name match and a display-name match with that row's Runner cell.
+Copying a candidate's complete canonical name into one Runner cell therefore
+removes that identity only from the corresponding JST candidate row; entering a
+shared display name excludes every candidate with that display name from that
+row. Candidate cells still contain only the complete canonical Draft name so a
+human can copy the cell directly into `C:G`; no bare username is rendered in
+place of that name.
 
 With an available Team Source, Honso candidates require Main ISV and sort by Main
 ISV descending. Encore candidates require nonblank `encore_roles`, strict effective
@@ -793,6 +814,8 @@ Focused tests must cover:
 - `No team yet` scheduling order and Japanese `未登録` Notes output.
 - Every Team Source fallback status and marker.
 - Unique, duplicate, and reserved-suffix canonical names.
+- Runner/Entry username deduplication and live per-row Runner-column candidate
+  exclusion without Runner identity constants in formulas.
 - Exact canonical-name resolution and unknown manual values.
 - Total, longest-consecutive, Encore-hour, compact Main/Encore `ISV/Power`, and
   original-message Notes values.

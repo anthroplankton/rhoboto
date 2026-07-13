@@ -83,6 +83,7 @@ def test_generate_draft_requires_non_negative_power_threshold() -> None:
     assert threshold.required is True
     assert threshold.min_value == 0
     assert parameters["runner"].required is False
+    assert parameters["runner"].type.value == 6
 
 
 def test_generate_draft_confirmation_formats_new_destinations() -> None:
@@ -358,7 +359,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
             *,
             member_by_names: dict[str, object],
             encore_power_threshold: float,
-            runner: str | None,
+            runner: UserInfo | None,
         ) -> DraftGenerationResult:
             assert list(member_by_names) == ["carol"]
             assert encore_power_threshold == 35

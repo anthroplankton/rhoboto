@@ -830,16 +830,26 @@ def _draft_team_value(isv: float | None, power: float | None) -> str:
     return "/".join("—" if value is None else f"{value:g}" for value in (isv, power))
 
 
-def _draft_identity_bindings(entry_worksheet_title: str) -> str:
+def _draft_identity_bindings(
+    entry_worksheet_title: str,
+    *,
+    runner_range: str,
+) -> str:
     title = entry_worksheet_title.replace("'", "''")
     return (
         f"usernames, IFERROR(FILTER('{title}'!A3:A, "
         f'\'{title}\'!A3:A <> ""), ""), '
         f"names, IFERROR(FILTER('{title}'!B3:B, "
         f'\'{title}\'!A3:A <> ""), ""), '
+        f"runnerNames, {runner_range}, "
         'pattern, "⟨@[a-z0-9._]{2,32}⟩$", '
+        "runnerBaseNames, MAP(runnerNames, LAMBDA(runnerName, "
+        'REGEXREPLACE(runnerName, " " & pattern, ""))), '
         "keys, MAP(names, usernames, LAMBDA(name, username, "
-        "IF(OR(SUMPRODUCT(N(names = name)) > 1, REGEXMATCH(name, pattern)), "
+        "IF(OR(SUMPRODUCT(N(names = name)) > 1, "
+        "SUMPRODUCT(N(runnerBaseNames = name) * "
+        "N(runnerNames <> runnerBaseNames)) > 0, "
+        "REGEXMATCH(name, pattern)), "
         'name & " ⟨@" & username & "⟩", name))), '
     )
 
@@ -944,9 +954,13 @@ class DraftWorksheetContent:
     ) -> str:
         """Build the live per-hour candidate block spill formula."""
         title = entry_worksheet_title.replace("'", "''")
+        last_row = max(2, len(schedule.assignments) + 1)
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         hour_slots = "{" + ";".join(map(str, schedule.hours or [0])) + "}"
         active_slots = "{" + ";".join(map(str, sorted(recruitment_slots))) + "}"
-        runner = _formula_string(schedule.runner or "")
         if team_source is None:
             team_bindings = (
                 "mainIsvs, MAP(usernames, LAMBDA(username, 0)), "
@@ -1026,17 +1040,20 @@ class DraftWorksheetContent:
             "=LET("
             f"threshold, IF(ISNUMBER({encore_power_threshold_cell}), "
             f"{encore_power_threshold_cell}, NA()), "
-            f"{_draft_identity_bindings(entry_worksheet_title)}"
+            f"{identity_bindings}"
             f"availability, IFERROR(FILTER('{title}'!F3:AI, "
             f"'{title}'!A3:A <> \"\"), MAKEARRAY(1, 30, "
             "LAMBDA(row, column, 0))), "
             "entryOrder, SEQUENCE(ROWS(usernames)), "
             f"hourSlots, {hour_slots}, "
             f"recruitmentSlots, {active_slots}, "
-            f'runnerEligible, N(usernames <> "") * N(names <> {runner}), '
+            "runnerEligible, LAMBDA(hour, LET(runnerName, "
+            "INDEX(runnerNames, XMATCH(hour, hourSlots, 0)), "
+            'N(usernames <> "") * N(keys <> runnerName) * '
+            "N(names <> runnerName))), "
             f"{team_bindings}"
             "activeHour, LAMBDA(hour, ISNUMBER(XMATCH(hour, recruitmentSlots, 0))), "
-            "availableMask, LAMBDA(hour, N(activeHour(hour)) * runnerEligible * "
+            "availableMask, LAMBDA(hour, N(activeHour(hour)) * runnerEligible(hour) * "
             "N(CHOOSECOLS(availability, hour + 1) = 1)), "
             "honsoMask, LAMBDA(hour, availableMask(hour) * N(honsoEligible)), "
             "encoreMask, LAMBDA(hour, availableMask(hour) * N(encoreEligible)), "
@@ -1101,7 +1118,11 @@ class DraftWorksheetContent:
                     "values": [],
                 }
             )
-        identity_bindings = _draft_identity_bindings(entry_worksheet_title)
+        last_row = max(2, len(schedule.assignments) + 1)
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         title = entry_worksheet_title.replace("'", "''")
         status_formula = (
             "=LET("
@@ -1213,6 +1234,10 @@ class DraftWorksheetContent:
         legend = _formula_string(cls.CANONICAL_NAME_LEGEND)
         team_legend = _formula_string(cls.TEAM_VALUE_LEGEND)
         headers = "{" + ",".join(map(_formula_string, cls.NOTES_COLUMNS)) + "}"
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         if team_source is None:
             team_bindings = (
                 'mainTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "")), '
@@ -1277,7 +1302,7 @@ class DraftWorksheetContent:
             f"shifts, C2:G{last_row}, "
             f"encore, C2:C{last_row}, "
             f"hourSlots, {hour_slots}, "
-            f"{_draft_identity_bindings(entry_worksheet_title)}"
+            f"{identity_bindings}"
             f"messages, IFERROR(FILTER('{title}'!AJ3:AJ, "
             f'\'{title}\'!A3:A <> ""), ""), '
             'people, IFERROR(UNIQUE(TOCOL(shifts, 1)), ""), '

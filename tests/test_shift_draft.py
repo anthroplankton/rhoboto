@@ -33,7 +33,7 @@ from utils.shift_scheduler import (
     ShiftScheduler,
 )
 from utils.storage_errors import StorageError, StorageErrorKind
-from utils.structs_base import WorksheetContractError
+from utils.structs_base import UserInfo, WorksheetContractError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -268,6 +268,10 @@ def make_shift(username: str, slots: Iterable[int]) -> Shift:
     )
 
 
+def make_runner() -> UserInfo:
+    return UserInfo(username="runner", display_name="Run")
+
+
 def test_shifts_from_ranges_reads_current_entry_owned_columns() -> None:
     availability = [
         1 if index in {4, 6} else 0 for index in range(len(ShiftParser.HOUR_LABELS))
@@ -314,7 +318,7 @@ def test_from_schedule_renders_lane_columns() -> None:
             )
         },
         encore_power_threshold=35,
-        runner="Run",
+        runner=make_runner(),
     )
 
     frame = DraftWorksheetContent.from_schedule(schedule)
@@ -329,7 +333,11 @@ def test_from_schedule_renders_lane_columns() -> None:
 
 
 def test_from_schedule_omits_runner_outside_recruitment_slots() -> None:
-    schedule = ShiftScheduler.assign([], [4, 5, 6], runner="Run")
+    schedule = ShiftScheduler.assign(
+        [],
+        [4, 5, 6],
+        runner=UserInfo(username="runner", display_name="Run"),
+    )
 
     frame = DraftWorksheetContent.from_schedule(
         schedule,
@@ -337,6 +345,39 @@ def test_from_schedule_omits_runner_outside_recruitment_slots() -> None:
     )
 
     assert list(frame["ランナー"]) == ["Run", "", "Run"]
+
+
+def test_candidate_formula_masks_each_row_by_canonical_runner_cell() -> None:
+    runner = UserInfo(username="runner_user", display_name="Alice")
+    schedule = ShiftScheduler.assign(
+        [
+            Shift(
+                username="runner_user",
+                display_name="Alice",
+                original_message="",
+                slots={4},
+            )
+        ],
+        [4],
+        runner=runner,
+    )
+
+    formula = DraftWorksheetContent.candidate_formula(
+        schedule,
+        entry_worksheet_title="Shift Entry",
+        recruitment_slots={4},
+        encore_power_threshold_cell="L2",
+        team_source=None,
+    )
+
+    assert "runnerUsername" not in formula
+    assert "runnerBaseNames" in formula
+    assert "N(runnerBaseNames = name) * N(runnerNames <> runnerBaseNames)" in formula
+    assert "runnerNames, B2:B2" in formula
+    assert "runnerName, INDEX(runnerNames, XMATCH(hour, hourSlots, 0))" in formula
+    assert "N(keys <> runnerName) * N(names <> runnerName)" in formula
+    assert "runnerEligible(hour)" in formula
+    assert "FILTER(HSTACK(keys, scores, entryOrder), mask)" in formula
 
 
 def test_from_schedule_with_no_hours_is_header_only() -> None:
@@ -396,6 +437,9 @@ def test_notes_formula_uses_exact_canonical_keys_and_dynamic_schedule() -> None:
     assert "C2:C2" in formula
     assert "⟨@[a-z0-9._]{2,32}⟩$" in formula
     assert "SUMPRODUCT(N(names = name)) > 1" in formula
+    assert "runnerNames, B2:B2" in formula
+    assert "N(runnerBaseNames = name) * N(runnerNames <> runnerBaseNames)" in formula
+    assert "runnerUsername" not in formula
     assert "SUMPRODUCT(N(shifts = person))" in formula
     assert "SUMPRODUCT(N(row = person))" in formula
     assert "SUMPRODUCT(N(encore = person))" in formula
@@ -503,7 +547,10 @@ def test_candidate_formula_uses_hourly_availability_and_team_rules() -> None:
     assert "> 35" not in formula
     assert "recruitmentSlots, {4;6}" in formula
     assert "'Shift Entry'!F3:AI" in formula
-    assert 'names <> "Run"' in formula
+    assert "runnerNames, B2:B4" in formula
+    assert "runnerName, INDEX(runnerNames, XMATCH(hour, hourSlots, 0))" in formula
+    assert "N(keys <> runnerName) * N(names <> runnerName)" in formula
+    assert "runnerUsername" not in formula
     assert "SORT(" in formula
     assert (
         "HSTACK(honsoBlock, blankColumn, encoreBlock, blankColumn, unregisteredBlock)"
@@ -577,6 +624,8 @@ def test_lookup_updates_build_exact_layout_and_cleanup() -> None:
     assert "⚠️ 参加者を特定できません" in formulas["L6"]
     assert "K6" in formulas["L6"]
     assert "XMATCH(inputName, keys, 0)" in formulas["L6"]
+    assert all("runnerNames, B2:B3" in formula for formula in formulas.values())
+    assert all("runnerUsername" not in formula for formula in formulas.values())
     assert 'TEXTJOIN("・", TRUE' in formulas["K7"]
     assert "AJ3:AJ" in formulas["K8"]
     assert "IMPORTRANGE" in formulas["J10"]
@@ -945,7 +994,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         metadata,
         member_by_names={},
         encore_power_threshold=35,
-        runner="Run",
+        runner=make_runner(),
     )
 
     data = draft_worksheet.typed_batches[-1]
@@ -1642,7 +1691,7 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
             metadata,
             member_by_names={},
             encore_power_threshold=35,
-            runner="Run",
+            runner=make_runner(),
         )
 
     assert draft_worksheet.typed_batches == []
@@ -1711,7 +1760,7 @@ async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
             metadata,
             member_by_names={},
             encore_power_threshold=35,
-            runner="Run",
+            runner=make_runner(),
         )
 
     assert exc_info.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
 
     from utils.shift_register_structs import Shift
+    from utils.structs_base import UserInfo
 
 ENCORE_SUPPORTER_SLOT = "encore"
 HONSO_SUPPORTER_SLOTS: tuple[str, str, str] = ("honso_1", "honso_2", "honso_3")
@@ -58,17 +59,25 @@ class DraftTeamProfile:
         return isv
 
 
-def build_draft_display_names(shifts: Sequence[Shift]) -> dict[str, str]:
+def build_draft_display_names(
+    shifts: Sequence[Shift],
+    *,
+    runner: UserInfo | None = None,
+) -> dict[str, str]:
     """Return reversible Draft names keyed by Discord username."""
-    counts = Counter(shift.display_name for shift in shifts)
+    identities_by_username = {shift.username: shift for shift in shifts}
+    if runner is not None:
+        identities_by_username[runner.username] = runner
+    identities = list(identities_by_username.values())
+    counts = Counter(identity.display_name for identity in identities)
     return {
-        shift.username: (
-            f"{shift.display_name} ⟨@{shift.username}⟩"
-            if counts[shift.display_name] > 1
-            or DRAFT_USERNAME_SUFFIX_PATTERN.search(shift.display_name)
-            else shift.display_name
+        identity.username: (
+            f"{identity.display_name} ⟨@{identity.username}⟩"
+            if counts[identity.display_name] > 1
+            or DRAFT_USERNAME_SUFFIX_PATTERN.search(identity.display_name)
+            else identity.display_name
         )
-        for shift in shifts
+        for identity in identities
     }
 
 
@@ -228,12 +237,12 @@ class ShiftScheduler:
         *,
         team_profiles: Mapping[str, DraftTeamProfile] | None = None,
         encore_power_threshold: float = 0,
-        runner: str | None = None,
+        runner: UserInfo | None = None,
     ) -> DraftSchedule:
         """Build a draft schedule from availability.
 
         Only people available in a given hour are eligible for that hour. The
-        runner nickname is pinned separately and never competes for a supporter
+        runner is pinned separately and never competes for a supporter
         slot. Effective ISV ranks candidates first; continuity, accumulated load,
         availability, and username break ties in that order. Encore remains empty
         without an eligible Team profile.
@@ -244,15 +253,22 @@ class ShiftScheduler:
             team_profiles (Mapping[str, DraftTeamProfile] | None): Team values by
                 username. Missing profiles rank after known Main ISV values.
             encore_power_threshold (float): Strict minimum Power for Encore.
-            runner (str | None): Runner nickname to pin to every hour.
+            runner (UserInfo | None): Discord identity to pin to every hour.
 
         Returns:
             DraftSchedule: The resulting per-hour assignments.
         """
         profiles = team_profiles or {}
         all_shifts = list(shifts)
-        canonical_display_names = build_draft_display_names(all_shifts)
-        candidates = [shift for shift in all_shifts if shift.display_name != runner]
+        canonical_display_names = build_draft_display_names(
+            all_shifts,
+            runner=runner,
+        )
+        candidates = [
+            shift
+            for shift in all_shifts
+            if runner is None or shift.username != runner.username
+        ]
         display_names = {
             shift.username: canonical_display_names[shift.username]
             for shift in candidates
@@ -394,7 +410,7 @@ class ShiftScheduler:
             previous_hour = hour
 
         return DraftSchedule(
-            runner=runner,
+            runner=(canonical_display_names[runner.username] if runner else None),
             hours=list(hours),
             assignments=assignments,
             display_names=display_names,
