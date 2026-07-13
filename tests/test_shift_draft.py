@@ -302,6 +302,17 @@ def test_from_schedule_renders_lane_columns() -> None:
     assert first_row["待機"] == ""
 
 
+def test_from_schedule_omits_runner_outside_recruitment_slots() -> None:
+    schedule = ShiftScheduler.assign([], [4, 5, 6], runner="Run")
+
+    frame = DraftWorksheetContent.from_schedule(
+        schedule,
+        recruitment_slots={4, 6},
+    )
+
+    assert list(frame["ランナー"]) == ["Run", "", "Run"]
+
+
 def test_from_schedule_with_no_hours_is_header_only() -> None:
     schedule = ShiftScheduler.assign([], [], runner=None)
 

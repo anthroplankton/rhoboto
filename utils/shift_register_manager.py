@@ -1217,7 +1217,10 @@ class ShiftRegisterManager(
             if profile_resolution.status is TeamSourceStatus.AVAILABLE
             else ()
         )
-        draft_df = DraftWorksheetContent.from_schedule(schedule)
+        draft_df = DraftWorksheetContent.from_schedule(
+            schedule,
+            recruitment_slots=active_slots,
+        )
         team_source_warning = _draft_team_source_warning(profile_resolution.status)
         new_last_row = len(schedule.assignments) + 1
         threshold_row = new_last_row + 1

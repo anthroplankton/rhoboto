@@ -900,21 +900,32 @@ class DraftWorksheetContent:
     }
 
     @classmethod
-    def from_schedule(cls, schedule: DraftSchedule) -> pd.DataFrame:
+    def from_schedule(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        recruitment_slots: set[int] | None = None,
+    ) -> pd.DataFrame:
         """Render the draft schedule into a worksheet-shaped DataFrame.
 
         Args:
             schedule (DraftSchedule): The assignments to render.
+            recruitment_slots (set[int] | None): Hours where the runner is shown.
+                Defaults to all scheduled hours.
 
         Returns:
-            pd.DataFrame: Columns match ``COLUMNS``; one row per recruitment hour.
+            pd.DataFrame: Columns match ``COLUMNS``; one row per scheduled hour.
         """
         runner = schedule.runner or ""
+        if recruitment_slots is None:
+            recruitment_slots = set(schedule.hours)
         rows: list[dict[str, str]] = []
         for assignment in schedule.assignments:
             row = {
                 cls.JST_COLUMN: ShiftParser.HOUR_LABELS[assignment.hour],
-                cls.RUNNER_COLUMN: runner,
+                cls.RUNNER_COLUMN: (
+                    runner if assignment.hour in recruitment_slots else ""
+                ),
             }
             for supporter_slot, column in cls.SUPPORTER_SLOT_COLUMNS.items():
                 row[column] = schedule.display_for(assignment, supporter_slot)
