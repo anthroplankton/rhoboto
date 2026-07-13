@@ -9,7 +9,7 @@ from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUse
 from cogs.shift_register import ShiftRegister
 from utils.shift_register_manager import (
     ShiftRegisterManager,
-    fresh_shift_spreadsheet_transaction,
+    fresh_shift_channel_transaction,
 )
 from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
@@ -39,7 +39,7 @@ class Shift(
         user_info: UserInfo,
     ) -> None:
         manager = context.manager
-        async with fresh_shift_spreadsheet_transaction(
+        async with fresh_shift_channel_transaction(
             manager,
             self.FeatureChannelType.sheet_write_lock,
             channel_id=context.channel_id,

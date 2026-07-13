@@ -9,7 +9,7 @@ from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUse
 from cogs.team_register import TeamRegister
 from utils.team_register_manager import (
     TeamRegisterManager,
-    fresh_team_spreadsheet_transaction,
+    fresh_team_channel_transaction,
 )
 from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
@@ -39,7 +39,7 @@ class Team(
         user_info: UserInfo,
     ) -> None:
         manager = context.manager
-        async with fresh_team_spreadsheet_transaction(
+        async with fresh_team_channel_transaction(
             manager,
             self.FeatureChannelType.sheet_write_lock,
             channel_id=context.channel_id,

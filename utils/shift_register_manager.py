@@ -26,10 +26,11 @@ from models.shift_register import ShiftRegisterConfig
 from utils.google_sheets_urls import normalize_google_sheet_url
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import (
-    SPREADSHEET_TRANSACTION_LOCK,
     ManagerBase,
     SheetConfigNotFoundError,
-    spreadsheet_transaction_key,
+    spreadsheet_structure_transaction,
+    worksheet_transaction_key,
+    worksheet_transactions,
 )
 from utils.shift_register_structs import (
     DraftNotesTeamSource,
@@ -60,21 +61,18 @@ DRAFT_LOOKUP_COLUMN = 10
 
 
 @asynccontextmanager
-async def fresh_shift_spreadsheet_transaction(
+async def fresh_shift_channel_transaction(
     manager: ShiftRegisterManager,
     feature_channel_lock: KeyAsyncLock,
     *,
     channel_id: Hashable,
 ) -> AsyncIterator[ShiftRegisterConfig]:
-    """Lock the Shift channel, refresh config, then lock its current Sheet."""
+    """Lock the Shift channel and refresh its current Sheet configuration."""
     async with feature_channel_lock(channel_id):
         config = await manager.get_fresh_sheet_config()
         if config is None:
             raise SheetConfigNotFoundError(manager.feature_channel)
-        async with SPREADSHEET_TRANSACTION_LOCK(
-            spreadsheet_transaction_key(config.sheet_url)
-        ):
-            yield config
+        yield config
 
 
 class TeamSourceStatus(StrEnum):
@@ -152,6 +150,21 @@ class ShiftRegisterManager(
     SheetConfigType = ShiftRegisterConfig
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 
+    async def _ensure_current_worksheets(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        required_worksheets: tuple[AsyncioGspreadWorksheet | None, ...],
+    ) -> tuple[ShiftRegisterGoogleSheetsMetadata, bool]:
+        if all(worksheet is not None for worksheet in required_worksheets):
+            return metadata, False
+        async with spreadsheet_structure_transaction(metadata.sheet_url):
+            current = await self.fetch_google_sheets_metadata()
+            previous_ids = tuple(worksheet.id for worksheet in current)
+            ensured = await self.ensure_worksheets_and_upsert_sheet_config(current)
+        changed = tuple(worksheet.id for worksheet in ensured) != previous_ids
+        return ensured, changed
+
     async def get_saved_team_source_channel_id(self) -> int | None:
         """Return the Discord channel ID for the saved Team source."""
         config = await self.get_sheet_config()
@@ -167,6 +180,28 @@ class ShiftRegisterManager(
         team_channel_id: int | None = None,
     ) -> TeamSourceResolution:
         """Resolve an explicit or saved Team source."""
+        status, config, metadata = await self._resolve_team_source_metadata(
+            team_channel_id=team_channel_id
+        )
+        if config is None or metadata is None:
+            return TeamSourceResolution(status)
+        resource = worksheet_transaction_key(
+            config.sheet_url,
+            metadata.summary_worksheet.id,
+        )
+        async with worksheet_transactions([resource]):
+            return await self._build_team_source(config, metadata)
+
+    async def _resolve_team_source_metadata(
+        self,
+        *,
+        team_channel_id: int | None = None,
+    ) -> tuple[
+        TeamSourceStatus,
+        TeamRegisterConfig | None,
+        TeamRegisterGoogleSheetsMetadata | None,
+    ]:
+        """Resolve Team config and worksheet objects without reading Summary."""
         if team_channel_id is not None:
             filters = {
                 "feature_channel__guild_id": self.feature_channel.guild_id,
@@ -182,7 +217,7 @@ class ShiftRegisterManager(
                 None,
             )
             if selected_id is None:
-                return TeamSourceResolution(TeamSourceStatus.UNSET)
+                return TeamSourceStatus.UNSET, None, None
             filters = {"feature_channel_id": selected_id}
             missing_status = TeamSourceStatus.INVALID
 
@@ -190,15 +225,52 @@ class ShiftRegisterManager(
             "feature_channel"
         )
         if not configs:
-            return TeamSourceResolution(missing_status)
+            return missing_status, None, None
         if len(configs) > 1:
-            return TeamSourceResolution(TeamSourceStatus.AMBIGUOUS)
+            return TeamSourceStatus.AMBIGUOUS, None, None
 
-        return await self._resolve_team_source_config(configs[0])
+        config = configs[0]
+        try:
+            sheet = GoogleSheet(config.sheet_url, self.service_account_path)
+            worksheets = await sheet.get_worksheets(config.get_worksheet_ids())
+            metadata = TeamRegisterGoogleSheetsMetadata.from_id_mapping(
+                config.sheet_url,
+                worksheets,
+            )
+        except GoogleSheetsError as exc:
+            status = (
+                TeamSourceStatus.INVALID
+                if exc.kind
+                in {
+                    GoogleSheetsErrorKind.INVALID_URL,
+                    GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                }
+                else TeamSourceStatus.UNRESOLVED
+            )
+            self.logger.warning(
+                "Could not resolve auxiliary Team source: %s",
+                exc.kind,
+            )
+            return status, None, None
+        return TeamSourceStatus.AVAILABLE, config, metadata
 
     async def resolve_draft_team_profiles(self) -> DraftTeamProfileResolution:
         """Read Draft scheduling values from the configured Team Summary."""
-        resolution = await self.resolve_team_source()
+        status, config, metadata = await self._resolve_team_source_metadata()
+        if config is None or metadata is None:
+            return DraftTeamProfileResolution(status, {})
+        resource = worksheet_transaction_key(
+            config.sheet_url,
+            metadata.summary_worksheet.id,
+        )
+        async with worksheet_transactions([resource]):
+            resolution = await self._build_team_source(config, metadata)
+            return await self._resolve_draft_team_profiles_locked(resolution)
+
+    async def _resolve_draft_team_profiles_locked(
+        self,
+        resolution: TeamSourceResolution,
+    ) -> DraftTeamProfileResolution:
         source = resolution.source
         if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
             return DraftTeamProfileResolution(resolution.status, {})
@@ -261,34 +333,6 @@ class ShiftRegisterManager(
         ).select_related("feature_channel")
         return tuple(config.feature_channel.channel_id for config in configs)
 
-    async def _resolve_team_source_config(
-        self,
-        config: TeamRegisterConfig,
-    ) -> TeamSourceResolution:
-        try:
-            sheet = GoogleSheet(config.sheet_url, self.service_account_path)
-            worksheets = await sheet.get_worksheets(config.get_worksheet_ids())
-            metadata = TeamRegisterGoogleSheetsMetadata.from_id_mapping(
-                config.sheet_url,
-                worksheets,
-            )
-            return await self._build_team_source(config, metadata)
-        except GoogleSheetsError as exc:
-            status = (
-                TeamSourceStatus.INVALID
-                if exc.kind
-                in {
-                    GoogleSheetsErrorKind.INVALID_URL,
-                    GoogleSheetsErrorKind.MISSING_WORKSHEET,
-                }
-                else TeamSourceStatus.UNRESOLVED
-            )
-            self.logger.warning(
-                "Could not resolve auxiliary Team source: %s",
-                exc.kind,
-            )
-            return TeamSourceResolution(status)
-
     async def repair_team_references(
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
@@ -298,6 +342,36 @@ class ShiftRegisterManager(
         if resolution.status is not TeamSourceStatus.AVAILABLE:
             msg = "Team source must be available before repair."
             raise ValueError(msg)
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        source = resolution.source
+        if source is None:
+            msg = "Team source must be available before repair."
+            raise ValueError(msg)
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, worksheet.id),
+            worksheet_transaction_key(
+                source.config.sheet_url,
+                source.metadata.summary_worksheet.id,
+            ),
+        ]
+        async with worksheet_transactions(resources):
+            if source.metadata.summary_worksheet.worksheet is not None:
+                resolution = await self._build_team_source(
+                    source.config,
+                    source.metadata,
+                )
+            return await self._repair_team_references_locked(metadata, resolution)
+
+    async def _repair_team_references_locked(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        resolution: TeamSourceResolution,
+    ) -> int:
         worksheet = metadata.entry_worksheets.worksheet
         if worksheet is None:
             raise GoogleSheetsError(
@@ -337,20 +411,39 @@ class ShiftRegisterManager(
                 GoogleSheetsErrorKind.MISSING_WORKSHEET,
                 "Repair the Shift Register worksheet settings.",
             )
-        await _read_entry_state(worksheet)
-        config = await self.get_sheet_config()
-        config.team_source_feature_channel_id = source.config.feature_channel.id
-        await config.save(
-            update_fields=["team_source_feature_channel_id", "updated_at"]
-        )
-        try:
-            await self.repair_team_references(metadata, resolution)
-        except Exception as exc:
-            partial = partial_success_storage_error(exc)
-            if partial is None:
-                raise
-            raise partial from partial.__cause__
-        return resolution
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, worksheet.id),
+            worksheet_transaction_key(
+                source.config.sheet_url,
+                source.metadata.summary_worksheet.id,
+            ),
+        ]
+        async with worksheet_transactions(resources):
+            if source.metadata.summary_worksheet.worksheet is not None:
+                resolution = await self._build_team_source(
+                    source.config,
+                    source.metadata,
+                )
+                source = resolution.source
+                if (
+                    resolution.status is not TeamSourceStatus.AVAILABLE
+                    or source is None
+                ):
+                    return resolution
+            await _read_entry_state(worksheet)
+            config = await self.get_sheet_config()
+            config.team_source_feature_channel_id = source.config.feature_channel.id
+            await config.save(
+                update_fields=["team_source_feature_channel_id", "updated_at"]
+            )
+            try:
+                await self._repair_team_references_locked(metadata, resolution)
+            except Exception as exc:
+                partial = partial_success_storage_error(exc)
+                if partial is None:
+                    raise
+                raise partial from partial.__cause__
+            return resolution
 
     async def _build_team_source(
         self,
@@ -496,34 +589,43 @@ class ShiftRegisterManager(
         config_saved = False
         try:
             entry_title, draft_title, final_title = worksheet_titles
-            entry_mapping = await self._google_sheet.get_or_create_worksheets(
-                [entry_title],
-                creation_status=creation_status,
-            )
-            await _read_entry_state(entry_mapping[entry_title])
-            remaining_mapping = await self._google_sheet.get_or_create_worksheets(
-                [draft_title, final_title],
-                creation_status=creation_status,
-            )
-            metadata = self.GoogleSheetsMetadataType.from_title_mapping(
-                sheet_url,
-                {**entry_mapping, **remaining_mapping},
-            )
-            if final_schedule_anchor_cell is None:
-                await self.upsert_sheet_config(metadata)
-            else:
-                await self.upsert_sheet_config(
-                    metadata,
-                    extra_defaults={
-                        "final_schedule_anchor_cell": validate_anchor_cell(
-                            final_schedule_anchor_cell
-                        )
-                    },
+            async with spreadsheet_structure_transaction(sheet_url):
+                entry_mapping = await self._google_sheet.get_or_create_worksheets(
+                    [entry_title],
+                    creation_status=creation_status,
                 )
-            config_saved = True
-            config = await self.get_sheet_config()
-            ranges = RecruitmentTimeRanges.from_json(config.recruitment_time_ranges)
-            await self.sync_entry_presentation(metadata, ranges, force=True)
+            entry_worksheet = entry_mapping[entry_title]
+            entry_resource = worksheet_transaction_key(
+                sheet_url,
+                entry_worksheet.id,
+            )
+            async with worksheet_transactions([entry_resource]):
+                await _read_entry_state(entry_worksheet)
+            async with spreadsheet_structure_transaction(sheet_url):
+                remaining_mapping = await self._google_sheet.get_or_create_worksheets(
+                    [draft_title, final_title],
+                    creation_status=creation_status,
+                )
+                metadata = self.GoogleSheetsMetadataType.from_title_mapping(
+                    sheet_url,
+                    {**entry_mapping, **remaining_mapping},
+                )
+                if final_schedule_anchor_cell is None:
+                    await self.upsert_sheet_config(metadata)
+                else:
+                    await self.upsert_sheet_config(
+                        metadata,
+                        extra_defaults={
+                            "final_schedule_anchor_cell": validate_anchor_cell(
+                                final_schedule_anchor_cell
+                            )
+                        },
+                    )
+                config_saved = True
+            async with worksheet_transactions([entry_resource]):
+                config = await self.get_sheet_config()
+                ranges = RecruitmentTimeRanges.from_json(config.recruitment_time_ranges)
+                await self._sync_entry_presentation_locked(metadata, ranges, force=True)
         except Exception as exc:
             if creation_status.created or config_saved:
                 partial = partial_success_storage_error(exc)
@@ -569,6 +671,21 @@ class ShiftRegisterManager(
                 GoogleSheetsErrorKind.MISSING_WORKSHEET,
                 "Repair the Shift Register worksheet settings.",
             )
+        resource = worksheet_transaction_key(metadata.sheet_url, worksheet.id)
+        async with worksheet_transactions([resource]):
+            await self._update_recruitment_time_ranges_locked(metadata, ranges)
+
+    async def _update_recruitment_time_ranges_locked(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        ranges: RecruitmentTimeRanges,
+    ) -> None:
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
         await _read_entry_state(worksheet)
         shift_register_config = await self.get_sheet_config()
         shift_register_config.recruitment_time_ranges = ranges.to_json()
@@ -576,7 +693,7 @@ class ShiftRegisterManager(
             update_fields=["recruitment_time_ranges", "updated_at"]
         )
         try:
-            await self.sync_entry_presentation(metadata, ranges, force=True)
+            await self._sync_entry_presentation_locked(metadata, ranges, force=True)
         except Exception as exc:
             partial = partial_success_storage_error(exc)
             if partial is None:
@@ -591,6 +708,27 @@ class ShiftRegisterManager(
         force: bool,
     ) -> None:
         """Initialize or repair Shift Entry presentation."""
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        resource = worksheet_transaction_key(metadata.sheet_url, worksheet.id)
+        async with worksheet_transactions([resource]):
+            await self._sync_entry_presentation_locked(
+                metadata,
+                ranges,
+                force=force,
+            )
+
+    async def _sync_entry_presentation_locked(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        ranges: RecruitmentTimeRanges,
+        *,
+        force: bool,
+    ) -> None:
         worksheet = metadata.entry_worksheets.worksheet
         if worksheet is None:
             raise GoogleSheetsError(
@@ -632,6 +770,71 @@ class ShiftRegisterManager(
         user: UserInfo,
         shift: Shift | None,
         metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        recruitment_ranges: RecruitmentTimeRanges | None = None,
+    ) -> None:
+        structure_changed = False
+        if shift is not None:
+            metadata, structure_changed = await self._ensure_current_worksheets(
+                metadata,
+                required_worksheets=(metadata.entry_worksheets.worksheet,),
+            )
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None and shift is None:
+            return
+        if worksheet is None:
+            self.logger.warning(
+                "Skipped shift registration for %r: worksheet is not available.",
+                shift,
+            )
+            return
+
+        entry_resource = worksheet_transaction_key(metadata.sheet_url, worksheet.id)
+        if shift is not None:
+            async with worksheet_transactions([entry_resource]):
+                await _read_entry_state(worksheet)
+        resolution = (
+            await self.resolve_team_source()
+            if shift is not None
+            else TeamSourceResolution(TeamSourceStatus.UNSET)
+        )
+        resources = [entry_resource]
+        source = resolution.source
+        if source is not None:
+            resources.append(
+                worksheet_transaction_key(
+                    source.config.sheet_url,
+                    source.metadata.summary_worksheet.id,
+                )
+            )
+        try:
+            async with worksheet_transactions(resources):
+                if (
+                    source is not None
+                    and source.metadata.summary_worksheet.worksheet is not None
+                ):
+                    resolution = await self._build_team_source(
+                        source.config,
+                        source.metadata,
+                    )
+                await self._upsert_or_delete_user_shift_locked(
+                    user,
+                    shift,
+                    metadata,
+                    resolution,
+                    recruitment_ranges=recruitment_ranges,
+                )
+        except Exception as exc:
+            if structure_changed and (partial := partial_success_storage_error(exc)):
+                raise partial from partial.__cause__
+            raise
+
+    async def _upsert_or_delete_user_shift_locked(
+        self,
+        user: UserInfo,
+        shift: Shift | None,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        resolution: TeamSourceResolution,
         *,
         recruitment_ranges: RecruitmentTimeRanges | None = None,
     ) -> None:
@@ -683,8 +886,6 @@ class ShiftRegisterManager(
         current_formulas = {
             row: formula for row, _username, formula, _reusable in participants
         }
-        resolution = await self.resolve_team_source()
-
         updates = list(layout_updates)
         for row, username, current_formula, _reusable in participants:
             if not username or row == target_row:
@@ -764,6 +965,62 @@ class ShiftRegisterManager(
         runner: str | None = None,
     ) -> DraftGenerationResult:
         """Build the draft schedule and overwrite the draft worksheet."""
+        metadata, structure_changed = await self._ensure_current_worksheets(
+            metadata,
+            required_worksheets=(
+                metadata.entry_worksheets.worksheet,
+                metadata.draft_worksheet.worksheet,
+            ),
+        )
+        entry_worksheet = metadata.entry_worksheets.worksheet
+        draft_worksheet = metadata.draft_worksheet.worksheet
+        if entry_worksheet is None or draft_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+        resolution = await self.resolve_team_source()
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, entry_worksheet.id),
+            worksheet_transaction_key(metadata.sheet_url, draft_worksheet.id),
+        ]
+        source = resolution.source
+        if source is not None:
+            resources.append(
+                worksheet_transaction_key(
+                    source.config.sheet_url,
+                    source.metadata.summary_worksheet.id,
+                )
+            )
+        try:
+            async with worksheet_transactions(resources):
+                if (
+                    source is not None
+                    and source.metadata.summary_worksheet.worksheet is not None
+                ):
+                    resolution = await self._build_team_source(
+                        source.config,
+                        source.metadata,
+                    )
+                profile_resolution = await self._resolve_draft_team_profiles_locked(
+                    resolution
+                )
+                return await self._generate_draft_locked(
+                    metadata,
+                    profile_resolution,
+                    encore_power_threshold=encore_power_threshold,
+                    runner=runner,
+                )
+        except Exception as exc:
+            if structure_changed and (partial := partial_success_storage_error(exc)):
+                raise partial from partial.__cause__
+            raise
+
+    async def _generate_draft_locked(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        profile_resolution: DraftTeamProfileResolution,
+        *,
+        encore_power_threshold: float,
+        runner: str | None,
+    ) -> DraftGenerationResult:
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet
         if entry_worksheet is None or draft_worksheet is None:
@@ -821,7 +1078,6 @@ class ShiftRegisterManager(
             )
             for shift in shifts
         ]
-        profile_resolution = await self.resolve_draft_team_profiles()
         profiles = profile_resolution.profiles
         schedule = ShiftScheduler.assign(
             shifts,

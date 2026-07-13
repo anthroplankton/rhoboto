@@ -184,8 +184,15 @@ def test_spreadsheet_transaction_key_classifies_invalid_url() -> None:
     assert isinstance(error.__cause__, ValueError)
 
 
+def test_worksheet_transaction_key_uses_canonical_spreadsheet_id() -> None:
+    assert manager_base_module.worksheet_transaction_key(
+        "https://docs.google.com/spreadsheets/d/sheet-abc/edit#gid=7",
+        22,
+    ) == ("sheet-abc", 22)
+
+
 @pytest.mark.asyncio
-async def test_invalid_spreadsheet_transaction_url_enters_no_lock(
+async def test_invalid_structure_transaction_url_enters_no_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -197,15 +204,14 @@ async def test_invalid_spreadsheet_transaction_url_enters_no_lock(
 
     monkeypatch.setattr(
         manager_base_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
+        "SPREADSHEET_STRUCTURE_LOCK",
         recording_lock,
+        raising=False,
     )
 
     with pytest.raises(GoogleSheetsError):
-        async with manager_base_module.spreadsheet_transaction(
-            recording_lock,
-            channel_id=22,
-            sheet_url="not a Google Sheet URL",
+        async with manager_base_module.spreadsheet_structure_transaction(
+            "not a Google Sheet URL"
         ):
             events.append("body")
 

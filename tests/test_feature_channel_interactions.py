@@ -47,11 +47,6 @@ from tests.fakes import (
     FakeInteraction,
     MissingConfigManager,
 )
-from utils import (
-    manager_base as manager_base_module,
-    shift_register_manager as shift_register_manager_module,
-    team_register_manager as team_register_manager_module,
-)
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
@@ -291,6 +286,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
             events.append("sheet")
             return metadata
 
+        async def get_sheet_config(self) -> SimpleNamespace:
+            return config
+
         def log_missing_worksheet_warnings(self, _metadata: object) -> None:
             pass
 
@@ -345,21 +343,11 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         events.append("channel")
         yield
 
-    @asynccontextmanager
-    async def recording_spreadsheet_lock(key: str) -> object:
-        events.append(f"spreadsheet:{key}")
-        yield
-
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
     monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
-    monkeypatch.setattr(
-        shift_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        recording_spreadsheet_lock,
-    )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
             id=111,
@@ -369,11 +357,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
 
-    assert events[:5] == [
+    assert events[:4] == [
         "wait",
         "channel",
         "fresh",
-        "spreadsheet:abc",
         "sheet",
     ]
     prompt, prompt_kwargs = interaction.original_response_edits[0]
@@ -519,6 +506,8 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
             return ensured_metadata
 
         async def generate_draft(self, *_args: object, **_kwargs: object) -> None:
+            if ids_changed:
+                raise StorageError(StorageErrorKind.PARTIAL_SUCCESS)
             raise GoogleSheetsError(
                 GoogleSheetsErrorKind.TRANSIENT,
                 "private draft failure",
@@ -1256,6 +1245,7 @@ class OrderedShiftUpsertManager(ConfiguredManager):
         )
         self.ensure_error = ensure_error
         self.upsert_error = upsert_error
+        self.ensure_changes_ids = ensure_changes_ids
         self.current_sheet_url = (
             "https://docs.google.com/spreadsheets/d/shift-message/edit"
         )
@@ -1293,10 +1283,15 @@ class OrderedShiftUpsertManager(ConfiguredManager):
     ) -> None:
         assert user_info.username == "alice"
         assert shift is not None
+        metadata = await self.ensure_worksheets_and_upsert_sheet_config(metadata)
         assert metadata is self.ensured_metadata
         assert recruitment_ranges.to_json() == [{"start": 4, "end": 28}]
         self.events.append("upsert")
         if self.upsert_error is not None:
+            if self.ensure_changes_ids:
+                error = StorageError(StorageErrorKind.PARTIAL_SUCCESS)
+                error.__cause__ = self.upsert_error
+                raise error
             raise self.upsert_error
 
 
@@ -4756,7 +4751,7 @@ async def test_team_summary_refreshes_with_configured_context(
 
 
 @pytest.mark.asyncio
-async def test_team_summary_waits_then_locks_fresh_spreadsheet_target(
+async def test_team_summary_waits_then_refreshes_config_inside_channel_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -4765,13 +4760,6 @@ async def test_team_summary_waits_then_locks_fresh_spreadsheet_target(
         lambda _summary: SimpleNamespace(title="summary"),
     )
     channel_lock = GatedRecordingLock()
-    spreadsheet_lock = RecordingLock()
-    monkeypatch.setattr(
-        team_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-        raising=False,
-    )
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
         feature_name="team_register",
@@ -4790,7 +4778,7 @@ async def test_team_summary_waits_then_locks_fresh_spreadsheet_target(
     await task
 
     assert manager.fresh_sheet_urls == [manager.current_sheet_url]
-    assert spreadsheet_lock.keys == ["fresh-team-summary"]
+    assert channel_lock.keys == [222]
 
 
 @pytest.mark.asyncio
@@ -4822,12 +4810,6 @@ async def test_initial_settings_invalid_url_uses_safe_storage_response_without_l
 ) -> None:
     manager = InvalidInitialSettingsManager()
     channel_lock = RecordingLock()
-    spreadsheet_lock = RecordingLock()
-    monkeypatch.setattr(
-        manager_base_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-    )
     interaction = FakeInteraction()
 
     if feature_name == "team":
@@ -4861,7 +4843,6 @@ async def test_initial_settings_invalid_url_uses_safe_storage_response_without_l
     assert interaction.response.deferred == [True]
     assert manager.upsert_calls == 0
     assert channel_lock.keys == []
-    assert spreadsheet_lock.keys == []
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
@@ -4889,9 +4870,7 @@ async def test_team_delete_data_performs_already_locked_manager_delete() -> None
 
 
 @pytest.mark.asyncio
-async def test_team_delete_waits_then_fetches_metadata_inside_current_transaction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_team_delete_refreshes_after_waiting_for_channel_lock() -> None:
     manager = IntegratedTeamDeleteManager()
     attempted = asyncio.Event()
     release = asyncio.Event()
@@ -4904,17 +4883,6 @@ async def test_team_delete_waits_then_fetches_metadata_inside_current_transactio
         await release.wait()
         yield
 
-    @asynccontextmanager
-    async def spreadsheet_lock(key: object) -> object:
-        assert key == "switched-team-delete"
-        manager.events.append("spreadsheet_lock")
-        yield
-
-    monkeypatch.setattr(
-        team_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-    )
     subject = Team(fake_bot())
     subject.FeatureChannelType = SimpleNamespace(sheet_write_lock=channel_lock)
 
@@ -4949,7 +4917,6 @@ async def test_team_delete_waits_then_fetches_metadata_inside_current_transactio
     assert manager.events == [
         "channel_lock",
         "fresh_config",
-        "spreadsheet_lock",
         "fetch_metadata",
         "delete",
     ]
@@ -4974,9 +4941,7 @@ async def test_shift_delete_data_uses_transaction_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_shift_delete_fetches_metadata_inside_full_transaction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_shift_delete_fetches_metadata_inside_channel_transaction() -> None:
     manager = IntegratedShiftDeleteManager()
 
     @asynccontextmanager
@@ -4985,17 +4950,6 @@ async def test_shift_delete_fetches_metadata_inside_full_transaction(
         manager.events.append("channel_lock")
         yield
 
-    @asynccontextmanager
-    async def spreadsheet_lock(key: object) -> object:
-        assert key == "current-shift-delete"
-        manager.events.append("spreadsheet_lock")
-        yield
-
-    monkeypatch.setattr(
-        shift_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-    )
     subject = Shift(fake_bot())
     subject.FeatureChannelType = SimpleNamespace(sheet_write_lock=channel_lock)
 
@@ -5022,7 +4976,6 @@ async def test_shift_delete_fetches_metadata_inside_full_transaction(
     assert manager.events == [
         "channel_lock",
         "fresh_config",
-        "spreadsheet_lock",
         "fetch_metadata",
         "delete",
     ]
@@ -5558,19 +5511,10 @@ async def test_team_register_message_upsert_uses_integrated_manager_action() -> 
 
 
 @pytest.mark.asyncio
-async def test_team_message_waits_then_locks_fresh_spreadsheet_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_team_message_waits_then_refreshes_config_inside_channel_lock() -> None:
     subject = TeamRegister(fake_bot())
     channel_lock = GatedRecordingLock()
-    spreadsheet_lock = RecordingLock()
     subject.sheet_write_lock = channel_lock
-    monkeypatch.setattr(
-        team_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-        raising=False,
-    )
     manager = OrderedTeamUpsertManager(object(), "service.json")
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
@@ -5592,23 +5536,14 @@ async def test_team_message_waits_then_locks_fresh_spreadsheet_target(
     await task
 
     assert manager.fresh_sheet_urls == [manager.current_sheet_url]
-    assert spreadsheet_lock.keys == ["fresh-team-message"]
+    assert channel_lock.keys == [222]
 
 
 @pytest.mark.asyncio
-async def test_shift_message_waits_then_locks_fresh_spreadsheet_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_shift_message_waits_then_refreshes_config_inside_channel_lock() -> None:
     subject = ShiftRegister(fake_bot())
     channel_lock = GatedRecordingLock()
-    spreadsheet_lock = RecordingLock()
     subject.sheet_write_lock = channel_lock
-    monkeypatch.setattr(
-        shift_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-        raising=False,
-    )
     manager = OrderedShiftUpsertManager(object(), "service.json")
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
@@ -5630,7 +5565,7 @@ async def test_shift_message_waits_then_locks_fresh_spreadsheet_target(
     await task
 
     assert manager.fresh_sheet_urls == [manager.current_sheet_url]
-    assert spreadsheet_lock.keys == ["fresh-shift-message"]
+    assert channel_lock.keys == [222]
 
 
 @pytest.mark.asyncio

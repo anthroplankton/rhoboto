@@ -37,13 +37,14 @@ from components.ui_settings_flow import (
     settings_title,
 )
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.manager_base import SheetConfigNotFoundError, spreadsheet_transaction
+from utils.google_sheets_urls import extract_google_sheet_id, normalize_google_sheet_url
+from utils.manager_base import SheetConfigNotFoundError
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import WorksheetContractError
 from utils.team_register_manager import (
     TEAM_REGISTER_SHEET_WRITE_LOCK,
     TeamRegisterManager,
-    fresh_team_spreadsheet_transaction,
+    fresh_team_channel_transaction,
 )
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
@@ -375,17 +376,16 @@ class TeamRegisterSheetModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        sheet_url = self.sheet_url.value
         team_worksheet_titles = [
             w for w in self.worksheet_titles.value.splitlines() if w
         ]
         summary_worksheet_title = self.summary_worksheet_title.value
 
         try:
-            async with spreadsheet_transaction(
-                TEAM_REGISTER_SHEET_WRITE_LOCK,
-                channel_id=self.team_register_manager.feature_channel.channel_id,
-                sheet_url=sheet_url,
+            sheet_url = normalize_google_sheet_url(self.sheet_url.value)
+            extract_google_sheet_id(sheet_url)
+            async with TEAM_REGISTER_SHEET_WRITE_LOCK(
+                self.team_register_manager.feature_channel.channel_id
             ):
                 metadata = (
                     await self.team_register_manager.upsert_sheet_config_and_worksheets(
@@ -887,7 +887,7 @@ class ConfirmEncoreRolesButton(Button):
         )
         roles = list(interaction.guild.roles) if interaction.guild else []
         try:
-            async with fresh_team_spreadsheet_transaction(
+            async with fresh_team_channel_transaction(
                 view.team_register_manager,
                 TEAM_REGISTER_SHEET_WRITE_LOCK,
                 channel_id=view.team_register_manager.feature_channel.channel_id,

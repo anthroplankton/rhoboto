@@ -59,11 +59,6 @@ from components.ui_team_register import (
     build_current_settings_embed as build_team_current_settings_embed,
 )
 from tests.fakes import FakeInteraction, FakeRole
-from utils import (
-    manager_base as manager_base_module,
-    shift_register_manager as shift_register_manager_module,
-    team_register_manager as team_register_manager_module,
-)
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
     TeamSource,
@@ -868,16 +863,10 @@ async def test_apply_team_source_repairs_selected_channel(
     manager = RecordingShiftRegisterManager()
     manager.team_source = team_source_resolution()
     channel_lock = RecordingAsyncLock()
-    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_shift_register,
         "SHIFT_REGISTER_SHEET_WRITE_LOCK",
         channel_lock,
-    )
-    monkeypatch.setattr(
-        shift_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
     )
     view = TeamSourceView(manager, selected_channel_id=22)
     button = next(
@@ -889,7 +878,6 @@ async def test_apply_team_source_repairs_selected_channel(
 
     assert manager.team_source_apply_calls == [22]
     assert channel_lock.keys == [222]
-    assert spreadsheet_lock.keys == ["shift-settings"]
     assert interaction.followup.messages[-1][0] == (
         "✅ Team source saved and references repaired."
     )
@@ -1976,17 +1964,10 @@ async def test_encore_role_confirm_holds_fresh_team_transaction(
             await super().__aenter__()
 
     channel_lock = DeferredRecordingAsyncLock()
-    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_team_register,
         "TEAM_REGISTER_SHEET_WRITE_LOCK",
         channel_lock,
-    )
-    monkeypatch.setattr(
-        team_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-        raising=False,
     )
     view = EncoreRolePreviewView(
         manager,
@@ -1998,7 +1979,6 @@ async def test_encore_role_confirm_holds_fresh_team_transaction(
     await child_with_label(view, "Confirm Save").callback(interaction)
 
     assert channel_lock.keys == [222]
-    assert spreadsheet_lock.keys == ["team-encore"]
     assert manager.encore_reconciliation_calls == [
         {
             "role_ids": [1],
@@ -2793,16 +2773,10 @@ async def test_shift_modal_submit_allows_authorized_user(
 ) -> None:
     manager = RecordingShiftRegisterManager()
     sheet_lock = RecordingAsyncLock()
-    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_shift_register,
         "SHIFT_REGISTER_SHEET_WRITE_LOCK",
         sheet_lock,
-    )
-    monkeypatch.setattr(
-        manager_base_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
     )
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
@@ -2819,8 +2793,6 @@ async def test_shift_modal_submit_allows_authorized_user(
     assert interaction.response.deferred == [True]
     assert sheet_lock.keys == [222]
     assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
-    assert spreadsheet_lock.keys == ["shift-settings"]
-    assert (spreadsheet_lock.entered, spreadsheet_lock.exited) == (1, 1)
     assert len(manager.upsert_calls) == 1
     assert manager.upsert_calls[0]["final_schedule_anchor_cell"] == "B2"
     assert len(interaction.followup.messages) == 1
@@ -3449,16 +3421,10 @@ async def test_shift_recruitment_range_modal_submit_updates_range(
 ) -> None:
     manager = RecordingShiftRegisterManager()
     sheet_lock = RecordingAsyncLock()
-    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_shift_register,
         "SHIFT_REGISTER_SHEET_WRITE_LOCK",
         sheet_lock,
-    )
-    monkeypatch.setattr(
-        shift_register_manager_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
     )
     interaction = FakeInteraction()
     modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-8, 8-12")
@@ -3468,8 +3434,6 @@ async def test_shift_recruitment_range_modal_submit_updates_range(
     assert interaction.response.deferred == [True]
     assert sheet_lock.keys == [222]
     assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
-    assert spreadsheet_lock.keys == ["shift-settings"]
-    assert (spreadsheet_lock.entered, spreadsheet_lock.exited) == (1, 1)
     assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
         [{"start": 4, "end": 12}]
     ]

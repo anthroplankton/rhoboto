@@ -11,6 +11,7 @@ from utils.shift_register_manager import (
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftTeamProfileResolution,
     ShiftRegisterManager,
+    TeamSourceResolution,
     TeamSourceStatus,
 )
 from utils.shift_register_structs import (
@@ -740,7 +741,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         {"booleanRule": {"condition": {"values": []}}},
     ]
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -748,7 +749,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
+    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(
             TeamSourceStatus.AVAILABLE,
             {
@@ -773,7 +774,15 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             ),
         )
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    async def resolve_source() -> TeamSourceResolution:
+        return TeamSourceResolution(TeamSourceStatus.AVAILABLE)
+
+    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_draft_team_profiles_locked",
+        resolve_profiles,
+    )
 
     result = await manager.generate_draft(
         metadata,
@@ -978,7 +987,7 @@ async def test_generate_draft_accepts_completely_empty_entry(
         col_count=1,
     )
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -986,10 +995,18 @@ async def test_generate_draft_accepts_completely_empty_entry(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
+    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    async def resolve_source() -> TeamSourceResolution:
+        return TeamSourceResolution(TeamSourceStatus.UNSET)
+
+    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_draft_team_profiles_locked",
+        resolve_profiles,
+    )
 
     result = await manager.generate_draft(metadata, encore_power_threshold=35)
 
@@ -1033,7 +1050,7 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         old_axis_rows=old_axis_rows,
     )
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1041,10 +1058,18 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
+    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    async def resolve_source() -> TeamSourceResolution:
+        return TeamSourceResolution(TeamSourceStatus.UNSET)
+
+    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_draft_team_profiles_locked",
+        resolve_profiles,
+    )
 
     await manager.generate_draft(metadata, encore_power_threshold=35)
 
@@ -1080,7 +1105,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
     )
     draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1088,10 +1113,18 @@ async def test_generate_draft_falls_back_without_team_profiles(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
+    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(status, {})
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    async def resolve_source() -> TeamSourceResolution:
+        return TeamSourceResolution(status)
+
+    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_draft_team_profiles_locked",
+        resolve_profiles,
+    )
 
     result = await manager.generate_draft(
         metadata,
@@ -1148,7 +1181,7 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
     entry_worksheet = EntryRangeFakeWorksheet([[[], old_columns], [], []])
     draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1177,7 +1210,7 @@ async def test_generate_draft_rejects_nonbinary_entry_before_draft_io() -> None:
     entry_worksheet = EntryRangeFakeWorksheet(entry_ranges)
     draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1200,13 +1233,23 @@ async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
     )
     entry_worksheet = FakeWorksheet(title="Shift Entry")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", None),
             FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
         ],
     )
+
+    async def keep_missing_metadata(
+        _metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        required_worksheets: object,
+    ) -> tuple[ShiftRegisterGoogleSheetsMetadata, bool]:
+        del required_worksheets
+        return metadata, False
+
+    manager._ensure_current_worksheets = keep_missing_metadata  # type: ignore[method-assign]  # noqa: SLF001
 
     with pytest.raises(StorageError) as exc_info:
         await manager.generate_draft(

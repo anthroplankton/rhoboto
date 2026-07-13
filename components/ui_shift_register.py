@@ -33,13 +33,17 @@ from components.ui_settings_flow import (
     settings_description,
     settings_title,
 )
-from utils.google_sheets_urls import google_sheet_url_with_gid
-from utils.manager_base import spreadsheet_transaction
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.google_sheets_urls import (
+    extract_google_sheet_id,
+    google_sheet_url_with_gid,
+    normalize_google_sheet_url,
+)
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     TeamSourceResolution,
     TeamSourceStatus,
-    fresh_shift_spreadsheet_transaction,
+    fresh_shift_channel_transaction,
 )
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -502,7 +506,6 @@ class ShiftRegisterSheetModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        sheet_url = self.sheet_url.value
         entry_worksheet_title = self.entry_worksheet_title.value
         draft_worksheet_title = self.draft_worksheet_title.value
         final_schedule_worksheet_title = self.final_schedule_worksheet_title.value
@@ -510,10 +513,10 @@ class ShiftRegisterSheetModal(Modal):
 
         settings_saved = False
         try:
-            async with spreadsheet_transaction(
-                SHIFT_REGISTER_SHEET_WRITE_LOCK,
-                channel_id=self.shift_register_manager.feature_channel.channel_id,
-                sheet_url=sheet_url,
+            sheet_url = normalize_google_sheet_url(self.sheet_url.value)
+            extract_google_sheet_id(sheet_url)
+            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
+                self.shift_register_manager.feature_channel.channel_id
             ):
                 upsert = self.shift_register_manager.upsert_sheet_config_and_worksheets
                 metadata = await upsert(
@@ -526,6 +529,20 @@ class ShiftRegisterSheetModal(Modal):
                 settings_saved = True
         except WorksheetContractError as error:
             await send_settings_contract_error(
+                interaction,
+                error,
+                operation="shift_register_setup",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
+        except ValueError as exc:
+            error = GoogleSheetsError(
+                GoogleSheetsErrorKind.INVALID_URL,
+                "Check the Google Sheet link and save the settings again.",
+            )
+            error.__cause__ = exc
+            await send_settings_storage_error(
                 interaction,
                 error,
                 operation="shift_register_setup",
@@ -790,7 +807,7 @@ class ShiftRecruitmentRangeModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
         try:
-            async with fresh_shift_spreadsheet_transaction(
+            async with fresh_shift_channel_transaction(
                 self.shift_register_manager,
                 SHIFT_REGISTER_SHEET_WRITE_LOCK,
                 channel_id=self.shift_register_manager.feature_channel.channel_id,
@@ -1139,7 +1156,7 @@ class ApplyTeamSourceButton(Button):
         await interaction.response.defer(ephemeral=True)
         manager = self.view.shift_register_manager
         try:
-            async with fresh_shift_spreadsheet_transaction(
+            async with fresh_shift_channel_transaction(
                 manager,
                 SHIFT_REGISTER_SHEET_WRITE_LOCK,
                 channel_id=manager.feature_channel.channel_id,

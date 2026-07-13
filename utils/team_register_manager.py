@@ -22,10 +22,11 @@ from utils.google_sheets_errors import (
 from utils.google_sheets_urls import normalize_google_sheet_url
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import (
-    SPREADSHEET_TRANSACTION_LOCK,
     ManagerBase,
     SheetConfigNotFoundError,
-    spreadsheet_transaction_key,
+    spreadsheet_structure_transaction,
+    worksheet_transaction_key,
+    worksheet_transactions,
 )
 from utils.storage_errors import partial_success_storage_error
 from utils.structs_base import WorksheetContractError
@@ -62,21 +63,18 @@ def _raise_partial_after_side_effect(
 
 
 @asynccontextmanager
-async def fresh_team_spreadsheet_transaction(
+async def fresh_team_channel_transaction(
     manager: TeamRegisterManager,
     feature_channel_lock: KeyAsyncLock,
     *,
     channel_id: Hashable,
 ) -> AsyncIterator[TeamRegisterConfig]:
-    """Lock the Team channel, refresh its config, then lock the current Sheet."""
+    """Lock the Team channel and refresh its current Sheet configuration."""
     async with feature_channel_lock(channel_id):
         config = await manager.get_fresh_sheet_config()
         if config is None:
             raise SheetConfigNotFoundError(manager.feature_channel)
-        async with SPREADSHEET_TRANSACTION_LOCK(
-            spreadsheet_transaction_key(config.sheet_url)
-        ):
-            yield config
+        yield config
 
 
 class TeamRegisterManager(
@@ -142,33 +140,30 @@ class TeamRegisterManager(
                 ),
             ],
         )
-        metadata, grids, _, created_side_effect = await self._prepare_metadata(
+        async with self._prepared_metadata_transaction(
             requested,
             team_count=len(team_worksheet_titles),
             validate_summary_sources=True,
-        )
-        try:
-            mutations, _ = self._plan_summary_reconciliation(
-                metadata,
-                grids,
-                member_by_names or {},
-                encore_role_ids,
-            )
-            await self.upsert_sheet_config(metadata)
-        except Exception as exc:
-            _raise_partial_after_side_effect(
-                exc,
-                side_effect=created_side_effect,
-            )
-            raise
-        try:
-            await self._google_sheet.batch_update_grid(mutations)
-        except Exception as exc:
-            error = partial_success_storage_error(exc)
-            if error is None:
+            force_structure=True,
+        ) as (metadata, grids, side_effect):
+            try:
+                mutations, _ = self._plan_summary_reconciliation(
+                    metadata,
+                    grids,
+                    member_by_names or {},
+                    encore_role_ids,
+                )
+            except Exception as exc:
+                _raise_partial_after_side_effect(exc, side_effect=side_effect)
                 raise
-            raise error from error.__cause__
-        return metadata
+            try:
+                await self._google_sheet.batch_update_grid(mutations)
+            except Exception as exc:
+                error = partial_success_storage_error(exc)
+                if error is None:
+                    raise
+                raise error from error.__cause__
+            return metadata
 
     @override
     async def ensure_worksheets_and_upsert_sheet_config(
@@ -318,18 +313,18 @@ class TeamRegisterManager(
                 )
         return growth
 
-    async def _prepare_metadata(  # noqa: C901, PLR0912, PLR0915
+    async def _ensure_metadata_structure(
         self,
         metadata: TeamRegisterGoogleSheetsMetadata,
         *,
         team_count: int,
-        validate_summary_sources: bool = False,
+        create_missing: bool = True,
     ) -> tuple[
         TeamRegisterGoogleSheetsMetadata,
-        dict[int, tuple[list[object], list[list[object]]]],
         bool,
         bool,
     ]:
+        """Resolve or create Team worksheets and report persisted side effects."""
         desired = self.GoogleSheetsMetadataType.assign_missing_default_titles(
             metadata,
             {TeamWorksheetMetadata: team_count},
@@ -369,10 +364,55 @@ class TeamRegisterManager(
             desired.sheet_url,
             resolved_worksheets,
         )
+        missing_titles = [
+            worksheet.title
+            for worksheet in desired
+            if worksheet.worksheet is None and worksheet.title is not None
+        ]
+        created_side_effect = False
+        if missing_titles and create_missing:
+            created = {}
+            for title in missing_titles:
+                try:
+                    worksheet = await sheet.get_or_create_worksheet(title)
+                except Exception as exc:
+                    _raise_partial_after_side_effect(
+                        exc,
+                        side_effect=bool(created),
+                    )
+                    raise
+                created[worksheet.title] = worksheet
+            created_side_effect = bool(created)
+            desired = self.GoogleSheetsMetadataType.from_subtyped_worksheets(
+                desired.sheet_url,
+                [
+                    type(worksheet_metadata)(
+                        None,
+                        worksheet_metadata.title,
+                        created.get(
+                            worksheet_metadata.title,
+                            worksheet_metadata.worksheet,
+                        ),
+                    )
+                    for worksheet_metadata in desired
+                ],
+            )
 
+        config_changed = [worksheet.id for worksheet in desired] != [
+            worksheet.id for worksheet in metadata
+        ]
+        return desired, config_changed, created_side_effect
+
+    async def _read_metadata_grids(
+        self,
+        metadata: TeamRegisterGoogleSheetsMetadata,
+        *,
+        validate_summary_sources: bool,
+    ) -> dict[int, tuple[list[object], list[list[object]]]]:
+        """Read and validate Team and Summary grids while their locks are held."""
         titles = [
             worksheet.title
-            for worksheet in desired.team_worksheets
+            for worksheet in metadata.team_worksheets
             if worksheet.title is not None
         ]
         summary_headers, _ = (
@@ -383,7 +423,7 @@ class TeamRegisterManager(
             *summary_headers,
         ]
         grids: dict[int, tuple[list[object], list[list[object]]]] = {}
-        for worksheet_metadata in desired:
+        for worksheet_metadata in metadata:
             worksheet = worksheet_metadata.worksheet
             if worksheet is not None:
                 expected_headers = (
@@ -396,7 +436,7 @@ class TeamRegisterManager(
                     expected_headers,
                 )
         migrated_team_grids = []
-        for worksheet_metadata in desired.team_worksheets:
+        for worksheet_metadata in metadata.team_worksheets:
             worksheet = worksheet_metadata.worksheet
             if worksheet is None:
                 continue
@@ -417,7 +457,7 @@ class TeamRegisterManager(
                 migrated_rows,
             )
             migrated_team_grids.append((migrated_headers, migrated_rows))
-        summary_worksheet = desired.summary_worksheet.worksheet
+        summary_worksheet = metadata.summary_worksheet.worksheet
         summary_inserts_title_pair = False
         if summary_worksheet is not None:
             headers, rows = grids[summary_worksheet.id]
@@ -452,48 +492,80 @@ class TeamRegisterManager(
                     migrated_headers,
                     migrated_rows,
                 )
+        return grids
 
-        missing_titles = [
-            worksheet.title
-            for worksheet in desired
-            if worksheet.worksheet is None and worksheet.title is not None
+    @asynccontextmanager
+    async def _prepared_metadata_transaction(
+        self,
+        metadata: TeamRegisterGoogleSheetsMetadata,
+        *,
+        team_count: int,
+        validate_summary_sources: bool = False,
+        force_structure: bool = False,
+    ) -> AsyncIterator[
+        tuple[
+            TeamRegisterGoogleSheetsMetadata,
+            dict[int, tuple[list[object], list[list[object]]]],
+            bool,
         ]
-        created_side_effect = False
-        if missing_titles:
-            created = {}
-            for title in missing_titles:
-                try:
-                    worksheet = await sheet.get_or_create_worksheet(title)
-                except Exception as exc:
-                    _raise_partial_after_side_effect(
-                        exc,
-                        side_effect=bool(created),
-                    )
-                    raise
-                created[worksheet.title] = worksheet
-            created_side_effect = bool(created)
-            desired = self.GoogleSheetsMetadataType.from_subtyped_worksheets(
-                desired.sheet_url,
-                [
-                    type(worksheet_metadata)(
-                        None,
-                        worksheet_metadata.title,
-                        created.get(
-                            worksheet_metadata.title,
-                            worksheet_metadata.worksheet,
-                        ),
-                    )
-                    for worksheet_metadata in desired
-                ],
+    ]:
+        needs_structure = force_structure or (
+            len(metadata.team_worksheets) < team_count
+            or any(worksheet.worksheet is None for worksheet in metadata)
+        )
+        side_effect = False
+        if needs_structure:
+            async with spreadsheet_structure_transaction(metadata.sheet_url):
+                (
+                    metadata,
+                    resolved_config_changed,
+                    _,
+                ) = await self._ensure_metadata_structure(
+                    metadata,
+                    team_count=team_count,
+                    create_missing=False,
+                )
+            existing_resources = [
+                worksheet_transaction_key(metadata.sheet_url, worksheet.id)
+                for worksheet in metadata
+                if worksheet.worksheet is not None
+            ]
+            async with worksheet_transactions(existing_resources):
+                await self._read_metadata_grids(
+                    metadata,
+                    validate_summary_sources=validate_summary_sources,
+                )
+            async with spreadsheet_structure_transaction(metadata.sheet_url):
+                (
+                    metadata,
+                    config_changed,
+                    created,
+                ) = await self._ensure_metadata_structure(
+                    metadata,
+                    team_count=team_count,
+                )
+                config_changed = resolved_config_changed or config_changed
+                if config_changed:
+                    try:
+                        await self.upsert_sheet_config(metadata)
+                    except Exception as exc:
+                        _raise_partial_after_side_effect(exc, side_effect=created)
+                        raise
+                side_effect = created or config_changed
+
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, worksheet.id)
+            for worksheet in metadata
+            if worksheet.worksheet is not None
+        ]
+        async with worksheet_transactions(resources):
+            grids = await self._read_metadata_grids(
+                metadata,
+                validate_summary_sources=validate_summary_sources,
             )
-            grids.update((worksheet.id, ([], [])) for worksheet in created.values())
+            yield metadata, grids, side_effect
 
-        config_changed = [worksheet.id for worksheet in desired] != [
-            worksheet.id for worksheet in metadata
-        ]
-        return desired, grids, config_changed, created_side_effect
-
-    async def upsert_user_registration(  # noqa: C901, PLR0912, PLR0915
+    async def upsert_user_registration(
         self,
         user: UserInfo,
         roles: list[Role],
@@ -503,15 +575,31 @@ class TeamRegisterManager(
     ) -> None:
         """Plan all Team tabs and the row-local Summary update as one batch."""
         teams = [main_team, encore_team, *backup_teams]
-        (
-            metadata,
-            grids,
-            config_changed,
-            created_side_effect,
-        ) = await self._prepare_metadata(
+        async with self._prepared_metadata_transaction(
             await self.fetch_google_sheets_metadata(),
             team_count=len(teams),
-        )
+        ) as (metadata, grids, side_effect):
+            await self._upsert_user_registration_locked(
+                metadata,
+                grids,
+                user,
+                roles,
+                teams,
+                side_effect=side_effect,
+            )
+
+    async def _upsert_user_registration_locked(  # noqa: C901, PLR0912, PLR0913, PLR0915
+        self,
+        metadata: TeamRegisterGoogleSheetsMetadata,
+        grids: dict[int, tuple[list[object], list[list[object]]]],
+        user: UserInfo,
+        roles: list[Role],
+        teams: list[Team | None],
+        *,
+        side_effect: bool,
+    ) -> None:
+        config_changed = False
+        created_side_effect = side_effect
         simulated_grids = dict(grids)
         column_mutations: list[DimensionMutation] = []
         header_updates: list[GridValueUpdate] = []
@@ -770,18 +858,30 @@ class TeamRegisterManager(
             )
             raise
 
-    async def delete_user_registration(self, user: UserInfo) -> None:  # noqa: PLR0915
+    async def delete_user_registration(self, user: UserInfo) -> None:
         """Plan complete Team and Summary row deletions as one batch."""
         source_metadata = await self.fetch_google_sheets_metadata()
-        (
-            metadata,
-            grids,
-            config_changed,
-            created_side_effect,
-        ) = await self._prepare_metadata(
+        async with self._prepared_metadata_transaction(
             source_metadata,
             team_count=len(source_metadata.team_worksheets),
-        )
+        ) as (metadata, grids, side_effect):
+            await self._delete_user_registration_locked(
+                metadata,
+                grids,
+                user,
+                side_effect=side_effect,
+            )
+
+    async def _delete_user_registration_locked(  # noqa: PLR0915
+        self,
+        metadata: TeamRegisterGoogleSheetsMetadata,
+        grids: dict[int, tuple[list[object], list[list[object]]]],
+        user: UserInfo,
+        *,
+        side_effect: bool,
+    ) -> None:
+        config_changed = False
+        created_side_effect = side_effect
         simulated_grids: dict[
             int,
             tuple[list[object], list[list[object]]],
@@ -1166,34 +1266,25 @@ class TeamRegisterManager(
         member_by_names: dict[str, Member],
     ) -> pd.DataFrame:
         """Reconcile the complete derived Summary in one batch and return it."""
-        (
-            metadata,
-            grids,
-            config_changed,
-            created_side_effect,
-        ) = await self._prepare_metadata(
+        async with self._prepared_metadata_transaction(
             await self.fetch_google_sheets_metadata(),
             team_count=0,
             validate_summary_sources=True,
-        )
-        side_effect = created_side_effect
-        try:
-            encore_role_ids = (await self.get_sheet_config()).encore_role_ids
-            mutations, final = self._plan_summary_reconciliation(
-                metadata,
-                grids,
-                member_by_names,
-                encore_role_ids,
-            )
-            if config_changed:
-                await self.upsert_sheet_config(metadata)
-                side_effect = True
-            sheet = await self.get_google_sheet()
-            await sheet.batch_update_grid(mutations)
-        except Exception as exc:
-            _raise_partial_after_side_effect(exc, side_effect=side_effect)
-            raise
-        return final
+        ) as (metadata, grids, side_effect):
+            try:
+                encore_role_ids = (await self.get_sheet_config()).encore_role_ids
+                mutations, final = self._plan_summary_reconciliation(
+                    metadata,
+                    grids,
+                    member_by_names,
+                    encore_role_ids,
+                )
+                sheet = await self.get_google_sheet()
+                await sheet.batch_update_grid(mutations)
+            except Exception as exc:
+                _raise_partial_after_side_effect(exc, side_effect=side_effect)
+                raise
+            return final
 
     async def update_encore_role_ids_and_summary(
         self,
@@ -1201,38 +1292,35 @@ class TeamRegisterManager(
         member_by_names: dict[str, Member],
     ) -> TeamRegisterGoogleSheetsMetadata:
         """Save proposed Encore role IDs and reconcile Summary in one action."""
-        metadata, grids, _, created_side_effect = await self._prepare_metadata(
+        async with self._prepared_metadata_transaction(
             await self.fetch_google_sheets_metadata(),
             team_count=0,
             validate_summary_sources=True,
-        )
-        try:
-            mutations, _ = self._plan_summary_reconciliation(
-                metadata,
-                grids,
-                member_by_names,
-                role_ids,
-            )
-            sheet = await self.get_google_sheet()
-            config = await self.get_sheet_config()
-            config.sheet_url = metadata.sheet_url
-            config.team_worksheet_ids = [
-                worksheet.id for worksheet in metadata.team_worksheets
-            ]
-            config.summary_worksheet_id = metadata.summary_worksheet.id
-            config.encore_role_ids = role_ids
-            await config.save()
-        except Exception as exc:
-            _raise_partial_after_side_effect(
-                exc,
-                side_effect=created_side_effect,
-            )
-            raise
-        try:
-            await sheet.batch_update_grid(mutations)
-        except Exception as exc:
-            error = partial_success_storage_error(exc)
-            if error is None:
+        ) as (metadata, grids, side_effect):
+            try:
+                mutations, _ = self._plan_summary_reconciliation(
+                    metadata,
+                    grids,
+                    member_by_names,
+                    role_ids,
+                )
+                sheet = await self.get_google_sheet()
+                config = await self.get_sheet_config()
+                config.sheet_url = metadata.sheet_url
+                config.team_worksheet_ids = [
+                    worksheet.id for worksheet in metadata.team_worksheets
+                ]
+                config.summary_worksheet_id = metadata.summary_worksheet.id
+                config.encore_role_ids = role_ids
+                await config.save()
+            except Exception as exc:
+                _raise_partial_after_side_effect(exc, side_effect=side_effect)
                 raise
-            raise error from error.__cause__
-        return metadata
+            try:
+                await sheet.batch_update_grid(mutations)
+            except Exception as exc:
+                error = partial_success_storage_error(exc)
+                if error is None:
+                    raise
+                raise error from error.__cause__
+            return metadata

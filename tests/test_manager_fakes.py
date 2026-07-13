@@ -281,39 +281,135 @@ class RecordingKeyLock:
 
 
 @pytest.mark.asyncio
-async def test_spreadsheet_transaction_acquires_channel_before_spreadsheet(
+async def test_worksheet_transactions_dedupe_and_sort(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[str, object]] = []
-    channel_lock = RecordingKeyLock("channel", events)
-    spreadsheet_lock = RecordingKeyLock("spreadsheet", events)
+    lock = RecordingKeyLock("worksheet", events)
     monkeypatch.setattr(
         manager_base_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
+        "WORKSHEET_TRANSACTION_LOCK",
+        lock,
         raising=False,
     )
 
-    async with manager_base_module.spreadsheet_transaction(
-        channel_lock,
-        channel_id=22,
-        sheet_url="https://docs.google.com/spreadsheets/d/sheet-abc/edit#gid=1",
+    async with manager_base_module.worksheet_transactions(
+        [("sheet-b", 2), ("sheet-a", 9), ("sheet-a", 1), ("sheet-a", 1)]
     ):
         events.append(("inside", None))
 
-    assert events == [
-        ("enter_channel", 22),
-        ("enter_spreadsheet", "sheet-abc"),
-        ("inside", None),
-        ("exit_spreadsheet", "sheet-abc"),
-        ("exit_channel", 22),
+    assert [event for event in events if event[0] == "enter_worksheet"] == [
+        ("enter_worksheet", ("sheet-a", 1)),
+        ("enter_worksheet", ("sheet-a", 9)),
+        ("enter_worksheet", ("sheet-b", 2)),
     ]
 
 
+async def worksheet_transactions_overlap(
+    monkeypatch: pytest.MonkeyPatch,
+    first_resources: list[tuple[str, int]],
+    second_resources: list[tuple[str, int]],
+) -> bool:
+    monkeypatch.setattr(
+        manager_base_module,
+        "WORKSHEET_TRANSACTION_LOCK",
+        KeyAsyncLock(),
+        raising=False,
+    )
+    first_entered = asyncio.Event()
+    second_attempted = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first() -> None:
+        async with manager_base_module.worksheet_transactions(first_resources):
+            first_entered.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        second_attempted.set()
+        async with manager_base_module.worksheet_transactions(second_resources):
+            second_entered.set()
+
+    first_task = asyncio.create_task(first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second())
+    await second_attempted.wait()
+    await asyncio.sleep(0)
+    overlap = second_entered.is_set()
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+    return overlap
+
+
 @pytest.mark.asyncio
-async def test_fresh_shift_transaction_refreshes_before_spreadsheet_lock(
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        ([("sheet", 1)], [("sheet", 1)], False),
+        ([("sheet", 1)], [("sheet", 2)], True),
+        ([("sheet-a", 1)], [("sheet-b", 1)], True),
+    ],
+)
+async def test_worksheet_transaction_keyed_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: tuple[list[tuple[str, int]], list[tuple[str, int]], bool],
+) -> None:
+    assert (
+        await worksheet_transactions_overlap(
+            monkeypatch,
+            scenario[0],
+            scenario[1],
+        )
+        is scenario[2]
+    )
+
+
+@pytest.mark.asyncio
+async def test_worksheet_transaction_cancellation_releases_acquired_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    second_attempted = asyncio.Event()
+    released: list[tuple[str, int]] = []
+
+    class BlockingSecondResourceLock:
+        @asynccontextmanager
+        async def __call__(
+            self,
+            key: tuple[str, int],
+        ) -> AsyncIterator[None]:
+            if key == ("sheet", 2):
+                second_attempted.set()
+                await asyncio.Event().wait()
+            try:
+                yield
+            finally:
+                released.append(key)
+
+    monkeypatch.setattr(
+        manager_base_module,
+        "WORKSHEET_TRANSACTION_LOCK",
+        BlockingSecondResourceLock(),
+        raising=False,
+    )
+
+    async def transaction() -> None:
+        async with manager_base_module.worksheet_transactions(
+            [("sheet", 1), ("sheet", 2)]
+        ):
+            raise AssertionError
+
+    task = asyncio.create_task(transaction())
+    await second_attempted.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert released == [("sheet", 1)]
+
+
+@pytest.mark.asyncio
+async def test_fresh_shift_transaction_only_locks_channel() -> None:
     events: list[tuple[str, object]] = []
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register", channel_id=22), "service.json"
@@ -328,15 +424,8 @@ async def test_fresh_shift_transaction_refreshes_before_spreadsheet_lock(
 
     manager.get_fresh_sheet_config = get_fresh_sheet_config  # type: ignore[method-assign]
     channel_lock = RecordingKeyLock("channel", events)
-    spreadsheet_lock = RecordingKeyLock("spreadsheet", events)
-    monkeypatch.setattr(
-        shift_register_manager,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        spreadsheet_lock,
-        raising=False,
-    )
 
-    async with shift_register_manager.fresh_shift_spreadsheet_transaction(
+    async with shift_register_manager.fresh_shift_channel_transaction(
         manager,
         channel_lock,
         channel_id=22,
@@ -347,146 +436,81 @@ async def test_fresh_shift_transaction_refreshes_before_spreadsheet_lock(
     assert events == [
         ("enter_channel", 22),
         ("fresh_config", None),
-        ("enter_spreadsheet", "current-shift"),
         ("inside", None),
-        ("exit_spreadsheet", "current-shift"),
         ("exit_channel", 22),
     ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("manager_type", "manager_module", "transaction"),
-    [
-        (
-            TeamRegisterManager,
-            team_register_manager_module,
-            team_register_manager_module.fresh_team_spreadsheet_transaction,
-        ),
-        (
-            ShiftRegisterManager,
-            shift_register_manager,
-            shift_register_manager.fresh_shift_spreadsheet_transaction,
-        ),
-    ],
-)
-async def test_fresh_transactions_use_safe_key_for_invalid_saved_url(
-    monkeypatch: pytest.MonkeyPatch,
-    manager_type: type[TeamRegisterManager | ShiftRegisterManager],
-    manager_module: object,
-    transaction: object,
-) -> None:
+async def test_fresh_team_transaction_only_locks_channel() -> None:
     events: list[tuple[str, object]] = []
-    manager = manager_type(
-        make_feature_channel(
-            "team_register"
-            if manager_type is TeamRegisterManager
-            else "shift_register",
-            channel_id=22,
-        ),
+    manager = TeamRegisterManager(
+        make_feature_channel("team_register", channel_id=22),
         "service.json",
     )
     config = SimpleNamespace(sheet_url="invalid saved URL")
-    manager.get_fresh_sheet_config = AsyncMock(  # type: ignore[method-assign]
-        return_value=config
-    )
-    channel_lock = RecordingKeyLock("channel", events)
-    spreadsheet_lock = RecordingKeyLock("spreadsheet", events)
-    monkeypatch.setattr(
-        manager_module, "SPREADSHEET_TRANSACTION_LOCK", spreadsheet_lock
-    )
-    key = Mock(return_value="safe-invalid-key")
-    monkeypatch.setattr(
-        manager_module, "spreadsheet_transaction_key", key, raising=False
-    )
 
-    transaction_context = transaction
-    assert callable(transaction_context)
-    async with transaction_context(  # type: ignore[operator]
+    async def get_fresh_sheet_config() -> SimpleNamespace:
+        events.append(("fresh_config", None))
+        return config
+
+    manager.get_fresh_sheet_config = get_fresh_sheet_config  # type: ignore[method-assign]
+    channel_lock = RecordingKeyLock("channel", events)
+
+    async with team_register_manager_module.fresh_team_channel_transaction(
         manager,
         channel_lock,
         channel_id=22,
-    ):
+    ) as current_config:
+        assert current_config is config
         events.append(("inside", None))
 
-    key.assert_called_once_with(config.sheet_url)
-    assert events[1] == ("enter_spreadsheet", "safe-invalid-key")
-
-
-async def transactions_overlap(
-    *,
-    first_channel_id: int,
-    first_spreadsheet_id: str,
-    second_channel_id: int,
-    second_spreadsheet_id: str,
-) -> bool:
-    channel_lock = KeyAsyncLock()
-    transaction = manager_base_module.spreadsheet_transaction
-    first_entered = asyncio.Event()
-    second_attempted = asyncio.Event()
-    second_entered = asyncio.Event()
-    release_first = asyncio.Event()
-
-    async def first() -> None:
-        async with transaction(
-            channel_lock,
-            channel_id=first_channel_id,
-            sheet_url=(
-                f"https://docs.google.com/spreadsheets/d/{first_spreadsheet_id}/edit"
-            ),
-        ):
-            first_entered.set()
-            await release_first.wait()
-
-    async def second() -> None:
-        second_attempted.set()
-        async with transaction(
-            channel_lock,
-            channel_id=second_channel_id,
-            sheet_url=(
-                f"https://docs.google.com/spreadsheets/d/{second_spreadsheet_id}/edit"
-            ),
-        ):
-            second_entered.set()
-
-    first_task = asyncio.create_task(first())
-    await first_entered.wait()
-    second_task = asyncio.create_task(second())
-    await second_attempted.wait()
-    overlap = second_entered.is_set()
-    release_first.set()
-    await asyncio.gather(first_task, second_task)
-    return overlap
+    assert events == [
+        ("enter_channel", 22),
+        ("fresh_config", None),
+        ("inside", None),
+        ("exit_channel", 22),
+    ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "scenario",
-    [
-        (1, "shared-sheet", 2, "shared-sheet", False),
-        (1, "first-sheet", 2, "second-sheet", True),
-        (1, "first-sheet", 1, "second-sheet", False),
-    ],
-)
-async def test_spreadsheet_transaction_keyed_concurrency(
-    monkeypatch: pytest.MonkeyPatch,
-    scenario: tuple[int, str, int, str, bool],
-) -> None:
-    monkeypatch.setattr(
-        manager_base_module,
-        "SPREADSHEET_TRANSACTION_LOCK",
-        KeyAsyncLock(),
-        raising=False,
-    )
+async def test_cross_feature_disjoint_overlap_and_shared_summary_waits() -> None:
+    team_entered = asyncio.Event()
+    shift_entered = asyncio.Event()
+    shared_attempted = asyncio.Event()
+    shared_entered = asyncio.Event()
+    release_team = asyncio.Event()
+    release_shift = asyncio.Event()
 
-    overlap = await transactions_overlap(
-        first_channel_id=scenario[0],
-        first_spreadsheet_id=scenario[1],
-        second_channel_id=scenario[2],
-        second_spreadsheet_id=scenario[3],
-    )
+    async def team_registration() -> None:
+        async with manager_base_module.worksheet_transactions(
+            [("shared-sheet", 101), ("shared-sheet", 201)]
+        ):
+            team_entered.set()
+            await release_team.wait()
 
-    assert overlap is scenario[4]
+    async def shift_registration_without_team_source() -> None:
+        async with manager_base_module.worksheet_transactions([("shared-sheet", 301)]):
+            shift_entered.set()
+            await release_shift.wait()
+
+    async def summary_consumer() -> None:
+        shared_attempted.set()
+        async with manager_base_module.worksheet_transactions([("shared-sheet", 201)]):
+            shared_entered.set()
+
+    team_task = asyncio.create_task(team_registration())
+    await team_entered.wait()
+    shift_task = asyncio.create_task(shift_registration_without_team_source())
+    await shift_entered.wait()
+    shared_task = asyncio.create_task(summary_consumer())
+    await shared_attempted.wait()
+
+    assert not shared_entered.is_set()
+    release_team.set()
+    await shared_entered.wait()
+    release_shift.set()
+    await asyncio.gather(team_task, shift_task, shared_task)
 
 
 class FakeTeamConfigQuery:
@@ -598,7 +622,7 @@ def make_team_source_config(
 ) -> SimpleNamespace:
     worksheet_ids = [*(team_worksheet_ids or [101, 102]), 201]
     return SimpleNamespace(
-        sheet_url="https://team.sheet.example",
+        sheet_url="https://docs.google.com/spreadsheets/d/team-source/edit",
         team_worksheet_ids=team_worksheet_ids or [101, 102],
         summary_worksheet_id=201,
         landing_worksheet_id=landing_worksheet_id,
@@ -808,7 +832,7 @@ def make_shift_metadata(
     worksheet: FakeEntryWorksheet | None,
 ) -> ShiftRegisterGoogleSheetsMetadata:
     return ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-transaction/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", None),
@@ -1089,7 +1113,7 @@ async def test_shift_manager_reads_draft_profiles_from_selected_team_source(
     assert resolution.profiles["bob"].has_encore_team is False
     assert resolution.profiles["carol"].has_encore_role is False
     assert resolution.notes_team_source == shift_register_manager.DraftNotesTeamSource(
-        sheet_url="https://team.sheet.example",
+        sheet_url="https://docs.google.com/spreadsheets/d/team-source/edit",
         worksheet_title="Team Summary",
         import_last_column="H",
         username_header="username",
@@ -1253,8 +1277,8 @@ async def test_draft_profiles_preserve_unavailable_team_source_status(
     )
     monkeypatch.setattr(
         manager,
-        "resolve_team_source",
-        AsyncMock(return_value=shift_register_manager.TeamSourceResolution(status)),
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(status, None, None)),
     )
 
     resolution = await manager.resolve_draft_team_profiles()
@@ -1508,7 +1532,22 @@ async def test_shift_manager_reports_transient_team_source_as_unresolved(
 
 
 @pytest.mark.asyncio
-async def test_team_manager_upserts_team_and_summary_in_one_batch_same_rows() -> None:
+async def test_team_manager_upserts_team_and_summary_in_one_batch_same_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    worksheet_lock = RecordingKeyLock("worksheet", events)
+    structure_lock = RecordingKeyLock("structure", events)
+    monkeypatch.setattr(
+        manager_base_module,
+        "WORKSHEET_TRANSACTION_LOCK",
+        worksheet_lock,
+    )
+    monkeypatch.setattr(
+        manager_base_module,
+        "SPREADSHEET_STRUCTURE_LOCK",
+        structure_lock,
+    )
     manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
     team_worksheet = FakeTeamGridWorksheet(
         101,
@@ -1555,6 +1594,12 @@ async def test_team_manager_upserts_team_and_summary_in_one_batch_same_rows() ->
     assert [
         (update.worksheet_id, update.start_row_index) for update in value_updates
     ] == [(101, 1), (201, 1)]
+    assert [event for event in events if event[0] == "enter_worksheet"] == [
+        ("enter_worksheet", ("team-transaction", 101)),
+        ("enter_worksheet", ("team-transaction", 102)),
+        ("enter_worksheet", ("team-transaction", 201)),
+    ]
+    assert all(event[0] != "enter_structure" for event in events)
 
 
 @pytest.mark.asyncio
@@ -2750,11 +2795,7 @@ async def test_team_settings_refreshes_encore_ids_after_waiting_for_channel_lock
     async def settings_save() -> None:
         await encore_holds_lock.wait()
         settings_attempted.set()
-        async with manager_base_module.spreadsheet_transaction(
-            channel_lock,
-            channel_id=manager.feature_channel.channel_id,
-            sheet_url=sheet.sheet_url,
-        ):
+        async with channel_lock(manager.feature_channel.channel_id):
             await manager.upsert_sheet_config_and_worksheets(
                 sheet.sheet_url,
                 team_worksheet_titles=["Main Team"],
@@ -3688,6 +3729,7 @@ async def test_team_encore_save_failure_after_creation_is_partial() -> None:
             "private save detail",
         )
     )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
 
     with pytest.raises(StorageError) as exc_info:
         await manager.update_encore_role_ids_and_summary([7], {})
@@ -3773,10 +3815,10 @@ async def test_shift_sheet_setup_initializes_entry_presentation(
     manager.get_sheet_config = AsyncMock(
         return_value=SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 28}])
     )
-    manager.sync_entry_presentation = AsyncMock()
+    manager._sync_entry_presentation_locked = AsyncMock()  # noqa: SLF001
 
     result = await manager.upsert_sheet_config_and_worksheets(
-        "https://sheet.example",
+        sheet.sheet_url,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -3785,11 +3827,13 @@ async def test_shift_sheet_setup_initializes_entry_presentation(
     assert [worksheet.id for worksheet in result] == [1, 2, 3]
     assert sheet.calls == [["Entry"], ["Draft", "Final"]]
     manager.upsert_sheet_config.assert_awaited_once_with(result)
-    manager.sync_entry_presentation.assert_awaited_once()
-    sync_metadata, sync_ranges = manager.sync_entry_presentation.await_args.args
+    manager._sync_entry_presentation_locked.assert_awaited_once()  # noqa: SLF001
+    sync_metadata, sync_ranges = manager._sync_entry_presentation_locked.await_args.args  # noqa: SLF001
     assert sync_metadata is result
     assert sync_ranges.to_json() == [{"start": 4, "end": 28}]
-    assert manager.sync_entry_presentation.await_args.kwargs == {"force": True}
+    assert manager._sync_entry_presentation_locked.await_args.kwargs == {  # noqa: SLF001
+        "force": True
+    }
 
 
 @pytest.mark.asyncio
@@ -3879,7 +3923,7 @@ async def test_shift_sheet_setup_saves_normalized_anchor_with_worksheet_ids(
     manager.get_sheet_config = AsyncMock(
         return_value=SimpleNamespace(recruitment_time_ranges=[{"start": 4, "end": 28}])
     )
-    manager.sync_entry_presentation = AsyncMock()
+    manager._sync_entry_presentation_locked = AsyncMock()  # noqa: SLF001
 
     metadata = await manager.upsert_sheet_config_and_worksheets(
         sheet.sheet_url,
@@ -3937,7 +3981,15 @@ async def test_shift_sheet_setup_contract_failure_precedes_config_save(
 
 
 @pytest.mark.asyncio
-async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
+async def test_shift_manager_initializes_empty_entry_worksheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        manager_base_module,
+        "WORKSHEET_TRANSACTION_LOCK",
+        RecordingKeyLock("worksheet", events),
+    )
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
@@ -3955,7 +4007,8 @@ async def test_shift_manager_initializes_empty_entry_worksheet() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
-    assert worksheet.batch_gets == [["A1:T2"]]
+    assert ("enter_worksheet", ("shift-transaction", 1)) in events
+    assert worksheet.batch_gets == [["A1:T2"], ["A1:T2"]]
     assert len(worksheet.typed_batch_updates) == 1
     assert [item["range"] for item in worksheet.typed_batch_updates[0]] == [
         "A1",
@@ -3997,7 +4050,10 @@ async def test_shift_manager_repairs_only_required_count_ranges() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
-    assert worksheet.batch_gets == [["A1:AJ2", "A3:C", "F3:AJ"]]
+    assert worksheet.batch_gets == [
+        ["A1:AJ2", "A3:C", "F3:AJ"],
+        ["A1:AJ2", "A3:C", "F3:AJ"],
+    ]
     assert [item["range"] for item in worksheet.typed_batch_updates[0]][:2] == [
         "A1",
         "F1:AI1",
@@ -4289,7 +4345,15 @@ async def test_current_shift_entry_rules_do_not_repeat_presentation_updates() ->
 
 
 @pytest.mark.asyncio
-async def test_existing_shift_updates_owned_ranges_on_same_row() -> None:
+async def test_existing_shift_updates_owned_ranges_on_same_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    monkeypatch.setattr(
+        manager_base_module,
+        "WORKSHEET_TRANSACTION_LOCK",
+        RecordingKeyLock("worksheet", events),
+    )
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
@@ -4312,6 +4376,11 @@ async def test_existing_shift_updates_owned_ranges_on_same_row() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
+    assert [event for event in events if event[0] == "enter_worksheet"] == [
+        ("enter_worksheet", ("shift-transaction", 1)),
+        ("enter_worksheet", ("shift-transaction", 1)),
+        ("enter_worksheet", ("team-source", 201)),
+    ]
     assert [item["range"] for item in worksheet.batch_updates[-1]] == [
         "A4:B4",
         "F4:AJ4",
@@ -4499,7 +4568,7 @@ async def test_select_team_source_preflights_before_persist_and_repair() -> None
 
     manager.resolve_team_source = resolve  # type: ignore[method-assign]
     manager.fetch_google_sheets_metadata = fetch  # type: ignore[method-assign]
-    manager.repair_team_references = repair  # type: ignore[method-assign]
+    manager._repair_team_references_locked = repair  # type: ignore[method-assign]  # noqa: SLF001
     manager._sheet_config = config  # type: ignore[assignment]  # noqa: SLF001
 
     result = await manager.select_team_source_and_repair(22)

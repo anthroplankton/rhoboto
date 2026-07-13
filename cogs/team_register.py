@@ -24,7 +24,7 @@ from utils.storage_errors import (
 from utils.team_register_manager import (
     TEAM_REGISTER_SHEET_WRITE_LOCK,
     TeamRegisterManager,
-    fresh_team_spreadsheet_transaction,
+    fresh_team_channel_transaction,
 )
 from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
@@ -142,7 +142,7 @@ class TeamRegister(
         team_tuple = classified_teams.as_tuple()
         manager = context.manager
 
-        async with fresh_team_spreadsheet_transaction(
+        async with fresh_team_channel_transaction(
             manager,
             self.sheet_write_lock,
             channel_id=context.channel_id,
@@ -213,7 +213,7 @@ class TeamRegister(
             return
 
         try:
-            async with fresh_team_spreadsheet_transaction(
+            async with fresh_team_channel_transaction(
                 context.manager,
                 self.sheet_write_lock,
                 channel_id=context.channel_id,

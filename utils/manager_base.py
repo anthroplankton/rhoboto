@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING
 
 from models.base.sheet_config_base import SheetConfigBase
@@ -14,12 +14,16 @@ from utils.storage_errors import partial_success_storage_error
 from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Hashable, Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping
 
     from models.feature_channel import FeatureChannel
 
 
-SPREADSHEET_TRANSACTION_LOCK = KeyAsyncLock()
+type WorksheetTransactionKey = tuple[str, int]
+
+
+SPREADSHEET_STRUCTURE_LOCK = KeyAsyncLock()
+WORKSHEET_TRANSACTION_LOCK = KeyAsyncLock()
 
 
 def spreadsheet_transaction_key(sheet_url: str) -> str:
@@ -33,19 +37,32 @@ def spreadsheet_transaction_key(sheet_url: str) -> str:
         ) from exc
 
 
+def worksheet_transaction_key(
+    sheet_url: str,
+    worksheet_id: int,
+) -> WorksheetTransactionKey:
+    """Return the canonical key for one worksheet transaction."""
+    return spreadsheet_transaction_key(sheet_url), worksheet_id
+
+
 @asynccontextmanager
-async def spreadsheet_transaction(
-    feature_channel_lock: KeyAsyncLock,
-    *,
-    channel_id: Hashable,
+async def spreadsheet_structure_transaction(
     sheet_url: str,
 ) -> AsyncIterator[None]:
-    """Lock a Sheet transaction in channel-first, spreadsheet-second order."""
+    """Lock worksheet lifecycle changes for one spreadsheet."""
     spreadsheet_id = spreadsheet_transaction_key(sheet_url)
-    async with (
-        feature_channel_lock(channel_id),
-        SPREADSHEET_TRANSACTION_LOCK(spreadsheet_id),
-    ):
+    async with SPREADSHEET_STRUCTURE_LOCK(spreadsheet_id):
+        yield
+
+
+@asynccontextmanager
+async def worksheet_transactions(
+    resources: Iterable[WorksheetTransactionKey],
+) -> AsyncIterator[None]:
+    """Lock a deterministic set of worksheet resources."""
+    async with AsyncExitStack() as stack:
+        for resource in sorted(set(resources)):
+            await stack.enter_async_context(WORKSHEET_TRANSACTION_LOCK(resource))
         yield
 
 

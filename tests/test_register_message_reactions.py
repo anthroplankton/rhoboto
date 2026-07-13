@@ -22,7 +22,11 @@ from tests.test_manager_fakes import (
 from utils import manager_base as manager_base_module, structs_base
 from utils.google_sheets import DimensionMutation, GridValueUpdate
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.shift_register_manager import ShiftRegisterManager
+from utils.shift_register_manager import (
+    ShiftRegisterManager,
+    TeamSourceResolution,
+    TeamSourceStatus,
+)
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
@@ -716,10 +720,25 @@ async def test_shift_listener_marks_old_entry_header_contract_error(
     )
 
     class OldHeaderShiftRegisterManager:
-        upsert_or_delete_user_shift = ShiftRegisterManager.upsert_or_delete_user_shift
-
         def __init__(self, *_: object) -> None:
             pass
+
+        async def upsert_or_delete_user_shift(
+            self,
+            user: object,
+            shift: object,
+            metadata: ShiftRegisterGoogleSheetsMetadata,
+            *,
+            recruitment_ranges: object,
+        ) -> None:
+            await ShiftRegisterManager._upsert_or_delete_user_shift_locked(
+                self,
+                user,
+                shift,
+                metadata,
+                TeamSourceResolution(TeamSourceStatus.UNSET),
+                recruitment_ranges=recruitment_ranges,
+            )
 
         async def get_sheet_config_or_none(self) -> SimpleNamespace:
             return SimpleNamespace(
@@ -1172,8 +1191,9 @@ async def test_shift_ensure_failure_preserves_manager_storage_kind(
         async def upsert_or_delete_user_shift(
             self,
             *_args: object,
-            **_kwargs: object,
+            **kwargs: object,
         ) -> None:
+            await self.ensure_worksheets_and_upsert_sheet_config(kwargs["metadata"])
             events.append("upsert")
 
     monkeypatch.setattr(
@@ -1239,9 +1259,14 @@ async def test_shift_post_ensure_upsert_failure_uses_actual_id_change(
         async def upsert_or_delete_user_shift(
             self,
             *_args: object,
-            **_kwargs: object,
+            **kwargs: object,
         ) -> None:
+            metadata = kwargs["metadata"]
+            previous_ids = tuple(worksheet.id for worksheet in metadata.worksheets)
+            metadata = await self.ensure_worksheets_and_upsert_sheet_config(metadata)
             events.append("upsert")
+            if tuple(worksheet.id for worksheet in metadata.worksheets) != previous_ids:
+                raise StorageError(StorageErrorKind.PARTIAL_SUCCESS)
             raise GoogleSheetsError(
                 GoogleSheetsErrorKind.PERMISSION,
                 "private post-ensure permission detail",

@@ -88,11 +88,13 @@ Do not use production Discord channels, production sheets, or real user data.
 | Sensitive data guard | Review the Discord responses and relevant logs from the storage failure checks. | UI and logs do not expose credential contents, credential file contents, private Sheet cell data, raw tokens, or private identifiers. |  |  |
 
 Concurrency caveat: the bot serializes its own read-plan-write operations by feature
-channel and spreadsheet ID, and each grid mutation stream is one Google Sheets
-`batchUpdate`. Google Sheets does not provide a compare-and-swap for this flow, so a
-human can still edit the same bot-owned cells between the bot's read and write.
-Record any such overlap as an unavoidable human-edit race; retry after reviewing the
-Sheet rather than treating the spreadsheet-ID lock as protection from human edits.
+channel and sorted worksheet resource `(spreadsheet ID, worksheet ID)`. Worksheet
+list/create and worksheet-ID persistence use a separate spreadsheet structure lock,
+and each grid mutation stream remains one Google Sheets `batchUpdate`. Google Sheets
+does not provide a compare-and-swap for this flow, so a human can still edit the same
+bot-owned cells between the bot's read and write. Record any such overlap as an
+unavoidable human-edit race; retry after reviewing the Sheet rather than treating a
+bot worksheet lock as protection from human edits.
 
 ## Team Register
 
@@ -123,7 +125,9 @@ Use the team test channel.
 | Short Summary row repair | In a registered Summary row, leave `username` but clear every later bot-owned cell so the Sheets API omits the trailing values, then run `/team_register summary`. | Refresh completes without an index/reindex error. Missing trailing cells are treated as blank, and the bot reconstructs required Summary values from current members and Team rows. |  |  |
 | Missing configured Team during delete | Configure Main and Encore, delete the Encore worksheet itself without changing bot settings, then confirm `/team delete`. | The bot repairs the missing configured position with its default title, saves the replacement worksheet ID, retains the corresponding Summary title pair, and deletes the user's complete Team/Summary rows. It does not infer a settings shrink from one failed worksheet lookup. |  |  |
 | Settings reconciliation and retry | Change Team worksheet membership or titles. After contract preflight, inject a failure in the post-save Summary batch, then retry with a later Team write, Summary refresh, or settings save. | The first attempt retains the saved worksheet IDs and reports partial success; the failed batch leaves the prior Sheet grids intact. The next action idempotently reconciles Summary without duplicate columns or rows. |  |  |
-| Same-spreadsheet concurrent channels | Point two Team feature channels at the same disposable spreadsheet and release two development-only paused submissions together. | Bot read-plan-write sections run one at a time for that spreadsheet and both final registrations are present; no stale plan overwrites the other bot action. |  |  |
+| Same-spreadsheet concurrent channels | Point two Team feature channels at the same disposable spreadsheet and release two development-only paused submissions together. | Because both operations share Team/Summary worksheet resources, their read-plan-write sections run one at a time and both final registrations are present; no stale plan overwrites the other bot action. |  |  |
+| Disjoint Team and Shift registration | Point Team and Shift at different worksheets in the same disposable spreadsheet, leave Shift Team Source unset, pause both registrations after their channel locks, then release them together. | The disjoint worksheet transactions overlap, both registrations persist, and neither operation waits merely because the spreadsheet ID is shared. |  |  |
+| Team and Shift with shared Summary | Use the same disposable spreadsheet, configure Shift Team Source to the Team Summary, pause Team and Shift registrations, then release them together. | Access to the shared Summary worksheet is serialized; both operations complete without a lost update, stale formula anchor, or partial grid. |  |  |
 | Team atomic batch failure | Inject a late Google API failure into a Team registration batch after its multi-worksheet requests have been prepared. | No request in that batch is committed: every Team worksheet and Summary retain their prior grid state, and the listener uses `⚠️🛠️`. |  |  |
 | Delete own data confirmation | Run `/team delete`, confirm the localized `‼️` prompt appears, click Cancel, and verify the current user's Team rows and summary row remain. Run `/team delete` again and click Confirm. | Cancel shows `✖️` cancellation copy and leaves data unchanged. Confirm shows processing copy with `config.PROCESSING_EMOJI`, then physically deletes the matched complete rows, including administrator-owned cells; later rows and their properties move together. |  |  |
 

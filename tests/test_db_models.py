@@ -314,13 +314,13 @@ async def test_shift_manager_updates_recruitment_time_ranges() -> None:
         ranges = RecruitmentTimeRanges.from_modal_input("4-8, 8-12")
         metadata = make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
         manager.fetch_google_sheets_metadata = AsyncMock(return_value=metadata)
-        manager.sync_entry_presentation = AsyncMock()
+        manager._sync_entry_presentation_locked = AsyncMock()  # noqa: SLF001
 
         await manager.update_recruitment_time_ranges(ranges)
 
         await config.refresh_from_db()
         assert config.recruitment_time_ranges == [{"start": 4, "end": 12}]
-        manager.sync_entry_presentation.assert_awaited_once_with(
+        manager._sync_entry_presentation_locked.assert_awaited_once_with(  # noqa: SLF001
             metadata,
             ranges,
             force=True,
@@ -394,7 +394,7 @@ async def test_shift_manager_range_sheet_failure_is_partial_after_database_save(
         manager.fetch_google_sheets_metadata = AsyncMock(
             return_value=make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
         )
-        manager.sync_entry_presentation = AsyncMock(
+        manager._sync_entry_presentation_locked = AsyncMock(  # noqa: SLF001
             side_effect=GoogleSheetsError(
                 GoogleSheetsErrorKind.TRANSIENT,
                 "temporary",
