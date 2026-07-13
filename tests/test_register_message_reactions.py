@@ -13,13 +13,24 @@ from cogs.base.feature_channel_base import FeatureChannelBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
-from utils import structs_base
+from tests.test_manager_fakes import (
+    FakeTeamGridSheet,
+    FakeTeamGridWorksheet,
+    configure_team_transaction_manager,
+)
+from utils import manager_base as manager_base_module, structs_base
+from utils.google_sheets import DimensionMutation, GridValueUpdate
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetMetadata,
     FinalScheduleWorksheetMetadata,
     ShiftRegisterGoogleSheetsMetadata,
+)
+from utils.team_register_manager import TeamRegisterManager
+from utils.team_register_structs import (
+    SummaryWorksheetContent,
+    TeamWorksheetContent,
 )
 
 PRIVATE_DATABASE_ERROR = "private database"
@@ -136,9 +147,14 @@ class DummyManager:
 class ConfiguredDummyManager(DummyManager):
     async def get_sheet_config_or_none(self) -> SimpleNamespace:
         return SimpleNamespace(
-            sheet_url="https://sheet.example",
+            sheet_url=(
+                "https://docs.google.com/spreadsheets/d/register-reactions/edit"
+            ),
             recruitment_time_ranges=[{"start": 4, "end": 28}],
         )
+
+    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        return await self.get_sheet_config_or_none()
 
 
 class FailingConfigManager(ConfiguredDummyManager):
@@ -298,25 +314,7 @@ async def test_team_listener_adds_success_before_removing_processing(
     bot_user_present: bool,
 ) -> None:
     class SuccessfulTeamManager(ConfiguredDummyManager):
-        async def fetch_google_sheets_metadata(self) -> object:
-            return object()
-
-        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
-            pass
-
-        async def ensure_worksheets_and_upsert_sheet_config(
-            self,
-            metadata: object,
-            *,
-            count: int,
-        ) -> object:
-            assert count == 2
-            return metadata
-
-        async def upsert_user_teams(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        async def upsert_user_summary(
+        async def upsert_user_registration(
             self,
             *_args: object,
             **_kwargs: object,
@@ -352,12 +350,111 @@ async def test_team_listener_adds_success_before_removing_processing(
 
 
 @pytest.mark.asyncio
+async def test_team_duplicate_terminal_incident_batches_once_and_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team_worksheets = [
+        FakeTeamGridWorksheet(
+            worksheet_id,
+            title,
+            [TeamWorksheetContent.COLUMNS],
+        )
+        for worksheet_id, title in zip(
+            [101, 102, 103],
+            ["Main Team", "Encore Team", "Backup Team"],
+            strict=True,
+        )
+    ]
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "Backup Team ISV",
+                "Backup Team Power",
+                "original_message",
+                "Old Team ISV",
+                "Old Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([*team_worksheets, summary_worksheet])
+
+    class IncidentTeamManager(TeamRegisterManager):
+        def __init__(self, feature_channel: object, service_account_path: str) -> None:
+            super().__init__(feature_channel, service_account_path)
+            configure_team_transaction_manager(
+                self,
+                sheet,
+                team_worksheet_ids=[101, 102, 103],
+                summary_worksheet_id=201,
+            )
+            self.fresh_config = self._sheet_config
+
+        async def get_fresh_sheet_config(self) -> object:
+            self._sheet_config = self.fresh_config
+            self._google_sheet = None
+            return self._sheet_config
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", IncidentTeamManager)
+    monkeypatch.setattr(
+        manager_base_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+    )
+    subject = make_subject("team_register")
+    bot_user = object()
+    subject.bot = SimpleNamespace(user=bot_user)
+    subject.sheet_write_lock = unlocked
+    message = FakeMessage("160/800/35.7\n160/800/35.7\n160/800/100")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert len(sheet.batch_updates) == 1
+    mutations = sheet.batch_updates[0]
+    assert mutations[0] == DimensionMutation.delete_columns(
+        201,
+        start_column=11,
+        count=3,
+    )
+    assert [
+        mutation.worksheet_id
+        for mutation in mutations
+        if isinstance(mutation, GridValueUpdate)
+    ] == [101, 102, 103, 201]
+    assert message.reaction_events == [
+        ("add", config.PROCESSING_EMOJI),
+        ("add", "✅"),
+        ("remove", config.PROCESSING_EMOJI, bot_user),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_team_contract_failure_never_logs_private_pre_operation_data(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     class ContractTeamManager(ConfiguredDummyManager):
-        async def fetch_google_sheets_metadata(self) -> None:
+        async def upsert_user_registration(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
             raise structs_base.WorksheetContractError(
                 log_hint="required_header_missing"
             )

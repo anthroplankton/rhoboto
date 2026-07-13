@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import copy
 import re
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
@@ -9,10 +11,17 @@ from unittest.mock import AsyncMock
 import pandas as pd
 import pytest
 
+from components.ui_team_register import build_summary_embed
 from models.team_register import TeamRegisterConfig
 from tests.fakes import FakeWorksheet
-from utils import shift_register_manager
+from utils import (
+    manager_base as manager_base_module,
+    shift_register_manager,
+    team_register_manager as team_register_manager_module,
+)
+from utils.google_sheets import DimensionMutation, GridValueUpdate
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import ManagerBase
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
@@ -27,10 +36,11 @@ from utils.shift_register_structs import (
 )
 from utils.shift_scheduler import DraftTeamProfile
 from utils.storage_errors import StorageError, StorageErrorKind
-from utils.structs_base import UserInfo
+from utils.structs_base import UserInfo, WorksheetContractError
 from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import (
     Summary,
+    SummaryWorksheetContent,
     SummaryWorksheetMetadata,
     TeamParser,
     TeamRegisterGoogleSheetsMetadata,
@@ -39,7 +49,7 @@ from utils.team_register_structs import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import AsyncIterator, Generator
     from typing import Self
 
 
@@ -60,6 +70,272 @@ def make_feature_channel(
 
 def make_user(username: str = "alice", display_name: str = "Alice") -> UserInfo:
     return UserInfo(username=username, display_name=display_name)
+
+
+class FakeTeamGridWorksheet:
+    def __init__(
+        self,
+        worksheet_id: int,
+        title: str,
+        values: list[list[object]],
+        *,
+        row_count: int = 100,
+        col_count: int = 20,
+    ) -> None:
+        self.id = worksheet_id
+        self.title = title
+        self.values = copy.deepcopy(values)
+        self.row_count = row_count
+        self.col_count = col_count
+        self.batch_gets: list[list[str]] = []
+
+    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
+        self.batch_gets.append(ranges)
+        return [self.values[:1], self.values[1:]]
+
+
+class FakeTeamGridSheet:
+    def __init__(
+        self,
+        worksheets: list[FakeTeamGridWorksheet],
+        *,
+        batch_error: Exception | None = None,
+    ) -> None:
+        self.sheet_url = "https://docs.google.com/spreadsheets/d/team-transaction/edit"
+        self.worksheet_by_id = {worksheet.id: worksheet for worksheet in worksheets}
+        self.batch_updates: list[list[object]] = []
+        self.created_titles: list[str] = []
+        self.batch_error = batch_error
+
+    @property
+    async def sheet(self) -> FakeTeamGridSheet:
+        return self
+
+    async def worksheets(self) -> list[FakeTeamGridWorksheet]:
+        return list(self.worksheet_by_id.values())
+
+    async def get_worksheets(
+        self,
+        worksheet_ids: list[int],
+    ) -> dict[int, FakeTeamGridWorksheet | None]:
+        return {
+            worksheet_id: self.worksheet_by_id.get(worksheet_id)
+            for worksheet_id in worksheet_ids
+        }
+
+    async def get_or_create_worksheets(
+        self,
+        worksheet_titles: list[str],
+    ) -> dict[str, FakeTeamGridWorksheet]:
+        by_title = {
+            worksheet.title: worksheet for worksheet in self.worksheet_by_id.values()
+        }
+        for title in worksheet_titles:
+            if title in by_title:
+                continue
+            worksheet_id = max(self.worksheet_by_id, default=300) + 1
+            worksheet = FakeTeamGridWorksheet(worksheet_id, title, [])
+            self.worksheet_by_id[worksheet_id] = worksheet
+            by_title[title] = worksheet
+            self.created_titles.append(title)
+        return {title: by_title[title] for title in worksheet_titles}
+
+    async def batch_update_grid(self, mutations: list[object]) -> None:
+        self.batch_updates.append(list(mutations))
+        if self.batch_error is not None:
+            raise self.batch_error
+
+
+def configure_team_transaction_manager(
+    manager: TeamRegisterManager,
+    sheet: FakeTeamGridSheet,
+    *,
+    team_worksheet_ids: list[int],
+    summary_worksheet_id: int,
+) -> None:
+    worksheet_ids = [*team_worksheet_ids, summary_worksheet_id]
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        sheet_url=sheet.sheet_url,
+        team_worksheet_ids=team_worksheet_ids,
+        summary_worksheet_id=summary_worksheet_id,
+        encore_role_ids=[],
+        get_worksheet_ids=lambda: worksheet_ids,
+    )
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+
+
+def configure_team_settings_config(
+    manager: TeamRegisterManager,
+    *,
+    encore_role_ids: list[int] | None = None,
+) -> None:
+    config = SimpleNamespace(encore_role_ids=encore_role_ids or [])
+    manager._sheet_config = config  # type: ignore[assignment]  # noqa: SLF001
+    manager.get_fresh_sheet_config = AsyncMock(  # type: ignore[method-assign]
+        return_value=config
+    )
+
+
+def make_encore_reconciliation_manager(
+    *,
+    malformed_later_row: bool = False,
+    batch_error: Exception | None = None,
+) -> tuple[TeamRegisterManager, FakeTeamGridSheet, SimpleNamespace]:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    team_rows: list[list[object]] = [["alice", "Alice", 150, 740, 33.4, "main"]]
+    if malformed_later_row:
+        team_rows.append(["bob", "Bob", "not-int", 700, 31.2, "bad"])
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [TeamWorksheetContent.COLUMNS, *team_rows],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ],
+            ["alice", "Alice", "", 183, 33.4, "main"],
+        ],
+    )
+    sheet = FakeTeamGridSheet(
+        [main_worksheet, summary_worksheet],
+        batch_error=batch_error,
+    )
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101],
+        summary_worksheet_id=201,
+    )
+    config = manager._sheet_config  # noqa: SLF001
+    config.save = AsyncMock()
+    return manager, sheet, config
+
+
+class RecordingKeyLock:
+    def __init__(self, label: str, events: list[tuple[str, object]]) -> None:
+        self.label = label
+        self.events = events
+
+    @asynccontextmanager
+    async def __call__(self, key: object) -> AsyncIterator[None]:
+        self.events.append((f"enter_{self.label}", key))
+        try:
+            yield
+        finally:
+            self.events.append((f"exit_{self.label}", key))
+
+
+@pytest.mark.asyncio
+async def test_spreadsheet_transaction_acquires_channel_before_spreadsheet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, object]] = []
+    channel_lock = RecordingKeyLock("channel", events)
+    spreadsheet_lock = RecordingKeyLock("spreadsheet", events)
+    monkeypatch.setattr(
+        manager_base_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+        raising=False,
+    )
+
+    async with manager_base_module.spreadsheet_transaction(
+        channel_lock,
+        channel_id=22,
+        sheet_url="https://docs.google.com/spreadsheets/d/sheet-abc/edit#gid=1",
+    ):
+        events.append(("inside", None))
+
+    assert events == [
+        ("enter_channel", 22),
+        ("enter_spreadsheet", "sheet-abc"),
+        ("inside", None),
+        ("exit_spreadsheet", "sheet-abc"),
+        ("exit_channel", 22),
+    ]
+
+
+async def transactions_overlap(
+    *,
+    first_channel_id: int,
+    first_spreadsheet_id: str,
+    second_channel_id: int,
+    second_spreadsheet_id: str,
+) -> bool:
+    channel_lock = KeyAsyncLock()
+    transaction = manager_base_module.spreadsheet_transaction
+    first_entered = asyncio.Event()
+    second_attempted = asyncio.Event()
+    second_entered = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def first() -> None:
+        async with transaction(
+            channel_lock,
+            channel_id=first_channel_id,
+            sheet_url=(
+                f"https://docs.google.com/spreadsheets/d/{first_spreadsheet_id}/edit"
+            ),
+        ):
+            first_entered.set()
+            await release_first.wait()
+
+    async def second() -> None:
+        second_attempted.set()
+        async with transaction(
+            channel_lock,
+            channel_id=second_channel_id,
+            sheet_url=(
+                f"https://docs.google.com/spreadsheets/d/{second_spreadsheet_id}/edit"
+            ),
+        ):
+            second_entered.set()
+
+    first_task = asyncio.create_task(first())
+    await first_entered.wait()
+    second_task = asyncio.create_task(second())
+    await second_attempted.wait()
+    overlap = second_entered.is_set()
+    release_first.set()
+    await asyncio.gather(first_task, second_task)
+    return overlap
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        (1, "shared-sheet", 2, "shared-sheet", False),
+        (1, "first-sheet", 2, "second-sheet", True),
+        (1, "first-sheet", 1, "second-sheet", False),
+    ],
+)
+async def test_spreadsheet_transaction_keyed_concurrency(
+    monkeypatch: pytest.MonkeyPatch,
+    scenario: tuple[int, str, int, str, bool],
+) -> None:
+    monkeypatch.setattr(
+        manager_base_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        KeyAsyncLock(),
+        raising=False,
+    )
+
+    overlap = await transactions_overlap(
+        first_channel_id=scenario[0],
+        first_spreadsheet_id=scenario[1],
+        second_channel_id=scenario[2],
+        second_spreadsheet_id=scenario[3],
+    )
+
+    assert overlap is scenario[4]
 
 
 class FakeTeamConfigQuery:
@@ -942,6 +1218,1454 @@ async def test_team_manager_upserts_and_deletes_user_team_with_fake_worksheet() 
 
     deleted = worksheet.updated_frames[-1]
     assert "alice" not in set(deleted["username"].astype(str))
+
+
+@pytest.mark.asyncio
+async def test_team_manager_upserts_team_and_summary_in_one_batch_same_rows() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    team_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Old Alice", 1, 2, 3.0, "old team"],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    summary_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        ["Main Team", "Encore Team"]
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [*SummaryWorksheetContent.COLUMNS, *summary_headers],
+            ["alice", "Old Alice", "", 1, 3.0, "", "", "old summary"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([team_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    user = make_user()
+    team = TeamParser.parse_line(user, "150/740/33.4 main")
+
+    await manager.upsert_user_registration(user, [], team, None)
+
+    assert len(sheet.batch_updates) == 1
+    value_updates = [
+        mutation
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate)
+    ]
+    assert [
+        (update.worksheet_id, update.start_row_index) for update in value_updates
+    ] == [(101, 1), (201, 1)]
+
+
+@pytest.mark.asyncio
+async def test_team_upsert_reconciles_retained_users_when_title_pair_is_added() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    alice = make_user()
+    bob = make_user("bob", "Bob")
+    alice_team = TeamParser.parse_line(alice, "150/740/33.4 alice new")
+    bob_team = TeamParser.parse_line(bob, "130/600/30.0 bob retained")
+    team_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Renamed Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Old Alice", 100, 500, 20.0, "alice old"],
+            [
+                bob_team.username,
+                bob_team.display_name,
+                bob_team.leader_skill_value,
+                bob_team.internal_skill_value,
+                bob_team.team_power,
+                bob_team.original_message,
+            ],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Old Team ISV",
+                "Old Team Power",
+                "original_message",
+            ],
+            ["alice", "Old Alice", "", 1, 1, "alice old"],
+            ["bob", "Bob", "", 2, 2, "bob old"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([team_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+
+    await manager.upsert_user_registration(alice, [], alice_team, None)
+
+    bob_update = next(
+        mutation
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate)
+        and mutation.worksheet_id == 201
+        and mutation.start_row_index == 2
+    )
+    assert bob_update.rows[0][3:5] == (
+        bob_team.effective_skill_value,
+        bob_team.team_power,
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_manager_repairs_duplicate_terminal_and_upserts_once() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    user = make_user()
+    parsed = TeamParser.parse_submission(
+        user,
+        ["160/800/35.7", "160/800/35.7", "160/800/100"],
+    ).teams
+    team_worksheets = [
+        FakeTeamGridWorksheet(
+            worksheet_id,
+            title,
+            [TeamWorksheetContent.COLUMNS],
+        )
+        for worksheet_id, title in zip(
+            [101, 102, 103],
+            ["Main Team", "Encore Team", "Backup Team"],
+            strict=True,
+        )
+    ]
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "Backup Team ISV",
+                "Backup Team Power",
+                "original_message",
+                "Old Team ISV",
+                "Old Team Power",
+                "original_message",
+                "manager_note",
+            ],
+            [
+                "alice",
+                "Old Alice",
+                "",
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                "old",
+                7,
+                8,
+                "stale",
+                "preserve",
+            ],
+        ],
+    )
+    sheet = FakeTeamGridSheet([*team_worksheets, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102, 103],
+        summary_worksheet_id=201,
+    )
+
+    await manager.upsert_user_registration(
+        user,
+        [],
+        parsed[0],
+        parsed[1],
+        parsed[2],
+    )
+
+    assert len(sheet.batch_updates) == 1
+    mutations = sheet.batch_updates[0]
+    assert mutations[0] == DimensionMutation.delete_columns(
+        201,
+        start_column=11,
+        count=3,
+    )
+    assert [
+        mutation.worksheet_id
+        for mutation in mutations
+        if isinstance(mutation, GridValueUpdate)
+    ] == [101, 102, 103, 201]
+
+
+@pytest.mark.asyncio
+async def test_team_manager_composes_duplicate_repair_and_reconciles_growth() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    alice = make_user()
+    bob = make_user("bob", "Bob")
+    alice_teams = TeamParser.parse_submission(
+        alice,
+        ["160/800/35.7 main", "150/740/33.4 encore", "140/680/30 backup"],
+    ).teams
+    bob_teams = TeamParser.parse_submission(
+        bob,
+        ["130/600/30 main", "120/550/28 encore", "110/500/26 backup"],
+    ).teams
+    team_worksheets = [
+        FakeTeamGridWorksheet(
+            worksheet_id,
+            title,
+            [
+                TeamWorksheetContent.COLUMNS,
+                ["alice", "Old Alice", 100, 500, 20.0, "old"],
+                [
+                    bob_team.username,
+                    bob_team.display_name,
+                    bob_team.leader_skill_value,
+                    bob_team.internal_skill_value,
+                    bob_team.team_power,
+                    bob_team.original_message,
+                ],
+            ],
+        )
+        for worksheet_id, title, bob_team in zip(
+            [101, 102, 103],
+            ["Main Team", "Encore Team", "Backup Team"],
+            bob_teams,
+            strict=True,
+        )
+    ]
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Old Encore ISV",
+                "Old Encore Power",
+                "original_message",
+                "Retired Team ISV",
+                "Retired Team Power",
+                "original_message",
+                "manager_note",
+            ],
+            ["alice", "Old Alice", "", 1, 1, 2, 2, "old", 3, 3, "stale", "a"],
+            ["bob", "Bob", "", 4, 4, 5, 5, "old", 6, 6, "stale", "b"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([*team_worksheets, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102, 103],
+        summary_worksheet_id=201,
+    )
+
+    await manager.upsert_user_registration(
+        alice,
+        [],
+        alice_teams[0],
+        alice_teams[1],
+        alice_teams[2],
+    )
+
+    assert len(sheet.batch_updates) == 1
+    mutations = sheet.batch_updates[0]
+    assert mutations[:3] == [
+        DimensionMutation.delete_columns(201, start_column=9, count=3),
+        DimensionMutation.delete_columns(201, start_column=6, count=2),
+        DimensionMutation.insert_columns(201, start_column=6, count=4),
+    ]
+    bob_update = next(
+        mutation
+        for mutation in mutations
+        if isinstance(mutation, GridValueUpdate)
+        and mutation.worksheet_id == 201
+        and mutation.start_row_index == 2
+    )
+    assert bob_update.rows[0][3:9] == tuple(
+        value
+        for team in bob_teams
+        for value in (team.effective_skill_value, team.team_power)
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_manager_deletes_complete_team_and_summary_rows_once() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    team_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            [*TeamWorksheetContent.COLUMNS, "manager_note"],
+            ["alice", "Alice", 150, 740, 33.4, "team", "delete too"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+                "manager_note",
+            ],
+            ["alice", "Alice", "", 268, 33.4, "team", "delete too"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([team_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101],
+        summary_worksheet_id=201,
+    )
+
+    await manager.delete_user_registration(make_user())
+
+    assert len(sheet.batch_updates) == 1
+    assert sheet.batch_updates[0] == [
+        DimensionMutation.delete_rows(101, start_row=2),
+        DimensionMutation.delete_rows(201, start_row=2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_delete_reconciles_retained_users_when_title_pair_is_added() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    bob = make_user("bob", "Bob")
+    bob_team = TeamParser.parse_line(bob, "130/600/30.0 bob retained")
+    team_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Renamed Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "alice delete"],
+            [
+                bob_team.username,
+                bob_team.display_name,
+                bob_team.leader_skill_value,
+                bob_team.internal_skill_value,
+                bob_team.team_power,
+                bob_team.original_message,
+            ],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Old Team ISV",
+                "Old Team Power",
+                "original_message",
+            ],
+            ["alice", "Alice", "", 1, 1, "alice old"],
+            ["bob", "Bob", "", 2, 2, "bob old"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([team_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101],
+        summary_worksheet_id=201,
+    )
+
+    await manager.delete_user_registration(make_user())
+
+    bob_update = next(
+        mutation
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate)
+        and mutation.worksheet_id == 201
+        and mutation.start_row_index == 2
+    )
+    assert bob_update.rows[0][3:5] == (
+        bob_team.effective_skill_value,
+        bob_team.team_power,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+@pytest.mark.parametrize(
+    "migration",
+    ["duplicate_marker", "missing_terminal", "pure_pair_deletion"],
+)
+async def test_team_row_local_migrations_do_not_parse_unrelated_numbers(
+    operation: str,
+    migration: str,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Old Alice", 100, 500, 20.0, "old"],
+            ["bob", "Bob", "not-int", "bad", "bad", "unrelated"],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    canonical_without_terminal = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Main Team ISV",
+        "Main Team Power",
+        "Encore Team ISV",
+        "Encore Team Power",
+    ]
+    if migration == "duplicate_marker":
+        summary_headers = [
+            *canonical_without_terminal,
+            "original_message",
+            "Old Team ISV",
+            "Old Team Power",
+            "original_message",
+        ]
+    elif migration == "missing_terminal":
+        summary_headers = canonical_without_terminal
+    else:
+        summary_headers = [
+            *canonical_without_terminal,
+            "Old Team ISV",
+            "Old Team Power",
+            "original_message",
+        ]
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [summary_headers, ["alice"], ["bob"]],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+
+    if operation == "upsert":
+        user = make_user()
+        team = TeamParser.parse_line(user, "150/740/33.4 new")
+        await manager.upsert_user_registration(user, [], team, None)
+    else:
+        await manager.delete_user_registration(make_user())
+
+    assert len(sheet.batch_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_team_manager_refresh_reconciles_summary_and_returns_frame() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "alice main"],
+            ["bob", "Bob", 130, 600, 30.0, "bob main"],
+        ],
+    )
+    backup_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Backup Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 140, 680, 35.3, "alice backup"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Backup Team ISV",
+                "Backup Team Power",
+                "original_message",
+                "manager_note",
+            ],
+            ["carol", "Carol", "", 1, 1, 1, 1, "old", "delete too"],
+            ["alice", "Old Alice", "", 0, 0, 0, 0, "old", "preserve"],
+            ["", "", "", "", "", "", "", "", "prepared"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, backup_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+
+    final = await manager.refresh_summary_registration(
+        {
+            "alice": SimpleNamespace(display_name="Alice New", roles=[]),
+            "bob": SimpleNamespace(display_name="Bob", roles=[]),
+        }
+    )
+
+    assert len(sheet.batch_updates) == 1
+    mutations = sheet.batch_updates[0]
+    assert [
+        mutation.start_row_index
+        for mutation in mutations
+        if isinstance(mutation, GridValueUpdate)
+    ] == [2, 3]
+    assert mutations[-1] == DimensionMutation.delete_rows(201, start_row=2)
+    assert list(final.index) == ["alice", "bob"]
+    assert final.loc["alice", "display_name"] == "Alice New"
+    assert "original_message" not in final.columns
+    assert build_summary_embed(final).title == "📊 Team Register Summary"
+
+
+@pytest.mark.asyncio
+async def test_team_manager_three_to_one_shrink_writes_before_row_deletes() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    user = make_user()
+    team_worksheets = [
+        FakeTeamGridWorksheet(
+            worksheet_id,
+            title,
+            [
+                TeamWorksheetContent.COLUMNS,
+                ["alice", "Alice", 100, 500, 20.0, "old"],
+            ],
+        )
+        for worksheet_id, title in zip(
+            [101, 102, 103],
+            ["Main Team", "Encore Team", "Backup Team"],
+            strict=True,
+        )
+    ]
+    summary_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        ["Main Team", "Encore Team", "Backup Team"]
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [*SummaryWorksheetContent.COLUMNS, *summary_headers],
+            ["alice", "Alice", "", 1, 1, 1, 1, 1, 1, "old"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([*team_worksheets, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102, 103],
+        summary_worksheet_id=201,
+    )
+    main = TeamParser.parse_line(user, "160/800/35.7")
+
+    await manager.upsert_user_registration(user, [], main, None)
+
+    mutations = sheet.batch_updates[0]
+    assert [(type(mutation), mutation.worksheet_id) for mutation in mutations] == [
+        (GridValueUpdate, 101),
+        (GridValueUpdate, 201),
+        (DimensionMutation, 102),
+        (DimensionMutation, 103),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_manager_grows_blank_grids_before_initialization_writes() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    team_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [],
+        row_count=1,
+        col_count=2,
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [],
+        row_count=1,
+        col_count=2,
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [],
+        row_count=1,
+        col_count=2,
+    )
+    sheet = FakeTeamGridSheet([team_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    user = make_user()
+    team = TeamParser.parse_line(user, "150/740/33.4")
+
+    await manager.upsert_user_registration(user, [], team, None)
+
+    mutations = sheet.batch_updates[0]
+    first_write = next(
+        index
+        for index, mutation in enumerate(mutations)
+        if isinstance(mutation, GridValueUpdate)
+    )
+    assert mutations[:first_write] == [
+        DimensionMutation.append_rows(101, 1),
+        DimensionMutation.append_columns(101, 4),
+        DimensionMutation.append_columns(102, 4),
+        DimensionMutation.append_rows(201, 1),
+        DimensionMutation.append_columns(201, 6),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_manager_creates_missing_tabs_saves_ids_then_batches_once() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    saved_metadata: list[TeamRegisterGoogleSheetsMetadata] = []
+
+    async def save_metadata(metadata: TeamRegisterGoogleSheetsMetadata) -> None:
+        saved_metadata.append(metadata)
+
+    manager.upsert_sheet_config = save_metadata  # type: ignore[method-assign]
+    user = make_user()
+    main = TeamParser.parse_line(user, "150/740/33.4")
+    encore = TeamParser.parse_line(user, "140/680/35.3")
+
+    await manager.upsert_user_registration(user, [], main, encore)
+
+    assert sheet.created_titles == ["Encore Team", "Team Summary"]
+    assert len(saved_metadata) == 1
+    assert saved_metadata[0].team_worksheets[1].id is not None
+    assert saved_metadata[0].summary_worksheet.id is not None
+    assert len(sheet.batch_updates) == 1
+
+
+@pytest.mark.asyncio
+async def test_team_settings_preflights_saves_then_reconciles_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "main"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    saved_metadata: list[TeamRegisterGoogleSheetsMetadata] = []
+
+    async def save_metadata(metadata: TeamRegisterGoogleSheetsMetadata) -> None:
+        saved_metadata.append(metadata)
+        manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+            sheet_url=metadata.sheet_url,
+            encore_role_ids=[],
+            team_worksheet_ids=[ws.id for ws in metadata.team_worksheets],
+            summary_worksheet_id=metadata.summary_worksheet.id,
+            get_worksheet_ids=lambda: [ws.id for ws in metadata],
+        )
+
+    manager.upsert_sheet_config = save_metadata  # type: ignore[method-assign]
+
+    result = await manager.upsert_sheet_config_and_worksheets(
+        sheet.sheet_url,
+        team_worksheet_titles=["Main Team"],
+        summary_worksheet_title="Team Summary",
+        member_by_names={},
+    )
+
+    assert result.team_worksheets[0].id == 101
+    assert result.summary_worksheet.id == 201
+    assert len(saved_metadata) == 1
+    assert len(sheet.batch_updates) == 1
+    assert any(
+        isinstance(mutation, GridValueUpdate) and mutation.worksheet_id == 201
+        for mutation in sheet.batch_updates[0]
+    )
+
+
+@pytest.mark.asyncio
+async def test_team_settings_refreshes_encore_ids_after_waiting_for_channel_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    old_role = SimpleNamespace(id=7, name="Old Encore")
+    new_role = SimpleNamespace(id=8, name="New Encore")
+    old_config = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/old-team/edit",
+        encore_role_ids=[old_role.id],
+    )
+    new_config = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/new-team/edit",
+        encore_role_ids=[new_role.id],
+    )
+    persisted = {"config": old_config}
+    manager._sheet_config = old_config  # type: ignore[assignment]  # noqa: SLF001
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "main"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ],
+            ["alice", "Alice", "Old Encore", 268, 33.4, "main"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+
+    async def load_config() -> SimpleNamespace:
+        if manager._sheet_config is None:  # noqa: SLF001
+            manager._sheet_config = persisted["config"]  # type: ignore[assignment]  # noqa: SLF001
+        return manager._sheet_config  # type: ignore[return-value]  # noqa: SLF001
+
+    manager.get_sheet_config_or_none = load_config  # type: ignore[method-assign]
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+    channel_lock = KeyAsyncLock()
+    encore_holds_lock = asyncio.Event()
+    settings_attempted = asyncio.Event()
+    release_encore = asyncio.Event()
+
+    async def concurrent_encore_save() -> None:
+        async with channel_lock(manager.feature_channel.channel_id):
+            persisted["config"] = new_config
+            encore_holds_lock.set()
+            await settings_attempted.wait()
+            await release_encore.wait()
+
+    async def settings_save() -> None:
+        await encore_holds_lock.wait()
+        settings_attempted.set()
+        async with manager_base_module.spreadsheet_transaction(
+            channel_lock,
+            channel_id=manager.feature_channel.channel_id,
+            sheet_url=sheet.sheet_url,
+        ):
+            await manager.upsert_sheet_config_and_worksheets(
+                sheet.sheet_url,
+                team_worksheet_titles=["Main Team"],
+                summary_worksheet_title="Team Summary",
+                member_by_names={
+                    "alice": SimpleNamespace(
+                        display_name="Alice",
+                        roles=[old_role, new_role],
+                    )
+                },
+            )
+
+    encore_task = asyncio.create_task(concurrent_encore_save())
+    settings_task = asyncio.create_task(settings_save())
+    await settings_attempted.wait()
+    await asyncio.sleep(0)
+    assert not settings_task.done()
+    release_encore.set()
+    await asyncio.gather(encore_task, settings_task)
+
+    summary_update = next(
+        mutation
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate)
+        and mutation.worksheet_id == summary_worksheet.id
+        and mutation.start_row_index == 1
+    )
+    assert summary_update.rows[0][2] == "New Encore"
+
+
+@pytest.mark.asyncio
+async def test_team_settings_contract_failure_precedes_config_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", "not-int", 740, 33.4, "bad"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_sheet_config_and_worksheets(
+            sheet.sheet_url,
+            team_worksheet_titles=["Main Team"],
+            summary_worksheet_title="Team Summary",
+            member_by_names={},
+        )
+
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.created_titles == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_settings_validates_existing_tabs_before_creating_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [["username", "display_name", "original_message"]],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_sheet_config_and_worksheets(
+            sheet.sheet_url,
+            team_worksheet_titles=["Main Team", "New Team"],
+            summary_worksheet_title="Team Summary",
+            member_by_names={},
+        )
+
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.created_titles == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_settings_validates_later_source_rows_before_creating_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "valid"],
+            ["bob", "Bob", "not-int", 700, 31.2, "malformed later row"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_sheet_config_and_worksheets(
+            sheet.sheet_url,
+            team_worksheet_titles=["Main Team", "New Team"],
+            summary_worksheet_title="Team Summary",
+            member_by_names={},
+        )
+
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.created_titles == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_upsert_indexes_duplicate_keys_before_creating_missing() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "first"],
+            ["alice", "Duplicate", 140, 680, 35.3, "second"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+    user = make_user()
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_user_registration(
+            user,
+            [],
+            TeamParser.parse_line(user, "150/740/33.4"),
+            TeamParser.parse_line(user, "140/680/35.3"),
+        )
+
+    assert sheet.created_titles == []
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_upsert_validates_full_reconcile_before_creating_missing() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "valid"],
+            ["bob", "Bob", "not-int", 700, 31.2, "malformed later row"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+    user = make_user()
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_user_registration(
+            user,
+            [],
+            TeamParser.parse_line(user, "150/740/33.4"),
+            TeamParser.parse_line(user, "140/680/35.3"),
+        )
+
+    assert sheet.created_titles == []
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_settings_indexes_duplicate_summary_keys_before_creating_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "main"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ],
+            ["alice", "Alice", "", 268, 33.4, "main"],
+            ["alice", "Duplicate", "", 268, 33.4, "duplicate"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    manager.upsert_sheet_config = AsyncMock()  # type: ignore[method-assign]
+
+    with pytest.raises(WorksheetContractError):
+        await manager.upsert_sheet_config_and_worksheets(
+            sheet.sheet_url,
+            team_worksheet_titles=["Main Team", "New Team"],
+            summary_worksheet_title="Team Summary",
+            member_by_names={},
+        )
+
+    assert sheet.created_titles == []
+    manager.upsert_sheet_config.assert_not_awaited()
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_settings_batch_failure_keeps_saved_ids_for_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    configure_team_settings_config(manager)
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "main"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet(
+        [main_worksheet, summary_worksheet],
+        batch_error=GoogleSheetsError(
+            GoogleSheetsErrorKind.TRANSIENT,
+            "private transient detail",
+        ),
+    )
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "GoogleSheet",
+        lambda _url, _path: sheet,
+        raising=False,
+    )
+    saved_metadata: list[TeamRegisterGoogleSheetsMetadata] = []
+
+    async def save_metadata(metadata: TeamRegisterGoogleSheetsMetadata) -> None:
+        saved_metadata.append(metadata)
+
+    manager.upsert_sheet_config = save_metadata  # type: ignore[method-assign]
+
+    with pytest.raises(StorageError) as exc_info:
+        await manager.upsert_sheet_config_and_worksheets(
+            sheet.sheet_url,
+            team_worksheet_titles=["Main Team"],
+            summary_worksheet_title="Team Summary",
+            member_by_names={},
+        )
+
+    assert exc_info.value.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert len(saved_metadata) == 1
+    assert [worksheet.id for worksheet in saved_metadata[0]] == [101, 201]
+    assert len(sheet.batch_updates) == 1
+
+    sheet.batch_error = None
+    await manager.upsert_sheet_config_and_worksheets(
+        sheet.sheet_url,
+        team_worksheet_titles=["Main Team"],
+        summary_worksheet_title="Team Summary",
+        member_by_names={},
+    )
+
+    assert len(sheet.batch_updates) == 2
+
+
+@pytest.mark.asyncio
+async def test_team_manager_reuses_first_fully_blank_rows_in_both_tabs() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            [*TeamWorksheetContent.COLUMNS, "manager_note"],
+            ["", "occupied", "", "", "", "", "preserve"],
+            ["", "", "", "", "", "", "prepared"],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "original_message",
+                "manager_note",
+            ],
+            ["", "occupied", "", "", "", "", "", "", "preserve"],
+            ["", "", "", "", "", "", "", "", "prepared"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    user = make_user()
+    team = TeamParser.parse_line(user, "150/740/33.4")
+
+    await manager.upsert_user_registration(user, [], team, None)
+
+    assert [
+        (mutation.worksheet_id, mutation.start_row_index)
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate)
+    ] == [(101, 2), (201, 2)]
+
+
+@pytest.mark.asyncio
+async def test_team_ordinary_upsert_and_delete_ignore_unrelated_bad_numbers() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Old Alice", 100, 500, 20.0, "old"],
+            ["bob", "Bob", "not-int", "bad", "bad", "unrelated"],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "original_message",
+            ],
+            ["alice", "Old Alice", "", 1, 1, "", "", "old"],
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+    user = make_user()
+    team = TeamParser.parse_line(user, "150/740/33.4")
+
+    await manager.upsert_user_registration(user, [], team, None)
+    await manager.delete_user_registration(user)
+
+    assert len(sheet.batch_updates) == 2
+
+
+@pytest.mark.asyncio
+async def test_team_refresh_rejects_unrelated_bad_numbers_without_batch() -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "main"],
+            ["bob", "Bob", "not-int", "bad", "bad", "unrelated"],
+        ],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101],
+        summary_worksheet_id=201,
+    )
+
+    with pytest.raises(WorksheetContractError):
+        await manager.refresh_summary_registration({})
+
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_manager_updates_encore_ids_and_summary_in_one_action() -> None:
+    manager, sheet, config = make_encore_reconciliation_manager()
+    encore_role = SimpleNamespace(id=7, name="Encore")
+    member = SimpleNamespace(display_name="Alice", roles=[encore_role])
+
+    metadata = await manager.update_encore_role_ids_and_summary(
+        [encore_role.id],
+        {"alice": member},
+    )
+
+    assert [worksheet.id for worksheet in metadata] == [101, 201]
+    assert config.encore_role_ids == [7]
+    config.save.assert_awaited_once()
+    assert len(sheet.batch_updates) == 1
+    summary_update = next(
+        mutation
+        for mutation in sheet.batch_updates[0]
+        if isinstance(mutation, GridValueUpdate) and mutation.worksheet_id == 201
+    )
+    assert summary_update.rows[0][2] == "Encore"
+
+
+@pytest.mark.asyncio
+async def test_team_manager_validates_encore_summary_before_saving_ids() -> None:
+    manager, sheet, config = make_encore_reconciliation_manager(
+        malformed_later_row=True
+    )
+
+    with pytest.raises(WorksheetContractError):
+        await manager.update_encore_role_ids_and_summary([7], {})
+
+    assert config.encore_role_ids == []
+    config.save.assert_not_awaited()
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_team_manager_encore_post_save_failure_is_partial_and_retryable() -> None:
+    manager, sheet, config = make_encore_reconciliation_manager(
+        batch_error=GoogleSheetsError(
+            GoogleSheetsErrorKind.TRANSIENT,
+            "private transient detail",
+        )
+    )
+
+    with pytest.raises(StorageError) as exc_info:
+        await manager.update_encore_role_ids_and_summary([7], {})
+
+    assert exc_info.value.kind is StorageErrorKind.PARTIAL_SUCCESS
+    assert config.encore_role_ids == [7]
+    config.save.assert_awaited_once()
+    assert len(sheet.batch_updates) == 1
+
+    sheet.batch_error = None
+    await manager.update_encore_role_ids_and_summary([7], {})
+
+    assert config.encore_role_ids == [7]
+    assert config.save.await_count == 2
+    assert len(sheet.batch_updates) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["upsert", "delete"])
+async def test_team_contract_rejection_has_zero_batch(operation: str) -> None:
+    manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
+    main_worksheet = FakeTeamGridWorksheet(
+        101,
+        "Main Team",
+        [
+            TeamWorksheetContent.COLUMNS,
+            ["alice", "Alice", 150, 740, 33.4, "one"],
+            ["alice", "Duplicate", 140, 680, 35.3, "two"],
+        ],
+    )
+    encore_worksheet = FakeTeamGridWorksheet(
+        102,
+        "Encore Team",
+        [TeamWorksheetContent.COLUMNS],
+    )
+    summary_worksheet = FakeTeamGridWorksheet(
+        201,
+        "Team Summary",
+        [
+            [
+                *SummaryWorksheetContent.COLUMNS,
+                "Main Team ISV",
+                "Main Team Power",
+                "Encore Team ISV",
+                "Encore Team Power",
+                "original_message",
+            ]
+        ],
+    )
+    sheet = FakeTeamGridSheet([main_worksheet, encore_worksheet, summary_worksheet])
+    configure_team_transaction_manager(
+        manager,
+        sheet,
+        team_worksheet_ids=[101, 102],
+        summary_worksheet_id=201,
+    )
+
+    if operation == "upsert":
+        user = make_user()
+        team = TeamParser.parse_line(user, "150/740/33.4")
+        action = manager.upsert_user_registration(user, [], team, None)
+    else:
+        action = manager.delete_user_registration(make_user())
+
+    with pytest.raises(WorksheetContractError):
+        await action
+
+    assert sheet.batch_updates == []
 
 
 @pytest.mark.asyncio

@@ -10,7 +10,7 @@ from tortoise.exceptions import DBConnectionError, IntegrityError
 
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
-from components import ui_shift_register
+from components import ui_shift_register, ui_team_register
 from components.ui_auto_guide import (
     AUTO_GUIDE_BUTTON_VIEW_TIMEOUT_SECONDS,
     AUTO_GUIDE_DELETE_CUSTOM_ID_PREFIX,
@@ -58,6 +58,7 @@ from components.ui_team_register import (
     build_current_settings_embed as build_team_current_settings_embed,
 )
 from tests.fakes import FakeInteraction, FakeRole
+from utils import team_register_manager as team_register_manager_module
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
     TeamSource,
@@ -65,12 +66,15 @@ from utils.shift_register_manager import (
     TeamSourceStatus,
     TeamSummaryColumns,
 )
+from utils.storage_errors import partial_success_storage_error
 from utils.structs_base import WorksheetContractError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
     TeamWorksheetMetadata,
 )
+
+TEAM_SETTINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/team-settings/edit"
 
 
 def team_source_resolution(
@@ -130,10 +134,16 @@ class RecordingTeamRegisterManager:
         self.upsert_calls: list[dict[str, object]] = []
         self.encore_role_updates: list[list[object]] = []
         self.encore_role_id_updates: list[list[int]] = []
+        self.encore_reconciliation_calls: list[dict[str, object]] = []
         self.encore_role_ids: list[int] = []
         self.config_exists = True
-        self.feature_channel = SimpleNamespace(id=222)
-        self.sheet_url = "https://sheet.example"
+        self.feature_channel = SimpleNamespace(
+            id=222,
+            guild_id=111,
+            channel_id=222,
+            feature_name="team_register",
+        )
+        self.sheet_url = "https://docs.google.com/spreadsheets/d/team-encore/edit"
         self.metadata = team_register_metadata()
         self.upsert_error: Exception | None = None
         self.save_error: Exception | None = None
@@ -147,10 +157,13 @@ class RecordingTeamRegisterManager:
         sheet_url: str,
         team_worksheet_titles: list[str],
         summary_worksheet_title: str,
+        member_by_names: dict[str, object],
     ) -> SimpleNamespace:
+        assert isinstance(member_by_names, dict)
         if self.upsert_error is not None:
             raise self.upsert_error
         self.config_exists = True
+        self.sheet_url = sheet_url
         self.upsert_calls.append(
             {
                 "sheet_url": sheet_url,
@@ -196,6 +209,27 @@ class RecordingTeamRegisterManager:
             raise self.save_error
         self.encore_role_id_updates.append(role_ids)
         self.encore_role_ids = role_ids
+
+    async def update_encore_role_ids_and_summary(
+        self,
+        role_ids: list[int],
+        member_by_names: dict[str, object],
+    ) -> SimpleNamespace:
+        if self.save_error is not None:
+            raise self.save_error
+        self.encore_reconciliation_calls.append(
+            {
+                "role_ids": role_ids,
+                "member_by_names": member_by_names,
+            }
+        )
+        self.encore_role_id_updates.append(role_ids)
+        self.encore_role_ids = role_ids
+        if self.refresh_error is not None:
+            error = partial_success_storage_error(self.refresh_error)
+            assert error is not None
+            raise error
+        return self.metadata
 
 
 class RecordingShiftRegisterManager:
@@ -1010,6 +1044,7 @@ async def test_team_initial_setup_save_shows_disabled_latest_guide_controls(
     setup_interaction = FakeInteraction()
     await child_with_label(view, "Set Up Team Register").callback(setup_interaction)
     modal = setup_interaction.response.modals[0]
+    modal.sheet_url._value = TEAM_SETTINGS_SHEET_URL  # noqa: SLF001
 
     save_interaction = FakeInteraction()
     await modal.on_submit(save_interaction)
@@ -1283,7 +1318,7 @@ async def test_team_existing_edit_button_uses_local_modal_defaults() -> None:
 async def test_team_modal_submit_denies_unauthorized_user() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = unauthorized_interaction()
-    modal = TeamRegisterSheetModal(manager, sheet_url="https://sheet.example")
+    modal = TeamRegisterSheetModal(manager, sheet_url=TEAM_SETTINGS_SHEET_URL)
 
     await modal.on_submit(interaction)
 
@@ -1298,7 +1333,7 @@ async def test_team_modal_submit_allows_authorized_user() -> None:
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1320,12 +1355,37 @@ async def test_team_modal_submit_allows_authorized_user() -> None:
 
 
 @pytest.mark.asyncio
+async def test_team_modal_holds_shared_channel_lock_during_integrated_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingTeamRegisterManager()
+    interaction = FakeInteraction()
+    lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_team_register,
+        "TEAM_REGISTER_SHEET_WRITE_LOCK",
+        lock,
+    )
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    await modal.on_submit(interaction)
+
+    assert lock.keys == [222]
+    assert (lock.entered, lock.exited) == (1, 1)
+
+
+@pytest.mark.asyncio
 async def test_team_edit_modal_save_preserves_latest_guide_controls() -> None:
     manager = RecordingTeamRegisterManager()
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
         requires_existing_settings=True,
@@ -1348,7 +1408,7 @@ async def test_team_edit_modal_save_refreshes_latest_guide_state() -> None:
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
         requires_existing_settings=True,
@@ -1373,7 +1433,7 @@ async def test_team_modal_save_calls_latest_guide_refresh_after_panel_refresh() 
     refresh_callback = RecordingLatestGuideRefreshCallback()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
         latest_guide_refresh_callback=refresh_callback,
@@ -1385,7 +1445,7 @@ async def test_team_modal_save_calls_latest_guide_refresh_after_panel_refresh() 
     assert len(refresh_callback.calls) == 1
     call_interaction, feature_config, followup_count = refresh_callback.calls[0]
     assert call_interaction is interaction
-    assert feature_config.sheet_url == "https://sheet.example"
+    assert feature_config.sheet_url == TEAM_SETTINGS_SHEET_URL
     assert followup_count == 1
 
 
@@ -1396,7 +1456,7 @@ async def test_team_modal_save_warns_when_latest_guide_refresh_fails() -> None:
     refresh_callback = RecordingLatestGuideRefreshCallback(result=False)
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
         latest_guide_refresh_callback=refresh_callback,
@@ -1421,7 +1481,7 @@ async def test_team_setup_modal_submit_can_create_missing_settings() -> None:
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1440,7 +1500,7 @@ async def test_team_setup_modal_panel_delivery_timeout_is_not_storage_error() ->
     interaction.followup = FirstSendTimeoutFollowup()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1460,7 +1520,7 @@ async def test_team_edit_modal_submit_uses_fresh_missing_settings_guard() -> Non
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
         requires_existing_settings=True,
@@ -1479,7 +1539,7 @@ async def test_team_edit_modal_submit_uses_fresh_missing_settings_guard() -> Non
 
 
 @pytest.mark.asyncio
-async def test_team_setup_modal_reports_partial_success_for_sheet_save_error() -> None:
+async def test_team_setup_modal_reports_storage_error_before_sheet_save() -> None:
     manager = FailingTeamRegisterManager()
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
@@ -1495,7 +1555,7 @@ async def test_team_setup_modal_reports_partial_success_for_sheet_save_error() -
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "Some changes may have been saved" in content
+    assert "Some changes may have been saved" not in content
     assert "Reference: `STG-" in content
     assert_no_private_storage_terms(content)
     assert kwargs == {"ephemeral": True}
@@ -1512,7 +1572,7 @@ async def test_team_setup_modal_reports_contract_error_without_partial_success()
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1532,15 +1592,13 @@ async def test_team_setup_modal_reports_contract_error_without_partial_success()
 
 
 @pytest.mark.asyncio
-async def test_team_setup_modal_reports_partial_success_when_initial_save_fails() -> (
-    None
-):
+async def test_team_setup_modal_reports_storage_error_when_initial_save_fails() -> None:
     manager = RecordingTeamRegisterManager()
     manager.upsert_error = DBConnectionError("private database host")
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1551,7 +1609,7 @@ async def test_team_setup_modal_reports_partial_success_when_initial_save_fails(
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "Some changes may have been saved" in content
+    assert "Some changes may have been saved" not in content
     assert "Reference: `STG-" in content
     assert_no_private_storage_terms(content)
     assert kwargs == {"ephemeral": True}
@@ -1566,7 +1624,7 @@ async def test_team_setup_modal_reports_partial_success_when_config_refresh_fail
     interaction = FakeInteraction()
     modal = TeamRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=TEAM_SETTINGS_SHEET_URL,
         team_worksheet_titles=["Team 1"],
         summary_worksheet_title="Summary",
     )
@@ -1846,7 +1904,85 @@ async def test_encore_role_confirm_saves_selected_and_retained_missing_ids() -> 
     await child_with_label(view, "Confirm Save").callback(interaction)
 
     assert manager.encore_role_id_updates == [[1, 99]]
-    assert len(interaction.response.edits) == 1
+    assert interaction.response.deferred == [True]
+    assert len(interaction.original_response_edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_holds_fresh_team_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingTeamRegisterManager()
+    role = FakeRole(id=1, name="Encore", position=10)
+    member = SimpleNamespace(name="alice", display_name="Alice", roles=[role])
+    interaction = FakeInteraction(
+        guild=SimpleNamespace(id=111, roles=[role], members=[member])
+    )
+
+    class DeferredRecordingAsyncLock(RecordingAsyncLock):
+        async def __aenter__(self) -> None:
+            assert interaction.response.deferred == [True]
+            await super().__aenter__()
+
+    channel_lock = DeferredRecordingAsyncLock()
+    spreadsheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_team_register,
+        "TEAM_REGISTER_SHEET_WRITE_LOCK",
+        channel_lock,
+    )
+    monkeypatch.setattr(
+        team_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+        raising=False,
+    )
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+    )
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    assert channel_lock.keys == [222]
+    assert spreadsheet_lock.keys == ["team-encore"]
+    assert manager.encore_reconciliation_calls == [
+        {
+            "role_ids": [1],
+            "member_by_names": {"alice": member},
+        }
+    ]
+    assert interaction.response.deferred == [True]
+    assert interaction.response.edits == []
+    assert len(interaction.original_response_edits) == 1
+
+
+@pytest.mark.asyncio
+async def test_encore_role_confirm_reports_contract_error_before_save() -> None:
+    manager = RecordingTeamRegisterManager()
+    manager.save_error = WorksheetContractError(log_hint="invalid_worksheet_contract")
+    role = FakeRole(id=1, name="Encore", position=10)
+    interaction = FakeInteraction(roles=[role])
+    view = EncoreRolePreviewView(
+        manager,
+        selected_roles=[role],
+        retained_missing_role_ids=[],
+        metadata=team_register_metadata(),
+    )
+
+    await child_with_label(view, "Confirm Save").callback(interaction)
+
+    assert manager.encore_role_id_updates == []
+    assert interaction.response.deferred == [True]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "The configured Google Sheet could not be processed" in content
+    assert "Some changes may have been saved" not in content
+    assert "Reference: `WSC-" in content
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
@@ -1932,7 +2068,7 @@ async def test_encore_role_confirm_transfers_message_to_settings() -> None:
 
     await child_with_label(view, "Confirm Save").callback(interaction)
 
-    updated_view = interaction.response.edits[0][1]["view"]
+    updated_view = interaction.original_response_edits[0][1]["view"]
     assert view.is_finished()
     assert updated_view.message is message
 
@@ -1954,7 +2090,7 @@ async def test_encore_role_confirm_refreshes_metadata_after_save() -> None:
 
     await child_with_label(view, "Confirm Save").callback(interaction)
 
-    content, edit_kwargs = interaction.response.edits[0]
+    content, edit_kwargs = interaction.original_response_edits[0]
     assert content is None
     embed = edit_kwargs["embed"]
     worksheets_field = next(
@@ -1983,8 +2119,8 @@ async def test_encore_role_confirm_reports_saved_when_metadata_refresh_fails() -
 
     assert manager.encore_role_id_updates == [[1]]
     assert view.is_finished()
-    assert len(interaction.response.edits) == 1
-    content, edit_kwargs = interaction.response.edits[0]
+    assert len(interaction.original_response_edits) == 1
+    content, edit_kwargs = interaction.original_response_edits[0]
     assert content is not None
     assert "Some changes may have been saved" in content
     assert "settings view could not be refreshed" in content
@@ -2011,7 +2147,7 @@ async def test_encore_role_confirm_refresh_failure_logs_storage_fields_safely(
 
     await child_with_label(view, "Confirm Save").callback(interaction)
 
-    content, _edit_kwargs = interaction.response.edits[0]
+    content, _edit_kwargs = interaction.original_response_edits[0]
     assert content is not None
     assert content.count("Some changes may have been saved") == 1
     assert "settings view could not be refreshed" in content
@@ -2036,8 +2172,9 @@ async def test_encore_role_confirm_reports_storage_error_when_save_fails() -> No
     await child_with_label(view, "Confirm Save").callback(interaction)
 
     assert manager.encore_role_id_updates == []
-    assert len(interaction.response.messages) == 1
-    content, kwargs = interaction.response.messages[0]
+    assert interaction.response.deferred == [True]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
     assert content is not None
     assert "could not complete this action" in content
     assert "Reference: `STG-" in content
@@ -2080,7 +2217,8 @@ async def test_encore_role_confirm_uses_fresh_missing_settings_guard() -> None:
     await child_with_label(view, "Confirm Save").callback(interaction)
 
     assert manager.encore_role_id_updates == []
-    assert interaction.response.messages == [
+    assert interaction.response.deferred == [True]
+    assert interaction.followup.messages == [
         (
             "Team Register settings are no longer configured for this channel.",
             {"ephemeral": True},
