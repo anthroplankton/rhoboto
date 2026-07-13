@@ -13,6 +13,7 @@ from cogs.base.feature_channel_base import FeatureChannelBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
+from tests.fakes import FakeInteraction
 from tests.test_manager_fakes import (
     FakeTeamGridSheet,
     FakeTeamGridWorksheet,
@@ -20,6 +21,7 @@ from tests.test_manager_fakes import (
 )
 from utils import manager_base as manager_base_module, structs_base
 from utils.google_sheets import DimensionMutation, GridValueUpdate
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -27,6 +29,7 @@ from utils.shift_register_structs import (
     FinalScheduleWorksheetMetadata,
     ShiftRegisterGoogleSheetsMetadata,
 )
+from utils.storage_errors import StorageError, StorageErrorKind
 from utils.team_register_manager import TeamRegisterManager
 from utils.team_register_structs import (
     SummaryWorksheetContent,
@@ -636,6 +639,14 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
                 recruitment_time_ranges=[{"start": 4, "end": 28}],
             )
 
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                sheet_url=(
+                    "https://docs.google.com/spreadsheets/d/range-rejection/edit"
+                ),
+                recruitment_time_ranges=[{"start": 4, "end": 28}],
+            )
+
         async def fetch_google_sheets_metadata(self) -> None:
             raise AssertionError
 
@@ -656,6 +667,11 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
     monkeypatch.setattr(ShiftRegister, "ManagerType", FakeShiftRegisterManager)
     subject = make_subject("shift_register")
     subject.logger = NoInfoLogger()
+    subject.sheet_write_lock = ShiftRegister.sheet_write_lock
+    subject._write_shift_registration = MethodType(
+        ShiftRegister._write_shift_registration,
+        subject,
+    )
     message = FakeMessage("0-30")
 
     result = await message_upsert_result(subject, message)
@@ -665,24 +681,28 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
 
 
 @pytest.mark.asyncio
-async def test_shift_listener_marks_old_entry_header_google_sheets_error(
+async def test_shift_listener_marks_old_entry_header_contract_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class OldHeaderWorksheet:
         id = 1
         title = "Shift Entry"
+        row_count = 100
+        col_count = 36
 
         async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-            assert ranges == ["1:2", "A3:C"]
+            assert ranges == ["A1:AJ2", "A3:C", "F3:AJ"]
             return [
                 [
+                    ["count"],
                     [
                         "username",
                         "display_name",
                         *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
                         "original_message",
-                    ]
+                    ],
                 ],
+                [],
                 [],
             ]
 
@@ -703,6 +723,14 @@ async def test_shift_listener_marks_old_entry_header_google_sheets_error(
 
         async def get_sheet_config_or_none(self) -> SimpleNamespace:
             return SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 28}],
+            )
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                sheet_url=(
+                    "https://docs.google.com/spreadsheets/d/old-shift-header/edit"
+                ),
                 recruitment_time_ranges=[{"start": 4, "end": 28}],
             )
 
@@ -746,7 +774,7 @@ async def test_shift_listener_marks_old_entry_header_google_sheets_error(
     assert message.added_reactions == [
         config.PROCESSING_EMOJI,
         "⚠️",
-        "🛠️",
+        "📏",
     ]
 
 
@@ -826,7 +854,7 @@ async def test_shift_listener_adds_success_before_removing_processing(
 ) -> None:
     class SuccessfulShiftManager(ConfiguredDummyManager):
         async def fetch_google_sheets_metadata(self) -> object:
-            return object()
+            return SimpleNamespace(worksheets=[SimpleNamespace(id=1)])
 
         def log_missing_worksheet_warnings(self, _metadata: object) -> None:
             pass
@@ -918,3 +946,342 @@ async def test_shift_contract_failure_never_logs_private_pre_operation_data(
     assert "message=123" in caplog.text
     assert "slots=4" in caplog.text
     assert "operation=message_upsert" in caplog.text
+
+
+@asynccontextmanager
+async def unlocked_sheet_write(_channel_id: int) -> object:
+    yield
+
+
+async def fake_feature_channel_get(
+    *, guild_id: int, channel_id: int, feature_name: str
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        guild_id=guild_id,
+        channel_id=channel_id,
+        feature_name=feature_name,
+        is_enabled=True,
+    )
+
+
+def make_team_summary_subject(manager_type: type[object]) -> SimpleNamespace:
+    subject = SimpleNamespace(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        logger=FakeLogger(),
+        ManagerType=manager_type,
+        sheet_write_lock=unlocked_sheet_write,
+    )
+    for method_name in (
+        "_get_feature_channel_context",
+        "_build_feature_channel_context",
+        "_get_configured_feature_channel_context",
+        "_send_missing_config_followup",
+        "_interaction_storage_context",
+        "_send_interaction_storage_error_or_raise",
+    ):
+        method = getattr(FeatureChannelBase, method_name)
+        setattr(subject, method_name, MethodType(method, subject))
+    return subject
+
+
+@pytest.mark.asyncio
+async def test_team_message_prewrite_permission_failure_keeps_access_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class PermissionFailureTeamManager(ConfiguredDummyManager):
+        async def upsert_user_registration(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.PERMISSION,
+                "private permission detail",
+            )
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", PermissionFailureTeamManager)
+    log = logging.getLogger("tests.register_reactions.team_permission_stage")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    subject = make_subject("team_register")
+    subject.logger = log
+    subject.sheet_write_lock = unlocked_sheet_write
+    message = FakeMessage("150/740/33")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert "kind=google_sheets_access" in caplog.text
+    assert "kind=partial_success" not in caplog.text
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🛠️",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_message_preserves_explicit_partial_success_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager_error = StorageError(StorageErrorKind.PARTIAL_SUCCESS)
+
+    class PartialFailureTeamManager(ConfiguredDummyManager):
+        async def upsert_user_registration(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise manager_error
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", PartialFailureTeamManager)
+    subject = make_subject("team_register")
+    subject.sheet_write_lock = unlocked_sheet_write
+    message = FakeMessage("150/740/33")
+
+    with pytest.raises(StorageError) as exc_info:
+        await message_upsert_result(subject, message)
+
+    assert exc_info.value is manager_error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("manager_error", "expected_copy"),
+    [
+        pytest.param(
+            GoogleSheetsError(
+                GoogleSheetsErrorKind.TRANSIENT,
+                "private transient detail",
+            ),
+            "Google Sheets is temporarily unavailable. Try again later.",
+            id="transient-before-write",
+        ),
+        pytest.param(
+            StorageError(StorageErrorKind.PARTIAL_SUCCESS),
+            "Some changes may have been saved, but this action could not be completed.",
+            id="explicit-partial-success",
+        ),
+    ],
+)
+async def test_team_summary_preserves_manager_storage_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    manager_error: Exception,
+    expected_copy: str,
+) -> None:
+    class SummaryFailureTeamManager(ConfiguredDummyManager):
+        async def refresh_summary_registration(
+            self,
+            *,
+            member_by_names: dict[str, object],
+        ) -> object:
+            del member_by_names
+            raise manager_error
+
+    monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
+    interaction = FakeInteraction()
+    subject = make_team_summary_subject(SummaryFailureTeamManager)
+
+    await TeamRegister.summary.callback(subject, interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert content.startswith(expected_copy)
+    assert "Reference: `STG-" in content
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(
+            (
+                "fetch",
+                GoogleSheetsError(
+                    GoogleSheetsErrorKind.PERMISSION,
+                    "private fetch permission detail",
+                ),
+                StorageErrorKind.GOOGLE_SHEETS_ACCESS,
+                ["fetch"],
+            ),
+            id="metadata-fetch-permission",
+        ),
+        pytest.param(
+            (
+                "ensure",
+                GoogleSheetsError(
+                    GoogleSheetsErrorKind.TRANSIENT,
+                    "private ensure transient detail",
+                ),
+                StorageErrorKind.GOOGLE_SHEETS_TRANSIENT,
+                ["fetch", "log", "ensure"],
+            ),
+            id="worksheet-ensure-transient",
+        ),
+        pytest.param(
+            (
+                "ensure",
+                StorageError(StorageErrorKind.PARTIAL_SUCCESS),
+                StorageErrorKind.PARTIAL_SUCCESS,
+                ["fetch", "log", "ensure"],
+            ),
+            id="worksheet-ensure-proven-partial",
+        ),
+    ],
+)
+async def test_shift_ensure_failure_preserves_manager_storage_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: tuple[str, Exception, StorageErrorKind, list[str]],
+) -> None:
+    failure_stage, manager_error, expected_kind, expected_events = case
+    events: list[str] = []
+
+    class StagedFailureShiftManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> object:
+            events.append("fetch")
+            if failure_stage == "fetch":
+                raise manager_error
+            return SimpleNamespace(worksheets=[SimpleNamespace(id=1)])
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            events.append("log")
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            metadata: object,
+        ) -> object:
+            events.append("ensure")
+            if failure_stage == "ensure":
+                raise manager_error
+            return metadata
+
+        async def upsert_or_delete_user_shift(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            events.append("upsert")
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", StagedFailureShiftManager)
+    log = logging.getLogger(f"tests.register_reactions.shift_{failure_stage}_stage")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    subject = make_subject("shift_register")
+    subject.logger = log
+    subject.sheet_write_lock = unlocked_sheet_write
+    subject._write_shift_registration = MethodType(
+        ShiftRegister._write_shift_registration,
+        subject,
+    )
+    message = FakeMessage("4-8")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert events == expected_events
+    assert f"kind={expected_kind.value}" in caplog.text
+    if expected_kind is not StorageErrorKind.PARTIAL_SUCCESS:
+        assert "kind=partial_success" not in caplog.text
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🛠️",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids_changed", [False, True])
+async def test_shift_post_ensure_upsert_failure_uses_actual_id_change(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    *,
+    ids_changed: bool,
+) -> None:
+    events: list[str] = []
+    original_metadata = SimpleNamespace(worksheets=[SimpleNamespace(id=1)])
+    ensured_metadata = SimpleNamespace(
+        worksheets=[SimpleNamespace(id=2 if ids_changed else 1)]
+    )
+
+    class PostEnsureFailureShiftManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> object:
+            events.append("fetch")
+            return original_metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            events.append("log")
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            metadata: object,
+        ) -> object:
+            events.append("ensure")
+            assert metadata is original_metadata
+            return ensured_metadata
+
+        async def upsert_or_delete_user_shift(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            events.append("upsert")
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.PERMISSION,
+                "private post-ensure permission detail",
+            )
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", PostEnsureFailureShiftManager)
+    log = logging.getLogger("tests.register_reactions.shift_post_ensure_stage")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    subject = make_subject("shift_register")
+    subject.logger = log
+    subject.sheet_write_lock = unlocked_sheet_write
+    subject._write_shift_registration = MethodType(
+        ShiftRegister._write_shift_registration,
+        subject,
+    )
+    message = FakeMessage("4-8")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert events == [
+        "fetch",
+        "log",
+        "ensure",
+        "upsert",
+    ]
+    expected_kind = (
+        StorageErrorKind.PARTIAL_SUCCESS
+        if ids_changed
+        else StorageErrorKind.GOOGLE_SHEETS_ACCESS
+    )
+    assert f"kind={expected_kind.value}" in caplog.text
+    if not ids_changed:
+        assert "kind=partial_success" not in caplog.text
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🛠️",
+    ]

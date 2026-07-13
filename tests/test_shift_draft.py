@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
-import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
@@ -32,6 +31,7 @@ from utils.shift_scheduler import (
     ShiftScheduler,
 )
 from utils.storage_errors import StorageError, StorageErrorKind
+from utils.structs_base import WorksheetContractError
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -48,9 +48,13 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         old_axis_rows: list[list[object]] | None = None,
         old_threshold_labels: list[list[object]] | None = None,
         old_lookup_labels: list[list[object]] | None = None,
+        row_count: int = 100,
+        col_count: int = 20,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
+        self.row_count = row_count
+        self.col_count = col_count
         self.old_axis_rows = old_axis_rows or []
         self.old_threshold_labels = old_threshold_labels or []
         self.old_lookup_labels = old_lookup_labels or []
@@ -64,19 +68,24 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.conditional_format_rules: list[dict[str, object]] = []
         self.conditional_format_rule_deletes: list[list[int]] = []
         self.conditional_format_rule_adds: list[list[dict[str, object]]] = []
-        self.ensure_calls: list[tuple[int, int]] = []
+        self.typed_minimums: list[tuple[int | None, int | None]] = []
 
     async def batch_get_values(
         self,
         ranges: list[str],
     ) -> list[list[list[object]]]:
         self.batch_get_calls.append(ranges)
-        assert ranges == ["A1:A33", "I1:I32", "J1:J37"]
-        return [
-            self.old_axis_rows,
-            self.old_threshold_labels,
-            self.old_lookup_labels,
-        ]
+        sources = {
+            "A": self.old_axis_rows,
+            "I": self.old_threshold_labels,
+            "J": self.old_lookup_labels,
+        }
+        values = []
+        for range_name in ranges:
+            start, end = range_name.split(":", maxsplit=1)
+            assert start == f"{start[0]}1"
+            values.append(sources[start[0]][: int(end[1:])])
+        return values
 
     async def batch_update_typed_values(  # noqa: PLR0913
         self,
@@ -89,6 +98,8 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         conditional_format_rule_deletes: Sequence[int] = (),
         conditional_format_rule_adds: Sequence[dict[str, object]] = (),
         frozen_column_count: int | None = None,
+        min_rows: int | None = None,
+        min_cols: int | None = None,
     ) -> None:
         self.typed_batches.append(data)
         self.formula_ranges.append(formula_ranges)
@@ -100,17 +111,23 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         )
         self.conditional_format_rule_adds.append(list(conditional_format_rule_adds))
         self.frozen_column_counts.append(frozen_column_count)
+        self.typed_minimums.append((min_rows, min_cols))
 
     async def get_conditional_format_rules(self) -> list[dict[str, object]]:
         return self.conditional_format_rules
 
-    async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
-        self.ensure_calls.append((min_rows, min_cols))
-
 
 class EntryRangeFakeWorksheet(FakeWorksheet):
-    def __init__(self, range_values: list[list[list[object]]]) -> None:
+    def __init__(
+        self,
+        range_values: list[list[list[object]]],
+        *,
+        row_count: int = 100,
+        col_count: int = 40,
+    ) -> None:
         super().__init__(title="Shift Entry")
+        self.row_count = row_count
+        self.col_count = col_count
         self.range_values = range_values
         self.batch_get_calls: list[list[str]] = []
         self.ignored_values = {
@@ -124,26 +141,8 @@ class EntryRangeFakeWorksheet(FakeWorksheet):
         ranges: list[str],
     ) -> list[list[list[object]]]:
         self.batch_get_calls.append(ranges)
-        assert ranges == ["2:2", "A3:B", "F3:AJ"]
+        assert ranges == ["A1:AJ2", "A3:C", "F3:AJ"]
         return self.range_values
-
-    async def to_frame(self) -> pd.DataFrame:
-        msg = "draft generation must not use the legacy whole-frame read"
-        raise AssertionError(msg)
-
-
-def build_entry_frame(rows: list[tuple[str, str, set[int]]]) -> pd.DataFrame:
-    records = []
-    for username, display_name, slots in rows:
-        record: dict[str, object] = {
-            "username": username,
-            "display_name": display_name,
-            "original_message": "",
-        }
-        for index, label in enumerate(ShiftParser.HOUR_LABELS):
-            record[label] = 1 if index in slots else 0
-        records.append(record)
-    return pd.DataFrame(records, columns=EntryWorksheetContent.COLUMNS)
 
 
 def build_entry_ranges(
@@ -152,14 +151,18 @@ def build_entry_ranges(
     identities = []
     availability = []
     for username, display_name, slots in rows:
-        identities.append([username, display_name])
+        identities.append([username, display_name, ""])
         availability.append(
             [
                 *(1 if index in slots else 0 for index in range(30)),
                 "",
             ]
         )
-    return [[EntryWorksheetContent.COLUMNS], identities, availability]
+    return [
+        [EntryWorksheetContent.count_row(), EntryWorksheetContent.COLUMNS],
+        identities,
+        availability,
+    ]
 
 
 def make_shift(username: str, slots: Iterable[int]) -> Shift:
@@ -169,22 +172,6 @@ def make_shift(username: str, slots: Iterable[int]) -> Shift:
         original_message="",
         slots=set(slots),
     )
-
-
-def test_to_shifts_reads_slots_from_worksheet() -> None:
-    frame = build_entry_frame([("alice", "Alice", {4, 5, 6})])
-    shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(frame)
-    content = EntryWorksheetContent(shift_df, plain_df)
-
-    shifts = content.to_shifts()
-
-    assert len(shifts) == 1
-    shift = shifts[0]
-    assert shift.username == "alice"
-    assert shift.display_name == "Alice"
-    assert 4 in shift
-    assert 6 in shift
-    assert 7 not in shift
 
 
 def test_shifts_from_ranges_reads_current_entry_owned_columns() -> None:
@@ -206,6 +193,18 @@ def test_shifts_from_ranges_reads_current_entry_owned_columns() -> None:
             slots={4, 6},
         )
     ]
+
+
+def test_shifts_from_ranges_rejects_nonbinary_availability() -> None:
+    availability = [0] * len(ShiftParser.HOUR_LABELS)
+    availability[4] = 2
+
+    with pytest.raises(WorksheetContractError):
+        EntryWorksheetContent.shifts_from_ranges(
+            [EntryWorksheetContent.COLUMNS],
+            [["alice", "Alice"]],
+            [[*availability, "original"]],
+        )
 
 
 def test_from_schedule_renders_lane_columns() -> None:
@@ -945,7 +944,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             }
         }
     }
-    assert draft_worksheet.ensure_calls == []
+    assert draft_worksheet.typed_minimums == [(38, 13)]
     assert result.schedule.hours == list(range(4, 22))
     assert all(
         not assignment.supporter_usernames_by_slot
@@ -960,7 +959,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     )
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
-    assert entry_worksheet.batch_get_calls == [["2:2", "A3:B", "F3:AJ"]]
+    assert entry_worksheet.batch_get_calls == [["A1:AJ2", "A3:C", "F3:AJ"]]
     assert draft_worksheet.batch_get_calls == [["A1:A33", "I1:I32", "J1:J37"]]
 
 
@@ -973,7 +972,11 @@ async def test_generate_draft_accepts_completely_empty_entry(
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
     entry_worksheet = EntryRangeFakeWorksheet([[], [], []])
-    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    draft_worksheet = DraftBatchFakeWorksheet(
+        title="Shift Draft",
+        row_count=1,
+        col_count=1,
+    )
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
@@ -993,6 +996,8 @@ async def test_generate_draft_accepts_completely_empty_entry(
     assert result.schedule.display_names == {}
     assert result.schedule.hours == [4]
     assert {"A4", "I1"} <= draft_worksheet.formula_ranges[-1]
+    assert draft_worksheet.batch_get_calls == [["A1:A1"]]
+    assert draft_worksheet.typed_minimums == [(38, 13)]
 
 
 @pytest.mark.asyncio
@@ -1140,10 +1145,8 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
         *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
         "original_message",
     ]
-    entry_worksheet = EntryRangeFakeWorksheet(
-        [[old_columns], [], []],
-    )
-    draft_worksheet = FakeWorksheet(title="Shift Draft")
+    entry_worksheet = EntryRangeFakeWorksheet([[[], old_columns], [], []])
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [
@@ -1153,15 +1156,40 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
         ],
     )
 
-    with pytest.raises(StorageError) as exc_info:
+    with pytest.raises(WorksheetContractError):
         await manager.generate_draft(
             metadata,
             encore_power_threshold=35,
             runner="Run",
         )
 
-    assert exc_info.value.kind is StorageErrorKind.MALFORMED_SHEET
-    assert draft_worksheet.updated_frames == []
+    assert draft_worksheet.typed_batches == []
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_rejects_nonbinary_entry_before_draft_io() -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 7}]
+    )
+    entry_ranges = build_entry_ranges([("bob", "Bob", {4, 5})])
+    entry_ranges[2][0][4] = "not binary"
+    entry_worksheet = EntryRangeFakeWorksheet(entry_ranges)
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://sheet.example",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+
+    with pytest.raises(WorksheetContractError):
+        await manager.generate_draft(metadata, encore_power_threshold=35)
+
+    assert draft_worksheet.batch_get_calls == []
+    assert draft_worksheet.typed_batches == []
 
 
 @pytest.mark.asyncio
@@ -1170,10 +1198,7 @@ async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )
-    entry_worksheet = FakeWorksheet(
-        title="Shift Entry",
-        frame=build_entry_frame([("alice", "Alice", {4, 5})]),
-    )
+    entry_worksheet = FakeWorksheet(title="Shift Entry")
     metadata = ShiftRegisterGoogleSheetsMetadata(
         "https://sheet.example",
         [

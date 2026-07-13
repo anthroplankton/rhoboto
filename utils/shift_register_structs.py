@@ -19,7 +19,7 @@ from utils.structs_base import (
     OriginalMessage,
     SubmissionParseResult,
     UserInfo,
-    WorksheetContentBase,
+    WorksheetContractError,
     WorksheetMetadata,
 )
 
@@ -618,7 +618,7 @@ class ShiftRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
         return cls(sheet_url, found)
 
 
-class EntryWorksheetContent(WorksheetContentBase[Shift]):
+class EntryWorksheetContent:
     TEAM_COLUMNS: ClassVar[list[str]] = [
         "Main ISV",
         "Encore ISV",
@@ -679,39 +679,6 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
         ]
 
     @classmethod
-    def validate_core_header(cls, df: object) -> None:
-        columns = list(getattr(df, "columns", []))
-        if not columns:
-            return
-        expected = cls.COLUMNS
-        actual_core = columns[: len(expected)]
-        if actual_core != expected:
-            msg = (
-                "Shift Entry worksheet header must start with "
-                f"{expected!r}, got {actual_core!r}."
-            )
-            raise ValueError(msg)
-
-    def to_shifts(self) -> list[Shift]:
-        """Rebuild Shift entries from the standardized worksheet rows."""
-        shifts: list[Shift] = []
-        for username, row in self.main.iterrows():
-            slots = {
-                index
-                for index, label in enumerate(ShiftParser.HOUR_LABELS)
-                if int(row[label]) == 1
-            }
-            shifts.append(
-                Shift(
-                    username=str(username),
-                    display_name=str(row["display_name"]),
-                    original_message=str(row["original_message"]),
-                    slots=slots,
-                )
-            )
-        return shifts
-
-    @classmethod
     def shifts_from_ranges(
         cls,
         header_rows: list[list[object]],
@@ -722,13 +689,17 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
         if not header_rows and not identity_rows and not availability_rows:
             return []
         if header_rows != [cls.COLUMNS]:
-            msg = "Shift Entry worksheet header does not match the current layout."
-            raise ValueError(msg)
-        if len(identity_rows) != len(availability_rows):
-            msg = "Shift Entry participant ranges have different row counts."
-            raise ValueError(msg)
+            raise WorksheetContractError
+
+        row_count = max(len(identity_rows), len(availability_rows))
+        identity_rows = [*identity_rows, *([[]] * (row_count - len(identity_rows)))]
+        availability_rows = [
+            *availability_rows,
+            *([[]] * (row_count - len(availability_rows))),
+        ]
 
         shifts = []
+        seen_usernames: set[str] = set()
         availability_width = len(cls.HOUR_COLUMNS) + 1
         for identity, availability in zip(
             identity_rows,
@@ -738,13 +709,22 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
             username, display_name = [*identity[:2], "", ""][:2]
             if username in ("", None):
                 continue
+            username = str(username)
+            if username in seen_usernames:
+                raise WorksheetContractError
+            seen_usernames.add(username)
             values = [
                 *availability[:availability_width],
                 *([""] * max(0, availability_width - len(availability))),
             ]
+            if any(
+                value.__class__ is not int or value not in (0, 1)
+                for value in values[:-1]
+            ):
+                raise WorksheetContractError
             shifts.append(
                 Shift(
-                    username=str(username),
+                    username=username,
                     display_name=str(display_name),
                     original_message=str(values[-1]),
                     slots={
@@ -873,6 +853,8 @@ class DraftWorksheetContent:
 
     JST_COLUMN: ClassVar[str] = "JST"
     DRAFT_VALUE_LAST_ROW: ClassVar[int] = 31
+    EXPLICIT_FOOTPRINT_LAST_ROW: ClassVar[int] = 38
+    EXPLICIT_FOOTPRINT_COLUMN_COUNT: ClassVar[int] = 13
     RUNNER_COLUMN: ClassVar[str] = "ランナー"
     ENCORE_COLUMN: ClassVar[str] = "アンコ"
     HONSO_COLUMNS: ClassVar[tuple[str, str, str]] = ("本走①", "本走②", "本走③")

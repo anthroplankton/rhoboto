@@ -1644,6 +1644,16 @@ class FeatureChannelUserBase[
         self, manager: TManager, user_info: UserInfo, metadata: TGoogleSheetsMetadata
     ) -> None: ...
 
+    async def _delete_user_data_transaction(
+        self,
+        context: ConfiguredFeatureChannelContext[TManager],
+        user_info: UserInfo,
+    ) -> None:
+        """Fetch and delete user data under the feature's default channel lock."""
+        async with self.FeatureChannelType.sheet_write_lock(context.channel_id):
+            metadata = await context.manager.fetch_google_sheets_metadata()
+            await self._delete_user_data(context.manager, user_info, metadata)
+
     def _guide_sheet_url(
         self,
         feature_config: SheetConfigBase,
@@ -1777,11 +1787,7 @@ class FeatureChannelUserBase[
                 await self._send_missing_config_followup(interaction)
                 return None
 
-            manager = context.manager
-
-            async with self.FeatureChannelType.sheet_write_lock(context.channel_id):
-                metadata = await manager.fetch_google_sheets_metadata()
-                await self._delete_user_data(manager, user_info, metadata)
+            await self._delete_user_data_transaction(context, user_info)
 
             content = register_user_text(
                 self.feature_name,

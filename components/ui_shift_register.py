@@ -34,10 +34,12 @@ from components.ui_settings_flow import (
     settings_title,
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
+from utils.manager_base import spreadsheet_transaction
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     TeamSourceResolution,
     TeamSourceStatus,
+    fresh_shift_spreadsheet_transaction,
 )
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -506,9 +508,12 @@ class ShiftRegisterSheetModal(Modal):
         final_schedule_worksheet_title = self.final_schedule_worksheet_title.value
         final_schedule_anchor_cell = self.final_schedule_anchor_cell.value
 
+        settings_saved = False
         try:
-            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
-                self.shift_register_manager.feature_channel.channel_id
+            async with spreadsheet_transaction(
+                SHIFT_REGISTER_SHEET_WRITE_LOCK,
+                channel_id=self.shift_register_manager.feature_channel.channel_id,
+                sheet_url=sheet_url,
             ):
                 upsert = self.shift_register_manager.upsert_sheet_config_and_worksheets
                 metadata = await upsert(
@@ -516,7 +521,9 @@ class ShiftRegisterSheetModal(Modal):
                     entry_worksheet_title=entry_worksheet_title,
                     draft_worksheet_title=draft_worksheet_title,
                     final_schedule_worksheet_title=final_schedule_worksheet_title,
+                    final_schedule_anchor_cell=final_schedule_anchor_cell,
                 )
+                settings_saved = True
         except WorksheetContractError as error:
             await send_settings_contract_error(
                 interaction,
@@ -527,23 +534,15 @@ class ShiftRegisterSheetModal(Modal):
             )
             return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
-            await send_settings_partial_success(
+            responder = (
+                send_settings_partial_success
+                if settings_saved
+                else send_settings_storage_error
+            )
+            await responder(
                 interaction,
                 exc,
                 operation="shift_register_setup",
-                feature_name=SHIFT_REGISTER_FEATURE_NAME,
-                log=logger,
-            )
-            return
-        try:
-            await self.shift_register_manager.update_final_schedule_anchor_cell(
-                final_schedule_anchor_cell
-            )
-        except SETTINGS_STORAGE_EXCEPTIONS as exc:
-            await send_settings_partial_success(
-                interaction,
-                exc,
-                operation="shift_register_setup_anchor_save",
                 feature_name=SHIFT_REGISTER_FEATURE_NAME,
                 log=logger,
             )
@@ -791,10 +790,21 @@ class ShiftRecruitmentRangeModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
         try:
-            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
-                self.shift_register_manager.feature_channel.channel_id
+            async with fresh_shift_spreadsheet_transaction(
+                self.shift_register_manager,
+                SHIFT_REGISTER_SHEET_WRITE_LOCK,
+                channel_id=self.shift_register_manager.feature_channel.channel_id,
             ):
                 await self.shift_register_manager.update_recruitment_time_ranges(ranges)
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="shift_register_recruitment_range_save",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_storage_error(
                 interaction,
@@ -1113,7 +1123,7 @@ class ApplyTeamSourceButton(Button):
     def __init__(self) -> None:
         super().__init__(label="Apply & Repair", style=ButtonStyle.primary)
 
-    async def callback(self, interaction: Interaction) -> None:
+    async def callback(self, interaction: Interaction) -> None:  # noqa: PLR0911
         if not await require_settings_permissions(interaction):
             return
         if not isinstance(self.view, TeamSourceView):
@@ -1129,10 +1139,21 @@ class ApplyTeamSourceButton(Button):
         await interaction.response.defer(ephemeral=True)
         manager = self.view.shift_register_manager
         try:
-            async with SHIFT_REGISTER_SHEET_WRITE_LOCK(
-                manager.feature_channel.channel_id
+            async with fresh_shift_spreadsheet_transaction(
+                manager,
+                SHIFT_REGISTER_SHEET_WRITE_LOCK,
+                channel_id=manager.feature_channel.channel_id,
             ):
                 resolution = await manager.select_team_source_and_repair(channel_id)
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="shift_register_team_source_repair",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_storage_error(
                 interaction,

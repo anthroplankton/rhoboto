@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -58,7 +59,11 @@ from components.ui_team_register import (
     build_current_settings_embed as build_team_current_settings_embed,
 )
 from tests.fakes import FakeInteraction, FakeRole
-from utils import team_register_manager as team_register_manager_module
+from utils import (
+    manager_base as manager_base_module,
+    shift_register_manager as shift_register_manager_module,
+    team_register_manager as team_register_manager_module,
+)
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
     TeamSource,
@@ -75,6 +80,19 @@ from utils.team_register_structs import (
 )
 
 TEAM_SETTINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/team-settings/edit"
+SHIFT_SETTINGS_SHEET_URL = "https://docs.google.com/spreadsheets/d/shift-settings/edit"
+
+
+def assert_approved_worksheet_contract_error(content: str) -> None:
+    assert re.fullmatch(
+        (
+            r"⚠️📏 The configured Google Sheet layout needs correction\. Reopen "
+            r"settings, verify the worksheets, and try again\. Reference: "
+            r"`WSC-[0-9a-f]{8}`"
+        ),
+        content,
+    )
+    assert "Some changes may have been saved" not in content
 
 
 def team_source_resolution(
@@ -235,12 +253,11 @@ class RecordingTeamRegisterManager:
 class RecordingShiftRegisterManager:
     def __init__(self) -> None:
         self.upsert_calls: list[dict[str, object]] = []
-        self.anchor_updates: list[str] = []
         self.timeline_updates: list[dict[str, object]] = []
         self.recruitment_range_updates: list[object] = []
         self.config_exists = True
         self.feature_channel = SimpleNamespace(id=222, channel_id=222)
-        self.sheet_url = "https://sheet.example"
+        self.sheet_url = SHIFT_SETTINGS_SHEET_URL
         self.final_schedule_anchor_cell = "B2"
         self.day_number = 2
         self.event_date = dt.date(2026, 8, 12)
@@ -261,6 +278,7 @@ class RecordingShiftRegisterManager:
         self.metadata_error: GoogleSheetsError | None = None
         self.team_source = TeamSourceResolution(TeamSourceStatus.MISSING)
         self.team_source_apply_calls: list[int] = []
+        self.team_source_apply_error: Exception | None = None
         self.team_source_candidate_channel_ids: tuple[int, ...] = ()
 
     async def upsert_sheet_config_and_worksheets(
@@ -270,16 +288,19 @@ class RecordingShiftRegisterManager:
         entry_worksheet_title: str,
         draft_worksheet_title: str,
         final_schedule_worksheet_title: str,
+        final_schedule_anchor_cell: str,
     ) -> SimpleNamespace:
         if self.upsert_error is not None:
             raise self.upsert_error
         self.config_exists = True
+        self.final_schedule_anchor_cell = final_schedule_anchor_cell
         self.upsert_calls.append(
             {
                 "sheet_url": sheet_url,
                 "entry_worksheet_title": entry_worksheet_title,
                 "draft_worksheet_title": draft_worksheet_title,
                 "final_schedule_worksheet_title": final_schedule_worksheet_title,
+                "final_schedule_anchor_cell": final_schedule_anchor_cell,
             }
         )
         return SimpleNamespace(
@@ -287,11 +308,6 @@ class RecordingShiftRegisterManager:
             draft_worksheet=SimpleNamespace(title="Draft", id=102),
             final_schedule_worksheet=SimpleNamespace(title="Final", id=103),
         )
-
-    async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
-        if self.save_error is not None:
-            raise self.save_error
-        self.anchor_updates.append(anchor_cell)
 
     async def update_timeline(
         self,
@@ -333,11 +349,7 @@ class RecordingShiftRegisterManager:
             raise RuntimeError(msg)
         return SimpleNamespace(
             sheet_url=self.sheet_url,
-            final_schedule_anchor_cell=(
-                self.anchor_updates[-1]
-                if self.anchor_updates
-                else self.final_schedule_anchor_cell
-            ),
+            final_schedule_anchor_cell=self.final_schedule_anchor_cell,
             day_number=self.day_number,
             event_date=self.event_date,
             submission_deadline_at=self.submission_deadline_at,
@@ -367,6 +379,8 @@ class RecordingShiftRegisterManager:
         self,
         team_channel_id: int,
     ) -> TeamSourceResolution:
+        if self.team_source_apply_error is not None:
+            raise self.team_source_apply_error
         self.team_source_apply_calls.append(team_channel_id)
         return self.team_source
 
@@ -848,9 +862,23 @@ async def test_edit_team_source_can_return_to_settings_without_saving() -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_team_source_repairs_selected_channel() -> None:
+async def test_apply_team_source_repairs_selected_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     manager = RecordingShiftRegisterManager()
     manager.team_source = team_source_resolution()
+    channel_lock = RecordingAsyncLock()
+    spreadsheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        channel_lock,
+    )
+    monkeypatch.setattr(
+        shift_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+    )
     view = TeamSourceView(manager, selected_channel_id=22)
     button = next(
         child for child in view.children if isinstance(child, ApplyTeamSourceButton)
@@ -860,9 +888,33 @@ async def test_apply_team_source_repairs_selected_channel() -> None:
     await button.callback(interaction)
 
     assert manager.team_source_apply_calls == [22]
+    assert channel_lock.keys == [222]
+    assert spreadsheet_lock.keys == ["shift-settings"]
     assert interaction.followup.messages[-1][0] == (
         "✅ Team source saved and references repaired."
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_team_source_reports_contract_error_without_partial_success() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    manager.team_source_apply_error = WorksheetContractError(
+        log_hint="invalid_worksheet_contract"
+    )
+    view = TeamSourceView(manager, selected_channel_id=22)
+    button = next(
+        child for child in view.children if isinstance(child, ApplyTeamSourceButton)
+    )
+    interaction = FakeInteraction()
+
+    await button.callback(interaction)
+
+    content, kwargs = interaction.followup.messages[-1]
+    assert content is not None
+    assert_approved_worksheet_contract_error(content)
+    assert kwargs == {"ephemeral": True}
 
 
 def test_shift_settings_embed_uses_team_landing_worksheet() -> None:
@@ -1076,6 +1128,7 @@ async def test_shift_initial_setup_save_shows_disabled_latest_guide_controls(
     setup_interaction = FakeInteraction()
     await child_with_label(view, "Set Up Shift Register").callback(setup_interaction)
     modal = setup_interaction.response.modals[0]
+    modal.sheet_url._value = SHIFT_SETTINGS_SHEET_URL  # noqa: SLF001
 
     save_interaction = FakeInteraction()
     await modal.on_submit(save_interaction)
@@ -1585,9 +1638,7 @@ async def test_team_setup_modal_reports_contract_error_without_partial_success()
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "The configured Google Sheet could not be processed" in content
-    assert "Some changes may have been saved" not in content
-    assert "Reference: `WSC-" in content
+    assert_approved_worksheet_contract_error(content)
     assert kwargs == {"ephemeral": True}
 
 
@@ -1979,9 +2030,7 @@ async def test_encore_role_confirm_reports_contract_error_before_save() -> None:
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "The configured Google Sheet could not be processed" in content
-    assert "Some changes may have been saved" not in content
-    assert "Reference: `WSC-" in content
+    assert_approved_worksheet_contract_error(content)
     assert kwargs == {"ephemeral": True}
 
 
@@ -2598,7 +2647,7 @@ async def test_shift_edit_settings_button_uses_fresh_missing_settings_guard() ->
     view = ShiftRegisterView(
         manager,
         has_existing_settings=True,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2622,7 +2671,7 @@ async def test_shift_settings_view_disables_controls_on_timeout() -> None:
     view = ShiftRegisterView(
         manager,
         has_existing_settings=True,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2736,7 +2785,6 @@ async def test_shift_modal_submit_denies_unauthorized_user() -> None:
     assert_permission_denied(interaction)
     assert interaction.response.deferred == []
     assert manager.upsert_calls == []
-    assert manager.anchor_updates == []
 
 
 @pytest.mark.asyncio
@@ -2745,15 +2793,21 @@ async def test_shift_modal_submit_allows_authorized_user(
 ) -> None:
     manager = RecordingShiftRegisterManager()
     sheet_lock = RecordingAsyncLock()
+    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_shift_register,
         "SHIFT_REGISTER_SHEET_WRITE_LOCK",
         sheet_lock,
     )
+    monkeypatch.setattr(
+        manager_base_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+    )
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2765,8 +2819,10 @@ async def test_shift_modal_submit_allows_authorized_user(
     assert interaction.response.deferred == [True]
     assert sheet_lock.keys == [222]
     assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
+    assert spreadsheet_lock.keys == ["shift-settings"]
+    assert (spreadsheet_lock.entered, spreadsheet_lock.exited) == (1, 1)
     assert len(manager.upsert_calls) == 1
-    assert manager.anchor_updates == ["B2"]
+    assert manager.upsert_calls[0]["final_schedule_anchor_cell"] == "B2"
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content == (
@@ -2786,7 +2842,7 @@ async def test_shift_initial_setup_without_team_source_offers_set_later() -> Non
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2812,7 +2868,7 @@ async def test_shift_initial_setup_multiple_sources_keeps_channel_select() -> No
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2841,7 +2897,7 @@ async def test_shift_initial_setup_with_one_team_source_preselects_channel() -> 
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2894,7 +2950,7 @@ async def test_shift_edit_modal_save_preserves_latest_guide_controls() -> None:
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2919,7 +2975,7 @@ async def test_shift_edit_modal_save_refreshes_latest_guide_state() -> None:
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2948,7 +3004,7 @@ async def test_shift_modal_save_calls_latest_guide_refresh_after_panel_refresh()
     refresh_callback = RecordingLatestGuideRefreshCallback()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -2959,7 +3015,7 @@ async def test_shift_modal_save_calls_latest_guide_refresh_after_panel_refresh()
 
     await modal.on_submit(interaction)
 
-    assert manager.anchor_updates == ["C3"]
+    assert manager.upsert_calls[0]["final_schedule_anchor_cell"] == "C3"
     assert len(interaction.followup.messages) == 1
     assert len(refresh_callback.calls) == 1
     call_interaction, feature_config, followup_count = refresh_callback.calls[0]
@@ -2993,16 +3049,15 @@ async def test_shift_edit_modal_submit_uses_fresh_missing_settings_guard() -> No
     ]
     assert interaction.response.deferred == []
     assert manager.upsert_calls == []
-    assert manager.anchor_updates == []
 
 
 @pytest.mark.asyncio
-async def test_shift_setup_modal_reports_partial_success_for_sheet_save_error() -> None:
+async def test_shift_setup_modal_reports_pre_save_sheet_error() -> None:
     manager = FailingShiftRegisterManager()
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://private.sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -3012,15 +3067,14 @@ async def test_shift_setup_modal_reports_partial_success_for_sheet_save_error() 
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
-    assert manager.anchor_updates == []
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "Some changes may have been saved" in content
+    assert "Some changes may have been saved" not in content
+    assert "Check the Google Sheet link" in content
     assert "Reference: `STG-" in content
     assert_no_private_storage_terms(content)
     assert kwargs == {"ephemeral": True}
-    assert "private.sheet.example" not in str(interaction.followup.messages)
 
 
 @pytest.mark.asyncio
@@ -3033,7 +3087,7 @@ async def test_shift_setup_modal_reports_contract_error_without_partial_success(
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -3045,26 +3099,21 @@ async def test_shift_setup_modal_reports_contract_error_without_partial_success(
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
-    assert manager.anchor_updates == []
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "The configured Google Sheet could not be processed" in content
-    assert "Some changes may have been saved" not in content
-    assert "Reference: `WSC-" in content
+    assert_approved_worksheet_contract_error(content)
     assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
-async def test_shift_setup_modal_reports_partial_success_when_initial_save_fails() -> (
-    None
-):
+async def test_shift_setup_modal_reports_pre_save_database_error() -> None:
     manager = RecordingShiftRegisterManager()
     manager.upsert_error = IntegrityError("private constraint")
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -3074,26 +3123,27 @@ async def test_shift_setup_modal_reports_partial_success_when_initial_save_fails
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
-    assert manager.anchor_updates == []
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "Some changes may have been saved" in content
+    assert "Some changes may have been saved" not in content
+    assert "could not complete this action" in content
     assert "Reference: `STG-" in content
     assert_no_private_storage_terms(content)
     assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio
-async def test_shift_setup_modal_reports_partial_success_when_anchor_save_fails() -> (
-    None
-):
+async def test_shift_setup_modal_reports_manager_partial_success() -> None:
     manager = RecordingShiftRegisterManager()
-    manager.save_error = DBConnectionError("private database host")
+    manager.upsert_error = partial_success_storage_error(
+        DBConnectionError("private database host")
+    )
+    assert manager.upsert_error is not None
     interaction = FakeInteraction()
     modal = ShiftRegisterSheetModal(
         manager,
-        sheet_url="https://sheet.example",
+        sheet_url=SHIFT_SETTINGS_SHEET_URL,
         entry_worksheet_title="Entry",
         draft_worksheet_title="Draft",
         final_schedule_worksheet_title="Final",
@@ -3103,8 +3153,7 @@ async def test_shift_setup_modal_reports_partial_success_when_anchor_save_fails(
     await modal.on_submit(interaction)
 
     assert interaction.response.deferred == [True]
-    assert len(manager.upsert_calls) == 1
-    assert manager.anchor_updates == []
+    assert manager.upsert_calls == []
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
@@ -3400,10 +3449,16 @@ async def test_shift_recruitment_range_modal_submit_updates_range(
 ) -> None:
     manager = RecordingShiftRegisterManager()
     sheet_lock = RecordingAsyncLock()
+    spreadsheet_lock = RecordingAsyncLock()
     monkeypatch.setattr(
         ui_shift_register,
         "SHIFT_REGISTER_SHEET_WRITE_LOCK",
         sheet_lock,
+    )
+    monkeypatch.setattr(
+        shift_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
     )
     interaction = FakeInteraction()
     modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-8, 8-12")
@@ -3413,12 +3468,29 @@ async def test_shift_recruitment_range_modal_submit_updates_range(
     assert interaction.response.deferred == [True]
     assert sheet_lock.keys == [222]
     assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
+    assert spreadsheet_lock.keys == ["shift-settings"]
+    assert (spreadsheet_lock.entered, spreadsheet_lock.exited) == (1, 1)
     assert [ranges.to_json() for ranges in manager.recruitment_range_updates] == [
         [{"start": 4, "end": 12}]
     ]
     assert len(interaction.followup.messages) == 1
     _, kwargs = interaction.followup.messages[0]
     assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_recruitment_contract_error_is_not_partial_success() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.save_error = WorksheetContractError(log_hint="invalid_worksheet_contract")
+    interaction = FakeInteraction()
+    modal = ShiftRecruitmentRangeModal(manager, recruitment_time_range="4-12")
+
+    await modal.on_submit(interaction)
+
+    content, kwargs = interaction.followup.messages[-1]
+    assert content is not None
+    assert_approved_worksheet_contract_error(content)
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio

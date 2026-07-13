@@ -30,8 +30,11 @@ from cogs.shift import Shift
 from cogs.shift_register import ShiftRegister, _format_generate_draft_confirmation
 from cogs.team import Team
 from cogs.team_register import TeamRegister
+from components import ui_shift_register, ui_team_register
 from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
 from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
+from components.ui_shift_register import ShiftRegisterSheetModal
+from components.ui_team_register import TeamRegisterSheetModal
 from models.feature_channel import FeatureChannel
 from models.feature_channel_message_state import (
     FeatureChannelMessageKind,
@@ -44,7 +47,11 @@ from tests.fakes import (
     FakeInteraction,
     MissingConfigManager,
 )
-from utils import team_register_manager as team_register_manager_module
+from utils import (
+    manager_base as manager_base_module,
+    shift_register_manager as shift_register_manager_module,
+    team_register_manager as team_register_manager_module,
+)
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
@@ -253,7 +260,7 @@ def test_format_shift_draft_report_places_team_warning_before_assignments(
 
 
 @pytest.mark.asyncio
-async def test_generate_shift_draft_links_to_draft_worksheet_id(
+async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -266,11 +273,20 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
     metadata = SimpleNamespace(
         sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
         draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+        worksheets=[
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=222),
+            SimpleNamespace(id=3),
+        ],
     )
     ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
     notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
 
     class Manager:
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            events.append("fresh")
+            return config
+
         async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
             events.append("sheet")
             return metadata
@@ -326,7 +342,12 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
 
     @asynccontextmanager
     async def recording_lock(_channel_id: int) -> object:
-        events.append("lock")
+        events.append("channel")
+        yield
+
+    @asynccontextmanager
+    async def recording_spreadsheet_lock(key: str) -> object:
+        events.append(f"spreadsheet:{key}")
         yield
 
     subject = ShiftRegister(fake_bot())
@@ -334,6 +355,11 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
     monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        shift_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        recording_spreadsheet_lock,
+    )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
             id=111,
@@ -343,7 +369,13 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
 
-    assert events[:3] == ["wait", "lock", "sheet"]
+    assert events[:5] == [
+        "wait",
+        "channel",
+        "fresh",
+        "spreadsheet:abc",
+        "sheet",
+    ]
     prompt, prompt_kwargs = interaction.original_response_edits[0]
     assert "`A1:G31`" in prompt
     assert isinstance(prompt_kwargs["view"], ConfirmView)
@@ -364,15 +396,23 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
 
 
 @pytest.mark.asyncio
-async def test_generate_shift_draft_reports_contract_error_without_storage_alias(
+async def test_generate_shift_draft_reports_contract_error_without_storage_alias(  # noqa: C901
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     metadata = SimpleNamespace(
         sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
         draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+        worksheets=[
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=222),
+            SimpleNamespace(id=3),
+        ],
     )
 
     class Manager:
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
         async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
             return metadata
 
@@ -426,10 +466,107 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     assert len(interaction.followup.messages) == 1
     content, kwargs = interaction.followup.messages[0]
     assert content is not None
-    assert "The configured Google Sheet could not be processed" in content
-    assert "Reference: `WSC-" in content
+    assert_worksheet_contract_content(content)
     assert "STG-" not in content
     assert "Some changes may have been saved" not in content
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ids_changed", [False, True])
+async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ids_changed: bool,
+) -> None:
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+        worksheets=[
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=222),
+            SimpleNamespace(id=3),
+        ],
+    )
+    ensured_metadata = SimpleNamespace(
+        sheet_url=metadata.sheet_url,
+        draft_worksheet=DraftWorksheetMetadata(
+            333 if ids_changed else 222,
+            "Shift Draft",
+            None,
+        ),
+        worksheets=[
+            SimpleNamespace(id=1),
+            SimpleNamespace(id=333 if ids_changed else 222),
+            SimpleNamespace(id=3),
+        ],
+    )
+
+    class Manager:
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            _metadata: object,
+        ) -> SimpleNamespace:
+            return ensured_metadata
+
+        async def generate_draft(self, *_args: object, **_kwargs: object) -> None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.TRANSIENT,
+                "private draft failure",
+            )
+
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager(), feature_config=config)
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+            assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    if ids_changed:
+        assert "Some changes may have been saved" in content
+    else:
+        assert "Some changes may have been saved" not in content
+        assert "Google Sheets is temporarily unavailable" in content
     assert kwargs == {"ephemeral": True}
 
 
@@ -494,6 +631,12 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     feature_context_calls = 0
 
     class Manager:
+        def __init__(self, current_config: SimpleNamespace) -> None:
+            self.current_config = current_config
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return self.current_config
+
         async def fetch_google_sheets_metadata(self) -> None:
             msg = "changed destinations must abort before Google Sheets"
             raise AssertionError(msg)
@@ -519,7 +662,11 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     )
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
-        return SimpleNamespace(manager=Manager(), feature_config=next(configs))
+        current_config = next(configs)
+        return SimpleNamespace(
+            manager=Manager(current_config),
+            feature_config=current_config,
+        )
 
     class ConfirmView:
         value = True
@@ -660,6 +807,15 @@ def assert_safe_storage_content(content: str) -> None:
     assert "could not complete this action" in content
     assert "Reference: `STG-" in content
     assert "private database" not in content
+
+
+def assert_worksheet_contract_content(content: str) -> None:
+    assert re.fullmatch(
+        r"⚠️📏 The configured Google Sheet layout needs correction\. Reopen "
+        r"settings, verify the worksheets, and try again\. Reference: "
+        r"`WSC-[0-9a-f]{8}`",
+        content,
+    )
 
 
 def private_database_error() -> DBConnectionError:
@@ -945,17 +1101,68 @@ class DeleteManager(ConfiguredManager):
 
 class IntegratedTeamDeleteManager:
     def __init__(self) -> None:
+        self.feature_channel = SimpleNamespace(channel_id=222)
         self.users: list[UserInfo] = []
         self.current_sheet_url = (
             "https://docs.google.com/spreadsheets/d/current-team-delete/edit"
         )
         self.fresh_sheet_urls: list[str] = []
+        self.metadata = SimpleNamespace(name="fresh_team_delete_metadata")
+        self.events: list[str] = []
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        self.events.append("fresh_config")
         self.fresh_sheet_urls.append(self.current_sheet_url)
         return SimpleNamespace(sheet_url=self.current_sheet_url)
 
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        self.events.append("fetch_metadata")
+        return self.metadata
+
     async def delete_user_registration(self, user: UserInfo) -> None:
+        await self.fetch_google_sheets_metadata()
+        self.events.append("delete")
+        self.users.append(user)
+
+
+class InvalidInitialSettingsManager:
+    def __init__(self) -> None:
+        self.feature_channel = SimpleNamespace(channel_id=222)
+        self.upsert_calls = 0
+
+    async def upsert_sheet_config_and_worksheets(self, **_kwargs: object) -> None:
+        self.upsert_calls += 1
+
+
+class IntegratedShiftDeleteManager:
+    def __init__(self) -> None:
+        self.feature_channel = SimpleNamespace(channel_id=222)
+        self.users: list[UserInfo] = []
+        self.current_sheet_url = (
+            "https://docs.google.com/spreadsheets/d/current-shift-delete/edit"
+        )
+        self.fresh_sheet_urls: list[str] = []
+        self.metadata = SimpleNamespace(name="fresh_shift_delete_metadata")
+        self.events: list[str] = []
+
+    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        self.events.append("fresh_config")
+        self.fresh_sheet_urls.append(self.current_sheet_url)
+        return SimpleNamespace(sheet_url=self.current_sheet_url)
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        self.events.append("fetch_metadata")
+        return self.metadata
+
+    async def upsert_or_delete_user_shift(
+        self,
+        user: UserInfo,
+        shift: None,
+        metadata: object,
+    ) -> None:
+        assert shift is None
+        assert metadata is self.metadata
+        self.events.append("delete")
         self.users.append(user)
 
 
@@ -1035,13 +1242,28 @@ class OrderedShiftUpsertManager(ConfiguredManager):
         *,
         ensure_error: Exception | None = None,
         upsert_error: Exception | None = None,
+        ensure_changes_ids: bool = False,
     ) -> None:
         super().__init__(feature_channel, service_account_path)
         self.events: list[str] = []
-        self.metadata = SimpleNamespace(name="metadata")
-        self.ensured_metadata = SimpleNamespace(name="ensured_metadata")
+        self.metadata = SimpleNamespace(
+            name="metadata",
+            worksheets=[SimpleNamespace(id=1)],
+        )
+        self.ensured_metadata = SimpleNamespace(
+            name="ensured_metadata",
+            worksheets=[SimpleNamespace(id=2 if ensure_changes_ids else 1)],
+        )
         self.ensure_error = ensure_error
         self.upsert_error = upsert_error
+        self.current_sheet_url = (
+            "https://docs.google.com/spreadsheets/d/shift-message/edit"
+        )
+        self.fresh_sheet_urls: list[str] = []
+
+    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        self.fresh_sheet_urls.append(self.current_sheet_url)
+        return SimpleNamespace(sheet_url=self.current_sheet_url)
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
         self.events.append("fetch_metadata")
@@ -1191,6 +1413,9 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
     ):
         method = getattr(FeatureChannelBase, method_name)
         setattr(subject, method_name, method.__get__(subject, type(subject)))
+    if not hasattr(subject, "_delete_user_data_transaction"):
+        method = FeatureChannelUserBase._delete_user_data_transaction
+        subject._delete_user_data_transaction = method.__get__(subject, type(subject))
     return subject
 
 
@@ -2341,8 +2566,7 @@ async def test_context_menu_contract_failure_marks_message_and_responds_safely(
 
     contents = interaction_contents(interaction)
     assert len(contents) == 1
-    assert "The configured Google Sheet could not be processed" in contents[0]
-    assert "Reference: `WSC-" in contents[0]
+    assert_worksheet_contract_content(contents[0])
     assert "private-header" not in contents[0]
     assert "private-header" not in caplog.text
     assert interaction.followup.messages[0][1] == {"ephemeral": True}
@@ -4461,7 +4685,7 @@ async def test_team_summary_google_sheets_failure_sends_safe_storage_followup(
 
 
 @pytest.mark.asyncio
-async def test_team_summary_refresh_failure_reports_partial_success(
+async def test_team_summary_pre_save_database_failure_reports_ordinary_storage_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
@@ -4480,9 +4704,8 @@ async def test_team_summary_refresh_failure_reports_partial_success(
     assert manager is not None
     contents = interaction_contents(interaction)
     assert len(contents) == 1
-    assert "Some changes may have been saved" in contents[0]
-    assert "Reference: `STG-" in contents[0]
-    assert "private database" not in contents[0]
+    assert_safe_storage_content(contents[0])
+    assert "Some changes may have been saved" not in contents[0]
     assert interaction.followup.messages[0][1] == {"ephemeral": True}
 
 
@@ -4592,28 +4815,218 @@ async def test_team_summary_missing_guild_raises_before_defer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_delete_refetches_current_target_inside_existing_channel_lock(
+@pytest.mark.parametrize("feature_name", ["team", "shift"])
+async def test_initial_settings_invalid_url_uses_safe_storage_response_without_locks(
+    monkeypatch: pytest.MonkeyPatch,
+    feature_name: str,
+) -> None:
+    manager = InvalidInitialSettingsManager()
+    channel_lock = RecordingLock()
+    spreadsheet_lock = RecordingLock()
+    monkeypatch.setattr(
+        manager_base_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+    )
+    interaction = FakeInteraction()
+
+    if feature_name == "team":
+        monkeypatch.setattr(
+            ui_team_register,
+            "TEAM_REGISTER_SHEET_WRITE_LOCK",
+            channel_lock,
+        )
+        modal = TeamRegisterSheetModal(
+            manager,
+            sheet_url="not a Google Sheet URL",
+            team_worksheet_titles=["Main Team"],
+            summary_worksheet_title="Team Summary",
+        )
+    else:
+        monkeypatch.setattr(
+            ui_shift_register,
+            "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+            channel_lock,
+        )
+        modal = ShiftRegisterSheetModal(
+            manager,
+            sheet_url="not a Google Sheet URL",
+            entry_worksheet_title="Entry",
+            draft_worksheet_title="Draft",
+            final_schedule_worksheet_title="Final Schedule",
+        )
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.upsert_calls == 0
+    assert channel_lock.keys == []
+    assert spreadsheet_lock.keys == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "Check the Google Sheet link and save the settings again." in content
+    assert "Reference: `STG-" in content
+    assert "Invalid Google Sheet URL" not in content
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
+async def test_team_delete_data_performs_already_locked_manager_delete() -> None:
+    manager = IntegratedTeamDeleteManager()
+    user = UserInfo("alice", "Alice")
+
+    await Team._delete_user_data(
+        SimpleNamespace(),
+        manager,
+        user,
+        manager.metadata,
+    )
+
+    assert manager.events == ["fetch_metadata", "delete"]
+    assert manager.fresh_sheet_urls == []
+    assert manager.users == [user]
+
+
+@pytest.mark.asyncio
+async def test_team_delete_waits_then_fetches_metadata_inside_current_transaction(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = IntegratedTeamDeleteManager()
-    user = UserInfo("alice", "Alice")
-    metadata = SimpleNamespace(
-        sheet_url="https://docs.google.com/spreadsheets/d/stale-team-delete/edit"
-    )
-    spreadsheet_lock = RecordingLock()
+    attempted = asyncio.Event()
+    release = asyncio.Event()
+
+    @asynccontextmanager
+    async def channel_lock(key: object) -> object:
+        assert key == 222
+        manager.events.append("channel_lock")
+        attempted.set()
+        await release.wait()
+        yield
+
+    @asynccontextmanager
+    async def spreadsheet_lock(key: object) -> object:
+        assert key == "switched-team-delete"
+        manager.events.append("spreadsheet_lock")
+        yield
+
     monkeypatch.setattr(
-        "cogs.team.SPREADSHEET_TRANSACTION_LOCK",
+        team_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
         spreadsheet_lock,
     )
-    channel_lock = RecordingLock()
+    subject = Team(fake_bot())
+    subject.FeatureChannelType = SimpleNamespace(sheet_write_lock=channel_lock)
 
-    async with channel_lock(222):
-        await Team._delete_user_data(SimpleNamespace(), manager, user, metadata)
+    async def get_feature_channel_context_or_none(**_kwargs: object) -> object:
+        return object()
 
-    assert channel_lock.keys == [222]
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(channel_id=222, manager=manager)
+
+    subject._get_feature_channel_context_or_none = get_feature_channel_context_or_none
+    subject._get_configured_feature_channel_context = get_configured_context
+    interaction = FakeInteraction(locale="en-US", user_id=333)
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
+
+    task = asyncio.create_task(
+        FeatureChannelUserBase._delete_user_data_after_confirmation(
+            subject,
+            interaction,
+            source,
+        )
+    )
+    await attempted.wait()
+    manager.current_sheet_url = (
+        "https://docs.google.com/spreadsheets/d/switched-team-delete/edit"
+    )
+    release.set()
+    result = await task
+
+    assert manager.events == [
+        "channel_lock",
+        "fresh_config",
+        "spreadsheet_lock",
+        "fetch_metadata",
+        "delete",
+    ]
     assert manager.fresh_sheet_urls == [manager.current_sheet_url]
-    assert spreadsheet_lock.keys == ["current-team-delete"]
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_shift_delete_data_uses_transaction_metadata() -> None:
+    manager = IntegratedShiftDeleteManager()
+    user = UserInfo("alice", "Alice")
+    await Shift._delete_user_data(
+        SimpleNamespace(),
+        manager,
+        user,
+        manager.metadata,
+    )
+
+    assert manager.events == ["delete"]
+    assert manager.fresh_sheet_urls == []
     assert manager.users == [user]
+
+
+@pytest.mark.asyncio
+async def test_shift_delete_fetches_metadata_inside_full_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = IntegratedShiftDeleteManager()
+
+    @asynccontextmanager
+    async def channel_lock(key: object) -> object:
+        assert key == 222
+        manager.events.append("channel_lock")
+        yield
+
+    @asynccontextmanager
+    async def spreadsheet_lock(key: object) -> object:
+        assert key == "current-shift-delete"
+        manager.events.append("spreadsheet_lock")
+        yield
+
+    monkeypatch.setattr(
+        shift_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+    )
+    subject = Shift(fake_bot())
+    subject.FeatureChannelType = SimpleNamespace(sheet_write_lock=channel_lock)
+
+    async def get_feature_channel_context_or_none(**_kwargs: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(channel_id=222, manager=manager)
+
+    subject._get_feature_channel_context_or_none = get_feature_channel_context_or_none
+    subject._get_configured_feature_channel_context = get_configured_context
+    interaction = FakeInteraction(locale="en-US", user_id=333)
+    source = require_guild_channel_source(
+        interaction,
+        action="delete feature user data",
+    )
+
+    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+        subject,
+        interaction,
+        source,
+    )
+
+    assert manager.events == [
+        "channel_lock",
+        "fresh_config",
+        "spreadsheet_lock",
+        "fetch_metadata",
+        "delete",
+    ]
+    assert result is not None
 
 
 @pytest.mark.asyncio
@@ -5183,20 +5596,90 @@ async def test_team_message_waits_then_locks_fresh_spreadsheet_target(
 
 
 @pytest.mark.asyncio
-async def test_team_register_message_upsert_marks_ensure_failure_partial_success() -> (
+async def test_shift_message_waits_then_locks_fresh_spreadsheet_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = ShiftRegister(fake_bot())
+    channel_lock = GatedRecordingLock()
+    spreadsheet_lock = RecordingLock()
+    subject.sheet_write_lock = channel_lock
+    monkeypatch.setattr(
+        shift_register_manager_module,
+        "SPREADSHEET_TRANSACTION_LOCK",
+        spreadsheet_lock,
+        raising=False,
+    )
+    manager = OrderedShiftUpsertManager(object(), "service.json")
+    context = ordered_shift_upsert_context(manager)
+    submission, user_info = shift_register_submission()
+    message = FakeRegisterMessage(content="4-8")
+
+    task = asyncio.create_task(
+        subject._process_configured_message_submission(
+            message,
+            context,
+            submission,
+            user_info,
+        )
+    )
+    await channel_lock.attempted.wait()
+    manager.current_sheet_url = (
+        "https://docs.google.com/spreadsheets/d/fresh-shift-message/edit"
+    )
+    channel_lock.release.set()
+    await task
+
+    assert manager.fresh_sheet_urls == [manager.current_sheet_url]
+    assert spreadsheet_lock.keys == ["fresh-shift-message"]
+
+
+@pytest.mark.asyncio
+async def test_shift_message_validates_with_fresh_recruitment_ranges() -> None:
+    subject = ShiftRegister(fake_bot())
+    manager = OrderedShiftUpsertManager(object(), "service.json")
+
+    async def get_fresh_sheet_config() -> SimpleNamespace:
+        return SimpleNamespace(
+            sheet_url=manager.current_sheet_url,
+            recruitment_time_ranges=[{"start": 10, "end": 12}],
+        )
+
+    manager.get_fresh_sheet_config = get_fresh_sheet_config  # type: ignore[method-assign]
+    context = ordered_shift_upsert_context(manager)
+    submission, user_info = shift_register_submission()
+    message = FakeRegisterMessage(content="4-8")
+
+    result = await subject._process_configured_message_submission(
+        message,
+        context,
+        submission,
+        user_info,
+    )
+
+    assert result is None
+    assert manager.events == []
+    assert message.reaction_events == [
+        ("add", config.WARNING_EMOJI),
+        ("add", config.CONFUSED_EMOJI),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_team_register_message_upsert_preserves_pre_success_database_error() -> (
     None
 ):
     subject = TeamRegister(fake_bot())
+    raw_error = private_database_error()
     manager = OrderedTeamUpsertManager(
         object(),
         "service.json",
-        ensure_error=private_database_error(),
+        ensure_error=raw_error,
     )
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
     message = FakeRegisterMessage(content="150/740/33")
 
-    with pytest.raises(StorageError) as exc_info:
+    with pytest.raises(DBConnectionError) as exc_info:
         await subject._process_configured_message_submission(
             message,
             context,
@@ -5204,15 +5687,12 @@ async def test_team_register_message_upsert_marks_ensure_failure_partial_success
             user_info,
         )
 
-    error = exc_info.value
     assert manager.events == ["upsert"]
-    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
-    assert isinstance(error.__cause__, StorageError)
-    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+    assert exc_info.value is raw_error
 
 
 @pytest.mark.asyncio
-async def test_team_register_message_upsert_marks_team_failure_partial_success() -> (
+async def test_team_register_message_upsert_preserves_classified_storage_error() -> (
     None
 ):
     error = StorageError(
@@ -5234,26 +5714,24 @@ async def test_team_register_message_upsert_marks_team_failure_partial_success()
 
     raised_error = exc_info.value
     assert manager.events == ["upsert"]
-    assert raised_error.kind is StorageErrorKind.PARTIAL_SUCCESS
-    assert isinstance(raised_error.__cause__, StorageError)
-    assert raised_error.__cause__.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+    assert raised_error is error
+    assert raised_error.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
 
 
 @pytest.mark.asyncio
-async def test_team_register_message_upsert_marks_summary_failure_partial_success() -> (
-    None
-):
+async def test_team_register_message_upsert_preserves_summary_database_error() -> None:
     subject = TeamRegister(fake_bot())
+    raw_error = private_database_error()
     manager = OrderedTeamUpsertManager(
         object(),
         "service.json",
-        summary_error=private_database_error(),
+        summary_error=raw_error,
     )
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
     message = FakeRegisterMessage(content="150/740/33")
 
-    with pytest.raises(StorageError) as exc_info:
+    with pytest.raises(DBConnectionError) as exc_info:
         await subject._process_configured_message_submission(
             message,
             context,
@@ -5261,28 +5739,26 @@ async def test_team_register_message_upsert_marks_summary_failure_partial_succes
             user_info,
         )
 
-    error = exc_info.value
     assert manager.events == ["upsert"]
-    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
-    assert isinstance(error.__cause__, StorageError)
-    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+    assert exc_info.value is raw_error
 
 
 @pytest.mark.asyncio
-async def test_shift_register_message_upsert_marks_ensure_failure_partial_success() -> (
+async def test_shift_register_message_upsert_preserves_pre_success_database_error() -> (
     None
 ):
     subject = ShiftRegister(fake_bot())
+    raw_error = private_database_error()
     manager = OrderedShiftUpsertManager(
         object(),
         "service.json",
-        ensure_error=private_database_error(),
+        ensure_error=raw_error,
     )
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
     message = FakeRegisterMessage(content="4-8")
 
-    with pytest.raises(StorageError) as exc_info:
+    with pytest.raises(DBConnectionError) as exc_info:
         await subject._process_configured_message_submission(
             message,
             context,
@@ -5290,23 +5766,23 @@ async def test_shift_register_message_upsert_marks_ensure_failure_partial_succes
             user_info,
         )
 
-    error = exc_info.value
     assert manager.events == ["fetch_metadata", "log_missing", "ensure"]
-    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
-    assert isinstance(error.__cause__, StorageError)
-    assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+    assert exc_info.value is raw_error
 
 
 @pytest.mark.asyncio
-async def test_shift_register_message_upsert_marks_entry_failure_partial_success() -> (
-    None
-):
+@pytest.mark.parametrize("ids_changed", [False, True])
+async def test_shift_register_message_upsert_failure_uses_actual_id_change(
+    *,
+    ids_changed: bool,
+) -> None:
     raw_error = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
     subject = ShiftRegister(fake_bot())
     manager = OrderedShiftUpsertManager(
         object(),
         "service.json",
         upsert_error=raw_error,
+        ensure_changes_ids=ids_changed,
     )
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
@@ -5320,11 +5796,14 @@ async def test_shift_register_message_upsert_marks_entry_failure_partial_success
             user_info,
         )
 
-    error = exc_info.value
     assert manager.events == ["fetch_metadata", "log_missing", "ensure", "upsert"]
-    assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
-    assert isinstance(error.__cause__, StorageError)
-    assert error.__cause__.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+    error = exc_info.value
+    if ids_changed:
+        assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
+        assert isinstance(error.__cause__, StorageError)
+        assert error.__cause__.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+    else:
+        assert error is raw_error
 
 
 @pytest.mark.asyncio

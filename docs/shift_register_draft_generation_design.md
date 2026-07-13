@@ -384,21 +384,21 @@ Summary spill when Team Source is unavailable.
 
 Candidate and lookup formulas import the exact Team Summary width resolved at
 generation. Existing values remain live; Team Summary schema-width changes require
-regeneration. The implementation relies on Google Sheets' native array spill to
-expand into empty cells and add columns as needed; it does not pre-size the grid or
-reserve speculative participant capacity. Writing an anchor formula does not clear
-other cells. User-entered blockers in a spill path are intentionally preserved so
-Sheets displays `#REF!` rather than silently deleting them. Regeneration replaces
+regeneration. The atomic Draft request grows only the explicit bot footprint through
+row 38 and column `M`; it does not reserve speculative participant capacity for the
+unbounded-right candidate spill. Writing an anchor formula does not clear other
+cells. User-entered blockers in a spill path are intentionally preserved so Sheets
+displays `#REF!` rather than silently deleting them. Regeneration replaces
 `I1`, clears only a signed old threshold control and the exact old lookup
 labels/input/formula anchors and their bot-owned formatting, and writes the new
 controls. Cleanup covers both the
 legacy Team Summary anchor directly below `シフト元メッセージ` and the new
 `編成一覧` plus shifted Team Summary anchor. Removing an old array anchor lets
 Sheets remove its calculated spill output while preserving unrelated user values.
-A live API-generated spill beyond the current last column is part of manual
-validation. Add `ensure_size()` only if that validation demonstrates that
-API-written formulas do not receive the same native expansion as formulas entered
-in the web UI.
+A live API-generated spill beyond column `M` remains part of manual validation. If
+the API-written formula cannot expand as the web UI does, any later fallback must
+preserve unknown spill cells and join the same atomic request rather than resizing
+or clearing speculative capacity separately.
 
 The old lookup cells are treated as bot-owned only when the three expected labels
 `名前を貼り付け`, `シフト時間`, and `シフト元メッセージ` appear at either the

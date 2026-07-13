@@ -25,8 +25,14 @@ from utils.reactions import add_reaction_if_possible, transition_processing_reac
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     ShiftRegisterManager,
+    fresh_shift_spreadsheet_transaction,
 )
-from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
+from utils.shift_register_structs import (
+    RecruitmentTimeRanges,
+    Shift,
+    ShiftParser,
+    ShiftRegisterGoogleSheetsMetadata,
+)
 from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
     render_shift_timeline_announcement_messages,
@@ -37,7 +43,7 @@ from utils.shift_scheduler import (
     STANDBY_SUPPORTER_SLOT,
     hour_label,
 )
-from utils.storage_errors import partial_success_storage_error
+from utils.storage_errors import StorageError, partial_success_storage_error
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -54,6 +60,22 @@ if TYPE_CHECKING:
 
 def _format_display_name(name: str) -> str:
     return escape_markdown(name) if "`" in name else f"`{name}`"
+
+
+def _ordered_worksheet_ids(
+    metadata: ShiftRegisterGoogleSheetsMetadata,
+) -> tuple[int | None, ...]:
+    return tuple(worksheet.id for worksheet in metadata.worksheets)
+
+
+def _partial_success_after_worksheet_id_change(
+    exc: Exception,
+    previous_ids: tuple[int | None, ...],
+    metadata: ShiftRegisterGoogleSheetsMetadata,
+) -> StorageError | None:
+    if _ordered_worksheet_ids(metadata) == previous_ids:
+        return None
+    return partial_success_storage_error(exc)
 
 
 def _format_generate_draft_confirmation(
@@ -226,19 +248,11 @@ class ShiftRegister(
         user_info: UserInfo,
     ) -> Shift | None:
         shift = submission
-        recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(context.feature_config, "recruitment_time_ranges", None)
-        )
-        if not recruitment_ranges.contains_slots(set(shift)):
-            await self._add_invalid_registration_reactions(message)
-            return None
-
         return await self._write_shift_registration(
             message,
             user_info,
             shift,
             context.manager,
-            recruitment_ranges,
         )
 
     async def _write_shift_registration(
@@ -247,46 +261,64 @@ class ShiftRegister(
         user_info: UserInfo,
         shift: Shift,
         manager: ShiftRegisterManager,
-        recruitment_ranges: RecruitmentTimeRanges,
-    ) -> Shift:
-        self.logger.info(
-            (
-                "Parsed Shift Register submission. operation=shift_register_parse "
-                "feature=%s guild=%s channel=%s message=%s slots=%s"
-            ),
-            self.feature_name,
-            message.guild.id,
-            message.channel.id,
-            message.id,
-            len(set(shift)),
-        )
-
-        if self.bot.user is not None:
-            await add_reaction_if_possible(
-                message,
-                config.PROCESSING_EMOJI,
-                log=self.logger,
+    ) -> Shift | None:
+        invalid = False
+        async with fresh_shift_spreadsheet_transaction(
+            manager,
+            self.sheet_write_lock,
+            channel_id=message.channel.id,
+        ) as fresh_config:
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                getattr(fresh_config, "recruitment_time_ranges", None)
             )
+            invalid = not recruitment_ranges.contains_slots(set(shift))
+            if not invalid:
+                self.logger.info(
+                    (
+                        "Parsed Shift Register submission. "
+                        "operation=shift_register_parse feature=%s guild=%s "
+                        "channel=%s message=%s slots=%s"
+                    ),
+                    self.feature_name,
+                    message.guild.id,
+                    message.channel.id,
+                    message.id,
+                    len(set(shift)),
+                )
+                if self.bot.user is not None:
+                    await add_reaction_if_possible(
+                        message,
+                        config.PROCESSING_EMOJI,
+                        log=self.logger,
+                    )
 
-        async with self.sheet_write_lock(message.channel.id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            manager.log_missing_worksheet_warnings(metadata)
+                metadata = await manager.fetch_google_sheets_metadata()
+                manager.log_missing_worksheet_warnings(metadata)
 
-            try:
+                previous_ids = _ordered_worksheet_ids(metadata)
                 metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
                     metadata
                 )
-                await manager.upsert_or_delete_user_shift(
-                    user_info,
-                    shift,
-                    metadata=metadata,
-                    recruitment_ranges=recruitment_ranges,
-                )
-            except Exception as exc:
-                error = partial_success_storage_error(exc)
-                if error is None:
-                    raise
-                raise error from error.__cause__
+                try:
+                    await manager.upsert_or_delete_user_shift(
+                        user_info,
+                        shift,
+                        metadata=metadata,
+                        recruitment_ranges=recruitment_ranges,
+                    )
+                except Exception as exc:
+                    error = _partial_success_after_worksheet_id_change(
+                        exc,
+                        previous_ids,
+                        metadata,
+                    )
+                    if error is None:
+                        raise
+                    raise error from error.__cause__
+
+        if invalid:
+            await self._add_invalid_registration_reactions(message)
+            return None
 
         await transition_processing_reaction(
             message,
@@ -470,42 +502,57 @@ class ShiftRegister(
             if context is None:
                 await self._send_missing_config_followup(interaction)
                 return
-            fresh_ranges = RecruitmentTimeRanges.from_json(
-                context.feature_config.recruitment_time_ranges
-            )
-            fresh_draft_sheet_url = google_sheet_url_with_gid(
-                context.feature_config.sheet_url,
-                context.feature_config.draft_worksheet_id,
-            )
-            if (
-                _format_generate_draft_confirmation(
-                    fresh_ranges,
-                    fresh_draft_sheet_url,
+            async with fresh_shift_spreadsheet_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ) as fresh_config:
+                fresh_ranges = RecruitmentTimeRanges.from_json(
+                    fresh_config.recruitment_time_ranges
                 )
-                != confirmation_content
-            ):
-                await interaction.edit_original_response(
-                    content=(
-                        "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
-                        "請重新執行 command。"
-                    ),
-                    view=None,
+                fresh_draft_sheet_url = google_sheet_url_with_gid(
+                    fresh_config.sheet_url,
+                    fresh_config.draft_worksheet_id,
                 )
-                return
+                if (
+                    _format_generate_draft_confirmation(
+                        fresh_ranges,
+                        fresh_draft_sheet_url,
+                    )
+                    != confirmation_content
+                ):
+                    await interaction.edit_original_response(
+                        content=(
+                            "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
+                            "請重新執行 command。"
+                        ),
+                        view=None,
+                    )
+                    return
 
-            async with self.sheet_write_lock(source.channel.id):
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
+                previous_ids = _ordered_worksheet_ids(metadata)
                 metadata = (
                     await context.manager.ensure_worksheets_and_upsert_sheet_config(
                         metadata
                     )
                 )
-                result = await context.manager.generate_draft(
-                    metadata,
-                    encore_power_threshold=float(encore_power_threshold),
-                    runner=runner,
-                )
+                try:
+                    result = await context.manager.generate_draft(
+                        metadata,
+                        encore_power_threshold=float(encore_power_threshold),
+                        runner=runner,
+                    )
+                except Exception as exc:
+                    error = _partial_success_after_worksheet_id_change(
+                        exc,
+                        previous_ids,
+                        metadata,
+                    )
+                    if error is None:
+                        raise
+                    raise error from error.__cause__
                 schedule = result.schedule
                 draft_sheet_url = google_sheet_url_with_gid(
                     metadata.sheet_url,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
@@ -8,12 +9,13 @@ from typing import TYPE_CHECKING, overload, override
 
 from models.feature_channel import FeatureChannel
 from models.team_register import TeamRegisterConfig
-from utils.google_sheets import BORDER_NAMES, GoogleSheet
+from utils.google_sheets import BORDER_NAMES, GoogleSheet, WorksheetCreationStatus
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.structs_base import validate_anchor_cell
+from utils.structs_base import WorksheetContractError, validate_anchor_cell
 from utils.team_register_structs import Summary, TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Hashable
     from datetime import date, datetime
 
     from utils.google_sheets import AsyncioGspreadWorksheet
@@ -21,8 +23,14 @@ if TYPE_CHECKING:
     from utils.structs_base import UserInfo
 
 from models.shift_register import ShiftRegisterConfig
+from utils.google_sheets_urls import normalize_google_sheet_url
 from utils.key_async_lock import KeyAsyncLock
-from utils.manager_base import ManagerBase
+from utils.manager_base import (
+    SPREADSHEET_TRANSACTION_LOCK,
+    ManagerBase,
+    SheetConfigNotFoundError,
+    spreadsheet_transaction_key,
+)
 from utils.shift_register_structs import (
     DraftNotesTeamSource,
     DraftWorksheetContent,
@@ -41,11 +49,32 @@ from utils.storage_errors import (
     partial_success_storage_error,
 )
 
-ENTRY_READ_RANGES = ["1:2", "A3:C"]
 SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
 OUTER_BORDER_SIDES = ("top", "bottom", "left", "right")
 ENTRY_RULE_MARKER = "rhoboto:shift-entry:"
 DRAFT_CANDIDATE_RULE_MARKER = "rhoboto:shift-draft:candidate:"
+ENTRY_IDENTITY_LAST_COLUMN = 3
+ENTRY_AVAILABILITY_FIRST_COLUMN = 6
+DRAFT_THRESHOLD_COLUMN = 9
+DRAFT_LOOKUP_COLUMN = 10
+
+
+@asynccontextmanager
+async def fresh_shift_spreadsheet_transaction(
+    manager: ShiftRegisterManager,
+    feature_channel_lock: KeyAsyncLock,
+    *,
+    channel_id: Hashable,
+) -> AsyncIterator[ShiftRegisterConfig]:
+    """Lock the Shift channel, refresh config, then lock its current Sheet."""
+    async with feature_channel_lock(channel_id):
+        config = await manager.get_fresh_sheet_config()
+        if config is None:
+            raise SheetConfigNotFoundError(manager.feature_channel)
+        async with SPREADSHEET_TRANSACTION_LOCK(
+            spreadsheet_transaction_key(config.sheet_url)
+        ):
+            yield config
 
 
 class TeamSourceStatus(StrEnum):
@@ -275,15 +304,10 @@ class ShiftRegisterManager(
                 GoogleSheetsErrorKind.MISSING_WORKSHEET,
                 "Repair the Shift Register worksheet settings.",
             )
-        try:
-            _layout, _values, participants = await _read_entry_state(worksheet)
-        except ValueError as exc:
-            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-            error.__cause__ = exc
-            raise error from exc
+        _layout, _values, participants = await _read_entry_state(worksheet)
 
         updates: list[dict[str, object]] = []
-        for row, username, current_formula in participants:
+        for row, username, current_formula, _reusable in participants:
             if not username:
                 continue
             expected_formula = _entry_team_formula(row, resolution)
@@ -306,13 +330,20 @@ class ShiftRegisterManager(
         if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
             return resolution
 
+        metadata = await self.fetch_google_sheets_metadata()
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        await _read_entry_state(worksheet)
         config = await self.get_sheet_config()
         config.team_source_feature_channel_id = source.config.feature_channel.id
         await config.save(
             update_fields=["team_source_feature_channel_id", "updated_at"]
         )
         try:
-            metadata = await self.fetch_google_sheets_metadata()
             await self.repair_team_references(metadata, resolution)
         except Exception as exc:
             partial = partial_success_storage_error(exc)
@@ -354,6 +385,10 @@ class ShiftRegisterManager(
             metadata.team_worksheets[1] if len(metadata.team_worksheets) > 1 else None
         )
         try:
+            terminal_column = _unique_header_column(
+                header,
+                Summary.original_message_title(),
+            )
             columns = TeamSummaryColumns(
                 username=_unique_header_column(header, "username"),
                 roles=_unique_header_column(header, "encore_roles"),
@@ -381,9 +416,21 @@ class ShiftRegisterManager(
                     if encore_worksheet is not None
                     else None
                 ),
-                import_last_column=column_letter(len(header)),
+                import_last_column=column_letter(terminal_column),
             )
         except ValueError:
+            return TeamSourceResolution(TeamSourceStatus.INVALID)
+        if any(
+            column is not None and column > terminal_column
+            for column in (
+                columns.username,
+                columns.roles,
+                columns.main_isv,
+                columns.main_power,
+                columns.encore_isv,
+                columns.encore_power,
+            )
+        ):
             return TeamSourceResolution(TeamSourceStatus.INVALID)
 
         return TeamSourceResolution(
@@ -409,6 +456,7 @@ class ShiftRegisterManager(
         entry_worksheet_title: str,
         draft_worksheet_title: str,
         final_schedule_worksheet_title: str,
+        final_schedule_anchor_cell: str | None = None,
     ) -> ShiftRegisterGoogleSheetsMetadata: ...
     @override
     async def upsert_sheet_config_and_worksheets(
@@ -419,48 +467,70 @@ class ShiftRegisterManager(
         entry_worksheet_title: str | None = None,
         draft_worksheet_title: str | None = None,
         final_schedule_worksheet_title: str | None = None,
+        final_schedule_anchor_cell: str | None = None,
     ) -> ShiftRegisterGoogleSheetsMetadata:
         worksheet_titles = worksheet_titles or []
-        if (
-            entry_worksheet_title
-            and draft_worksheet_title
-            and final_schedule_worksheet_title
-        ):
-            worksheet_titles = [
+        if any(
+            title is not None
+            for title in (
                 entry_worksheet_title,
                 draft_worksheet_title,
                 final_schedule_worksheet_title,
+            )
+        ):
+            worksheet_titles = [
+                entry_worksheet_title or "",
+                draft_worksheet_title or "",
+                final_schedule_worksheet_title or "",
             ]
         expected = self.GoogleSheetsMetadataType.WORKSHEET_METADATA_TYPES
-        if len(worksheet_titles) != len(expected):
-            msg = (
-                f"Expected {len(expected)} worksheet titles "
-                "(entry_worksheet_title, "
-                "draft_worksheet_title, "
-                "final_schedule_worksheet_title), "
-                f"but got {len(worksheet_titles)}: {worksheet_titles!r}"
+        if (
+            len(worksheet_titles) != len(expected)
+            or any(not title.strip() for title in worksheet_titles)
+            or len(set(worksheet_titles)) != len(worksheet_titles)
+        ):
+            raise WorksheetContractError(log_hint="invalid_worksheet_titles")
+        sheet_url = normalize_google_sheet_url(sheet_url)
+        self._google_sheet = GoogleSheet(sheet_url, self.service_account_path)
+        creation_status = WorksheetCreationStatus()
+        config_saved = False
+        try:
+            entry_title, draft_title, final_title = worksheet_titles
+            entry_mapping = await self._google_sheet.get_or_create_worksheets(
+                [entry_title],
+                creation_status=creation_status,
             )
-            raise ValueError(msg)
-        metadata = await super().upsert_sheet_config_and_worksheets(
-            sheet_url, worksheet_titles
-        )
-        config = await self.get_sheet_config()
-        ranges = RecruitmentTimeRanges.from_json(config.recruitment_time_ranges)
-        await self.sync_entry_presentation(metadata, ranges, force=True)
+            await _read_entry_state(entry_mapping[entry_title])
+            remaining_mapping = await self._google_sheet.get_or_create_worksheets(
+                [draft_title, final_title],
+                creation_status=creation_status,
+            )
+            metadata = self.GoogleSheetsMetadataType.from_title_mapping(
+                sheet_url,
+                {**entry_mapping, **remaining_mapping},
+            )
+            if final_schedule_anchor_cell is None:
+                await self.upsert_sheet_config(metadata)
+            else:
+                await self.upsert_sheet_config(
+                    metadata,
+                    extra_defaults={
+                        "final_schedule_anchor_cell": validate_anchor_cell(
+                            final_schedule_anchor_cell
+                        )
+                    },
+                )
+            config_saved = True
+            config = await self.get_sheet_config()
+            ranges = RecruitmentTimeRanges.from_json(config.recruitment_time_ranges)
+            await self.sync_entry_presentation(metadata, ranges, force=True)
+        except Exception as exc:
+            if creation_status.created or config_saved:
+                partial = partial_success_storage_error(exc)
+                if partial is not None:
+                    raise partial from partial.__cause__
+            raise
         return metadata
-
-    async def update_final_schedule_anchor_cell(self, anchor_cell: str) -> None:
-        """
-        Update the anchor cell for the final schedule worksheet in the
-        ShiftRegister database record.
-
-        Args:
-            anchor_cell (str): The anchor cell string (e.g., "A1").
-        """
-        anchor_cell = validate_anchor_cell(anchor_cell)
-        shift_register_config = await self.get_sheet_config()
-        shift_register_config.final_schedule_anchor_cell = anchor_cell
-        await shift_register_config.save()
 
     async def update_timeline(
         self,
@@ -492,13 +562,20 @@ class ShiftRegisterManager(
         self,
         ranges: RecruitmentTimeRanges,
     ) -> None:
+        metadata = await self.fetch_google_sheets_metadata()
+        worksheet = metadata.entry_worksheets.worksheet
+        if worksheet is None:
+            raise GoogleSheetsError(
+                GoogleSheetsErrorKind.MISSING_WORKSHEET,
+                "Repair the Shift Register worksheet settings.",
+            )
+        await _read_entry_state(worksheet)
         shift_register_config = await self.get_sheet_config()
         shift_register_config.recruitment_time_ranges = ranges.to_json()
         await shift_register_config.save(
             update_fields=["recruitment_time_ranges", "updated_at"]
         )
         try:
-            metadata = await self.fetch_google_sheets_metadata()
             await self.sync_entry_presentation(metadata, ranges, force=True)
         except Exception as exc:
             partial = partial_success_storage_error(exc)
@@ -520,12 +597,9 @@ class ShiftRegisterManager(
                 GoogleSheetsErrorKind.MISSING_WORKSHEET,
                 "Repair the Shift Register worksheet settings.",
             )
-        try:
-            layout_updates, _participant_values = await _read_entry_layout(worksheet)
-        except ValueError as exc:
-            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-            error.__cause__ = exc
-            raise error from exc
+        layout_updates, _identity_rows, _participants = await _read_entry_state(
+            worksheet
+        )
 
         presentation = _entry_presentation_plan(ranges, worksheet_id=worksheet.id)
         current_rules = await worksheet.get_conditional_format_rules()
@@ -535,16 +609,12 @@ class ShiftRegisterManager(
         )
         if presentation_is_current and not force and not layout_updates:
             return
-        await worksheet.ensure_size(
-            min_rows=EntryWorksheetContent.FIRST_DATA_ROW,
-            min_cols=EntryWorksheetContent.COLUMN_COUNT,
-        )
         await worksheet.batch_update_typed_values(
             layout_updates,
             formula_ranges={
                 str(item["range"])
                 for item in layout_updates
-                if item["range"] == "A1:AJ1"
+                if item["range"] == "F1:AI1"
             },
             border_updates=presentation.border_updates,
             format_updates=presentation.format_updates,
@@ -553,6 +623,8 @@ class ShiftRegisterManager(
             conditional_format_rule_deletes=rule_deletes,
             conditional_format_rule_adds=rule_adds,
             frozen_column_count=presentation.frozen_column_count,
+            min_rows=EntryWorksheetContent.FIRST_DATA_ROW,
+            min_cols=EntryWorksheetContent.COLUMN_COUNT,
         )
 
     async def upsert_or_delete_user_shift(
@@ -573,20 +645,15 @@ class ShiftRegisterManager(
             )
             return
 
-        try:
-            layout_updates, participant_values, participants = await _read_entry_state(
-                worksheet
-            )
-        except ValueError as exc:
-            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-            error.__cause__ = exc
-            raise error from exc
+        layout_updates, participant_values, participants = await _read_entry_state(
+            worksheet
+        )
 
         if shift is None:
             matched = next(
                 (
                     row
-                    for row, username, _formula in participants
+                    for row, username, _formula, _reusable in participants
                     if username == user.username
                 ),
                 None,
@@ -604,20 +671,22 @@ class ShiftRegisterManager(
         matched = next(
             (
                 row
-                for row, username, _formula in participants
+                for row, username, _formula, _reusable in participants
                 if username == user.username
             ),
             None,
         )
         target_row = matched or next(
-            (row for row, username, _formula in participants if not username),
+            (row for row, _username, _formula, reusable in participants if reusable),
             EntryWorksheetContent.FIRST_DATA_ROW + len(participant_values),
         )
-        current_formulas = {row: formula for row, _username, formula in participants}
+        current_formulas = {
+            row: formula for row, _username, formula, _reusable in participants
+        }
         resolution = await self.resolve_team_source()
 
         updates = list(layout_updates)
-        for row, username, current_formula in participants:
+        for row, username, current_formula, _reusable in participants:
             if not username or row == target_row:
                 continue
             expected_formula = _entry_team_formula(row, resolution)
@@ -652,14 +721,10 @@ class ShiftRegisterManager(
             presentation.conditional_format_rules,
         )
 
-        await worksheet.ensure_size(
-            min_rows=max(target_row, EntryWorksheetContent.FIRST_DATA_ROW),
-            min_cols=EntryWorksheetContent.COLUMN_COUNT,
-        )
         formula_ranges = {
             str(item["range"])
             for item in updates
-            if item["range"] == "A1:AJ1" or str(item["range"]).startswith("C")
+            if item["range"] == "F1:AI1" or str(item["range"]).startswith("C")
         }
         await worksheet.batch_update_typed_values(
             updates,
@@ -681,6 +746,8 @@ class ShiftRegisterManager(
             frozen_column_count=(
                 None if presentation_is_current else presentation.frozen_column_count
             ),
+            min_rows=max(target_row, EntryWorksheetContent.FIRST_DATA_ROW),
+            min_cols=EntryWorksheetContent.COLUMN_COUNT,
         )
 
         self.logger.info(
@@ -689,7 +756,7 @@ class ShiftRegisterManager(
             worksheet.title,
         )
 
-    async def generate_draft(  # noqa: PLR0915
+    async def generate_draft(
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
@@ -702,27 +769,27 @@ class ShiftRegisterManager(
         if entry_worksheet is None or draft_worksheet is None:
             raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
 
-        try:
-            (
-                header_rows,
-                identity_rows,
-                availability_rows,
-            ) = await entry_worksheet.batch_get_values(["2:2", "A3:B", "F3:AJ"])
-            shifts = EntryWorksheetContent.shifts_from_ranges(
-                header_rows,
-                identity_rows,
-                availability_rows,
-            )
-        except ValueError as exc:
-            error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-            error.__cause__ = exc
-            raise error from exc
+        (
+            _layout_updates,
+            header_rows,
+            identity_rows,
+            availability_rows,
+        ) = await _read_entry_layout(entry_worksheet)
+        header_row = _padded_row(
+            header_rows[1] if len(header_rows) > 1 else [],
+            EntryWorksheetContent.COLUMN_COUNT,
+        )
+        shifts = EntryWorksheetContent.shifts_from_ranges(
+            [header_row] if any(not _is_blank(value) for value in header_row) else [],
+            identity_rows,
+            availability_rows,
+        )
 
         (
             old_axis_rows,
             old_threshold_labels,
             old_lookup_labels,
-        ) = await draft_worksheet.batch_get_values(["A1:A33", "I1:I32", "J1:J37"])
+        ) = await _read_draft_control_state(draft_worksheet)
         old_last_row = _old_draft_last_row(old_axis_rows)
         old_notes_row = _old_notes_row(
             old_last_row=old_last_row,
@@ -884,6 +951,8 @@ class ShiftRegisterManager(
             conditional_format_rule_deletes=candidate_rule_deletes,
             conditional_format_rule_adds=tuple(reversed(candidate_rules)),
             frozen_column_count=1,
+            min_rows=DraftWorksheetContent.EXPLICIT_FOOTPRINT_LAST_ROW,
+            min_cols=DraftWorksheetContent.EXPLICIT_FOOTPRINT_COLUMN_COUNT,
         )
         self.logger.info(
             "Generated shift draft in worksheet `%s`: %d hours, %d seats short.",
@@ -1371,94 +1440,167 @@ async def _read_entry_state(
 ) -> tuple[
     list[dict[str, object]],
     list[list[object]],
-    list[tuple[int, str, str]],
+    list[tuple[int, str, str, bool]],
 ]:
-    layout_updates, participant_values = await _read_entry_layout(worksheet)
+    (
+        layout_updates,
+        _header_rows,
+        identity_rows,
+        availability_rows,
+    ) = await _read_entry_layout(worksheet)
     return (
         layout_updates,
-        participant_values,
-        _entry_participants(participant_values),
+        identity_rows,
+        _entry_participants(identity_rows, availability_rows),
     )
 
 
 async def _read_entry_layout(
     worksheet: AsyncioGspreadWorksheet,
-) -> tuple[list[dict[str, object]], list[list[object]]]:
-    range_values = await worksheet.batch_get_values(ENTRY_READ_RANGES)
-    if len(range_values) != len(ENTRY_READ_RANGES):
-        msg = "Shift Entry batch read did not return both requested ranges."
-        raise ValueError(msg)
-    header_rows, participant_values = range_values
-    return _entry_layout_updates(header_rows, participant_values), participant_values
+) -> tuple[
+    list[dict[str, object]],
+    list[list[object]],
+    list[list[object]],
+    list[list[object]],
+]:
+    ranges: list[tuple[int, str]] = []
+    if worksheet.row_count >= 1 and worksheet.col_count >= 1:
+        header_last_column = column_letter(
+            min(worksheet.col_count, EntryWorksheetContent.COLUMN_COUNT)
+        )
+        ranges.append((0, f"A1:{header_last_column}{min(worksheet.row_count, 2)}"))
+    if worksheet.row_count >= EntryWorksheetContent.FIRST_DATA_ROW:
+        if worksheet.col_count >= 1:
+            identity_last_column = column_letter(
+                min(worksheet.col_count, ENTRY_IDENTITY_LAST_COLUMN)
+            )
+            ranges.append((1, f"A3:{identity_last_column}"))
+        if worksheet.col_count >= ENTRY_AVAILABILITY_FIRST_COLUMN:
+            availability_last_column = column_letter(
+                min(worksheet.col_count, EntryWorksheetContent.COLUMN_COUNT)
+            )
+            ranges.append((2, f"F3:{availability_last_column}"))
+    header_rows, identity_rows, availability_rows = await _batch_get_optional_ranges(
+        worksheet,
+        ranges,
+        result_count=3,
+    )
+    row_count = max(len(identity_rows), len(availability_rows))
+    identity_rows = [*identity_rows, *([[]] * (row_count - len(identity_rows)))]
+    availability_rows = [
+        *availability_rows,
+        *([[]] * (row_count - len(availability_rows))),
+    ]
+    return (
+        _entry_layout_updates(header_rows, identity_rows, availability_rows),
+        header_rows,
+        identity_rows,
+        availability_rows,
+    )
+
+
+async def _read_draft_control_state(
+    worksheet: AsyncioGspreadWorksheet,
+) -> tuple[list[list[object]], list[list[object]], list[list[object]]]:
+    ranges: list[tuple[int, str]] = []
+    if worksheet.row_count >= 1 and worksheet.col_count >= 1:
+        ranges.append((0, f"A1:A{min(worksheet.row_count, 33)}"))
+    if worksheet.row_count >= 1 and worksheet.col_count >= DRAFT_THRESHOLD_COLUMN:
+        ranges.append((1, f"I1:I{min(worksheet.row_count, 32)}"))
+    if worksheet.row_count >= 1 and worksheet.col_count >= DRAFT_LOOKUP_COLUMN:
+        ranges.append((2, f"J1:J{min(worksheet.row_count, 37)}"))
+    axis_rows, threshold_labels, lookup_labels = await _batch_get_optional_ranges(
+        worksheet,
+        ranges,
+        result_count=3,
+    )
+    return axis_rows, threshold_labels, lookup_labels
+
+
+async def _batch_get_optional_ranges(
+    worksheet: AsyncioGspreadWorksheet,
+    indexed_ranges: list[tuple[int, str]],
+    *,
+    result_count: int,
+) -> list[list[list[object]]]:
+    results: list[list[list[object]]] = [[] for _ in range(result_count)]
+    if not indexed_ranges:
+        return results
+    range_values = await worksheet.batch_get_values(
+        [range_name for _, range_name in indexed_ranges]
+    )
+    if len(range_values) != len(indexed_ranges):
+        raise WorksheetContractError
+    for (result_index, _), values in zip(
+        indexed_ranges,
+        range_values,
+        strict=True,
+    ):
+        results[result_index] = values
+    return results
 
 
 def _entry_layout_updates(
     header_rows: list[list[object]],
-    participant_rows: list[list[object]],
+    identity_rows: list[list[object]],
+    availability_rows: list[list[object]],
 ) -> list[dict[str, object]]:
     count_row = _padded_row(header_rows[0] if header_rows else [], 36)
     header_row = _padded_row(header_rows[1] if len(header_rows) > 1 else [], 36)
     expected_count = EntryWorksheetContent.count_row()
     expected_header = EntryWorksheetContent.COLUMNS
-    migration_header = [
-        "username",
-        "display_name",
-        "",
-        "",
-        "",
-        *EntryWorksheetContent.HOUR_COLUMNS,
-        "original_message",
-    ]
-
-    allowed_count_columns = {0, *range(5, 35)}
-    for index, value in enumerate(count_row):
-        if index not in allowed_count_columns and not _is_blank(value):
-            msg = "Shift Entry count row contains data outside its owned columns."
-            raise ValueError(msg)
-    if count_row[0] not in ("", "count"):
-        msg = "Shift Entry count row must start with `count`."
-        raise ValueError(msg)
 
     header_is_blank = all(_is_blank(value) for value in header_row)
-    count_is_blank = all(_is_blank(value) for value in count_row)
-    has_participants = any(row and not _is_blank(row[0]) for row in participant_rows)
-    if header_is_blank:
-        if not count_is_blank or has_participants:
-            msg = "Shift Entry worksheet header is missing."
-            raise ValueError(msg)
-    elif header_row not in (expected_header, migration_header):
-        msg = (
-            "Shift Entry worksheet header must match the canonical or "
-            "migration-ready layout."
+    has_participant_data = any(
+        not _is_blank(value)
+        for identity, availability in zip(
+            identity_rows,
+            availability_rows,
+            strict=True,
         )
-        raise ValueError(msg)
+        for value in [*identity, *availability]
+    )
+    if header_is_blank:
+        if has_participant_data:
+            raise WorksheetContractError(log_hint="required_header_missing")
+    elif header_row != expected_header:
+        raise WorksheetContractError
 
     updates: list[dict[str, object]] = []
-    if count_row != expected_count:
-        updates.append({"range": "A1:AJ1", "values": [expected_count]})
+    if count_row[0] != expected_count[0]:
+        updates.append({"range": "A1", "values": [[expected_count[0]]]})
+    if count_row[5:35] != expected_count[5:35]:
+        updates.append({"range": "F1:AI1", "values": [expected_count[5:35]]})
     if header_row != expected_header:
         updates.append({"range": "A2:AJ2", "values": [expected_header]})
     return updates
 
 
 def _entry_participants(
-    rows: list[list[object]],
-) -> list[tuple[int, str, str]]:
-    participants: list[tuple[int, str, str]] = []
+    identity_rows: list[list[object]],
+    availability_rows: list[list[object]],
+) -> list[tuple[int, str, str, bool]]:
+    participants: list[tuple[int, str, str, bool]] = []
     seen_usernames: set[str] = set()
-    for row_number, values in enumerate(
-        rows,
+    for row_number, (identity, availability) in enumerate(
+        zip(identity_rows, availability_rows, strict=True),
         start=EntryWorksheetContent.FIRST_DATA_ROW,
     ):
-        row = _padded_row(values, 3)
+        row = _padded_row(identity, 3)
+        availability_row = _padded_row(
+            availability,
+            len(EntryWorksheetContent.HOUR_COLUMNS) + 1,
+        )
         username = "" if _is_blank(row[0]) else str(row[0])
         formula = "" if _is_blank(row[2]) else str(row[2])
         if username in seen_usernames:
-            msg = f"Duplicate Shift Entry username: {username!r}."
-            raise ValueError(msg)
+            raise WorksheetContractError
         if username:
             seen_usernames.add(username)
-        participants.append((row_number, username, formula))
+        reusable = not username and all(
+            _is_blank(value) for value in [*row, *availability_row]
+        )
+        participants.append((row_number, username, formula, reusable))
     return participants
 
 
