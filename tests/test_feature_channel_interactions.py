@@ -120,7 +120,8 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     assert "`J28:L30`" in content
     assert "`J31`" in content
     assert (
-        "Team Source 可用時，以目前 Discord 成員與 Team 資料同步至 "  # noqa: RUF001
+        "Team Source 同步：\n"  # noqa: RUF001
+        "- 確認後會以目前 Discord 成員與 Team 資料更新 "
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
         in content
     )
@@ -132,11 +133,11 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     [
         (
             TeamSourceStatus.UNSET,
-            "Team Summary：未設定 Team Source，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 未設定，本次不會同步",  # noqa: RUF001
         ),
         (
             TeamSourceStatus.INVALID,
-            "Team Summary：Team Source 設定無效，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 設定無效，本次不會同步",  # noqa: RUF001
         ),
     ],
 )
@@ -225,8 +226,8 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         "### ✅ 班表草稿已產生\n"
         "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
         "- 安可綜合力閾值：35\n"  # noqa: RUF001
-        "- [Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
-        "：已同步\n"  # noqa: RUF001
+        "🔄 已同步 "
+        "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)\n"
         "‼️ 已將班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
         "，並覆蓋原有內容。\n"  # noqa: RUF001

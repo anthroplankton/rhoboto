@@ -87,7 +87,7 @@ copy:
 ### ✅ 班表草稿已產生
 - Runner（ランナー）：Run
 - 安可綜合力閾值：35
-- [Team Summary](summary worksheet URL)：已同步
+🔄 🔄 已同步 [Team Summary](summary worksheet URL)
 ‼️ 已將班表寫入 Shift Draft，並覆蓋原有內容。
 - 募集時間【4-7・20-22】
 - 已排入（安可｜本走；待機）：
@@ -116,8 +116,9 @@ Notes：A{R+2}
 候補：I1、閾値 I{R+1}:M{R+1}
 反查：J{R+3}:L{R+5}
 編成一覧：Team Source が利用可能な場合は J{R+6} から書き込みます。
-Team Summary：Team Source 可用時，以目前 Discord 成員與 Team 資料同步至
-[Team Summary](saved summary worksheet URL)。
+
+Team Source 同步：
+- 確認後會以目前 Discord 成員與 Team 資料更新 [Team Summary](saved summary worksheet URL)。
 ```
 
 It also warns that existing cells in a Notes or candidate spill path are

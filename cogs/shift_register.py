@@ -87,13 +87,14 @@ def _format_generate_draft_confirmation(
                 f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"  # noqa: RUF001
             ),
             (
-                "- Team Summary：Team Source 可用時，以目前 Discord 成員與 "  # noqa: RUF001
-                f"Team 資料同步至 [Team Summary]({team_summary_url})"
+                "Team Source 同步：\n"  # noqa: RUF001
+                "- 確認後會以目前 Discord 成員與 Team 資料更新 "
+                f"[Team Summary]({team_summary_url})"
                 if team_summary_url is not None
                 else (
-                    "- Team Summary：未設定 Team Source，本次不會同步"  # noqa: RUF001
+                    "Team Source 同步：\n⚠️ 未設定，本次不會同步"  # noqa: RUF001
                     if team_source_status is TeamSourceStatus.UNSET
-                    else "- Team Summary：Team Source 設定無效，本次不會同步"  # noqa: RUF001
+                    else "Team Source 同步：\n⚠️ 設定無效，本次不會同步"  # noqa: RUF001
                 )
             ),
             "",
@@ -599,7 +600,7 @@ class ShiftRegister(
             f"- 安可綜合力閾值：{encore_power_threshold:g}",  # noqa: RUF001
         ]
         if team_summary_url is not None:
-            lines.append(f"- [Team Summary]({team_summary_url})：已同步")  # noqa: RUF001
+            lines.append(f"🔄 已同步 [Team Summary]({team_summary_url})")
         lines.append(
             f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
         )
