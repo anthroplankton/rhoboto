@@ -61,9 +61,6 @@ class RaisingWorksheet:
             client=SimpleNamespace(batch_update=self._raise_batch_update),
         )
 
-    async def batch_get(self, _: list[str], **__: object) -> list[list[list[object]]]:
-        raise self.exc
-
     def _raise_batch_update(self, _: str, __: dict[str, object]) -> None:
         raise self.exc
 
@@ -84,6 +81,14 @@ class RaisingSpreadsheet:
         self.exc = exc
 
     async def batch_update(self, _: dict[str, object]) -> None:
+        raise self.exc
+
+    async def values_batch_get(
+        self,
+        _: list[str],
+        params: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        del params
         raise self.exc
 
 
@@ -166,12 +171,13 @@ async def test_gspread_client_manager_does_not_retry_transport_errors_forever() 
 
 
 @pytest.mark.asyncio
-async def test_worksheet_read_write_raise_domain_errors_without_raw_details() -> None:
+async def test_spreadsheet_read_write_raise_domain_errors_without_raw_details() -> None:
     raw_error = api_error(403, "PERMISSION_DENIED", text="secret spreadsheet url")
     worksheet = AsyncioGspreadWorksheet(RaisingWorksheet(raw_error))
+    sheet = RaisingGoogleSheet(raw_error)
 
     with pytest.raises(GoogleSheetsError) as read_error:
-        await worksheet.batch_get_values(["A1"])
+        await sheet.batch_get_worksheet_values([worksheet])
 
     with pytest.raises(GoogleSheetsError) as write_error:
         await worksheet.batch_update_typed_values(

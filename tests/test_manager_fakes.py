@@ -76,11 +76,6 @@ def _column_index(letters: str) -> int:
 
 
 class FakeTeamGridWorksheet:
-    RANGE_PATTERN = re.compile(
-        r"(?P<start_col>[A-Z]+)(?P<start_row>\d+):"
-        r"(?P<end_col>[A-Z]+)(?P<end_row>\d+)"
-    )
-
     def __init__(
         self,
         worksheet_id: int,
@@ -95,35 +90,6 @@ class FakeTeamGridWorksheet:
         self.values = copy.deepcopy(values)
         self.row_count = row_count
         self.col_count = col_count
-        self.batch_gets: list[list[str]] = []
-
-    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        self.batch_gets.append(ranges)
-        if ranges == ["1:1"]:
-            return [self.values[:1]]
-        assert len(ranges) == 1
-        match = self.RANGE_PATTERN.fullmatch(ranges[0])
-        assert match is not None
-        start_column = _column_index(match.group("start_col"))
-        end_column = _column_index(match.group("end_col"))
-        start_row = int(match.group("start_row"))
-        end_row = int(match.group("end_row"))
-        assert end_column <= self.col_count
-        assert end_row <= self.row_count
-        rows = [
-            self._trim_row(row[start_column - 1 : end_column])
-            for row in self.values[start_row - 1 : end_row]
-        ]
-        while rows and not rows[-1]:
-            rows.pop()
-        return [rows]
-
-    @staticmethod
-    def _trim_row(row: list[object]) -> list[object]:
-        row = list(row)
-        while row and row[-1] in ("", None):
-            row.pop()
-        return row
 
 
 class FakeTeamGridSheet:
@@ -136,6 +102,7 @@ class FakeTeamGridSheet:
     ) -> None:
         self.sheet_url = "https://docs.google.com/spreadsheets/d/team-transaction/edit"
         self.worksheet_by_id = {worksheet.id: worksheet for worksheet in worksheets}
+        self.batch_reads: list[list[int]] = []
         self.batch_updates: list[list[object]] = []
         self.created_titles: list[str] = []
         self.create_calls: list[str] = []
@@ -156,6 +123,15 @@ class FakeTeamGridSheet:
         return {
             worksheet_id: self.worksheet_by_id.get(worksheet_id)
             for worksheet_id in worksheet_ids
+        }
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: list[FakeTeamGridWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        return {
+            worksheet.id: copy.deepcopy(worksheet.values) for worksheet in worksheets
         }
 
     async def get_or_create_worksheets(
@@ -540,24 +516,7 @@ class FakeTeamSourceWorksheet:
     ) -> None:
         self.id = worksheet_id
         self.title = title
-        self.header = header
-        self.rows = rows or []
-        self.batch_gets: list[list[str]] = []
-
-    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        self.batch_gets.append(ranges)
-        if ranges == ["1:1"]:
-            return [[self.header]] if self.header is not None else [[]]
-        assert len(ranges) == 1
-        match = re.fullmatch(r"A:(?P<end_col>[A-Z]+)", ranges[0])
-        assert match is not None
-        end_column = _column_index(match.group("end_col"))
-        return [
-            [
-                list((self.header or [])[:end_column]),
-                *(list(row[:end_column]) for row in self.rows),
-            ]
-        ]
+        self.values = [list(header), *(rows or [])] if header is not None else []
 
 
 class FakeTeamSourceSheet:
@@ -566,9 +525,12 @@ class FakeTeamSourceSheet:
         worksheets: list[FakeTeamSourceWorksheet],
         *,
         error: GoogleSheetsError | None = None,
+        read_error: GoogleSheetsError | None = None,
     ) -> None:
         self.worksheets = {worksheet.id: worksheet for worksheet in worksheets}
         self.error = error
+        self.read_error = read_error
+        self.batch_reads: list[list[int]] = []
 
     async def get_worksheets(
         self, worksheet_ids: list[int]
@@ -578,6 +540,17 @@ class FakeTeamSourceSheet:
         return {
             worksheet_id: self.worksheets.get(worksheet_id)
             for worksheet_id in worksheet_ids
+        }
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: list[FakeTeamSourceWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        if self.read_error is not None:
+            raise self.read_error
+        return {
+            worksheet.id: copy.deepcopy(worksheet.values) for worksheet in worksheets
         }
 
 
@@ -669,7 +642,6 @@ class FakeEntryWorksheet:
         self.rows = copy.deepcopy(rows or [])
         self.row_count = max(row_count, len(self.rows))
         self.col_count = max(col_count, max(map(len, self.rows), default=0))
-        self.batch_gets: list[list[str]] = []
         self.batch_updates: list[list[dict[str, object]]] = []
         self.typed_batch_updates: list[list[dict[str, object]]] = []
         self.typed_formula_ranges: list[set[str]] = []
@@ -677,32 +649,6 @@ class FakeEntryWorksheet:
         self.presentation_updates: list[dict[str, object]] = []
         self.typed_minimums: list[tuple[int | None, int | None]] = []
         self.deleted_rows: list[int] = []
-
-    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        self.batch_gets.append(ranges)
-        identity_rows = self._trim_range_rows([row[:3] for row in self.rows[2:]])
-        availability_rows = self._trim_range_rows([row[5:36] for row in self.rows[2:]])
-        values_by_range = {
-            "A3:A": self._trim_range_rows([row[:1] for row in self.rows[2:]]),
-            "A3:B": self._trim_range_rows([row[:2] for row in self.rows[2:]]),
-            "A3:C": identity_rows,
-            "F3:AJ": availability_rows,
-        }
-        values = []
-        for range_name in ranges:
-            if range_name.startswith("A1:"):
-                match = self.RANGE_PATTERN.fullmatch(range_name)
-                assert match is not None
-                end_column = self._column_index(match.group("end_col"))
-                end_row = int(match.group("end_row"))
-                values.append(
-                    self._trim_range_rows(
-                        [row[:end_column] for row in self.rows[:end_row]]
-                    )
-                )
-            else:
-                values.append(values_by_range[range_name])
-        return values
 
     async def batch_update_typed_values(  # noqa: PLR0913
         self,
@@ -752,20 +698,6 @@ class FakeEntryWorksheet:
         self.row_count -= 1
 
     @staticmethod
-    def _trim_range_rows(rows: list[list[object]]) -> list[list[object]]:
-        trimmed = [FakeEntryWorksheet._trim_row(row) for row in rows]
-        while trimmed and not trimmed[-1]:
-            trimmed.pop()
-        return trimmed
-
-    @staticmethod
-    def _trim_row(row: list[object]) -> list[object]:
-        trimmed = list(row)
-        while trimmed and trimmed[-1] in ("", None):
-            trimmed.pop()
-        return trimmed
-
-    @staticmethod
     def _column_index(letters: str) -> int:
         index = 0
         for letter in letters:
@@ -791,10 +723,30 @@ class FakeEntryWorksheet:
             self.rows[row_index][start_col - 1 : required_cols] = value_row
 
 
-class FakeShiftSetupGoogleSheet:
+class FakeShiftValueSheet:
+    sheet_url = "https://docs.google.com/spreadsheets/d/shift-transaction/edit"
+
+    def __init__(self) -> None:
+        self.batch_reads: list[list[int]] = []
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: list[object],
+    ) -> dict[int, list[list[object]]]:
+        self.batch_reads.append([worksheet.id for worksheet in worksheets])  # type: ignore[attr-defined]
+        return {
+            worksheet.id: copy.deepcopy(  # type: ignore[attr-defined]
+                getattr(worksheet, "rows", getattr(worksheet, "values", []))
+            )
+            for worksheet in worksheets
+        }
+
+
+class FakeShiftSetupGoogleSheet(FakeShiftValueSheet):
     sheet_url = "https://docs.google.com/spreadsheets/d/shift-settings/edit"
 
     def __init__(self, worksheets: list[FakeEntryWorksheet]) -> None:
+        super().__init__()
         self.worksheet_by_title = {
             worksheet.title: worksheet for worksheet in worksheets
         }
@@ -880,11 +832,51 @@ def renamed_team_source() -> shift_register_manager.TeamSourceResolution:
 def configure_row_source(
     manager: ShiftRegisterManager,
     resolution: shift_register_manager.TeamSourceResolution,
-) -> None:
+) -> FakeShiftValueSheet:
     async def resolve() -> shift_register_manager.TeamSourceResolution:
         return resolution
 
+    async def resolve_metadata() -> tuple[object, object, object]:
+        source = resolution.source
+        return (
+            resolution.status,
+            source.config if source is not None else None,
+            source.metadata if source is not None else None,
+        )
+
+    sheet = FakeShiftValueSheet()
+
+    async def read_locked(
+        _shift_sheet_url: str,
+        shift_worksheets: list[FakeEntryWorksheet],
+        _source_status: object,
+        _source_config: object,
+        _source_metadata: object,
+    ) -> tuple[
+        dict[int, list[list[object]]],
+        shift_register_manager.TeamSourceResolution,
+        None,
+    ]:
+        grids = await sheet.batch_get_worksheet_values(shift_worksheets)
+        return grids, resolution, None
+
     manager.resolve_team_source = resolve  # type: ignore[method-assign]
+    manager._resolve_team_source_metadata = resolve_metadata  # type: ignore[method-assign]  # noqa: SLF001
+    manager._read_shift_and_team_source_locked = read_locked  # type: ignore[method-assign]  # noqa: SLF001
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+    return sheet
+
+
+def configure_shift_value_sheet(
+    manager: ShiftRegisterManager,
+) -> FakeShiftValueSheet:
+    sheet = FakeShiftValueSheet()
+    if manager._sheet_config is None:  # noqa: SLF001
+        manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+            team_source_feature_channel_id=None
+        )
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+    return sheet
 
 
 def current_entry_rows(*participant_rows: list[object]) -> list[list[object]]:
@@ -1087,17 +1079,18 @@ async def test_shift_manager_reads_draft_profiles_from_selected_team_source(
             ["carol", "Carol", "", 210, 55, 260, 60],
         ],
     )
+    source_sheet = FakeTeamSourceSheet(
+        [
+            FakeTeamSourceWorksheet(101, "Main Team"),
+            FakeTeamSourceWorksheet(102, "Encore Team"),
+            summary,
+        ]
+    )
     configure_team_source_query(
         monkeypatch,
         manager=manager,
         configs=[make_team_source_config()],
-        source_sheet=FakeTeamSourceSheet(
-            [
-                FakeTeamSourceWorksheet(101, "Main Team"),
-                FakeTeamSourceWorksheet(102, "Encore Team"),
-                summary,
-            ]
-        ),
+        source_sheet=source_sheet,
     )
 
     resolution = await manager.resolve_draft_team_profiles()
@@ -1123,11 +1116,142 @@ async def test_shift_manager_reads_draft_profiles_from_selected_team_source(
         encore_isv_header="Encore Team ISV",
         encore_power_header="Encore Team Power",
     )
-    assert summary.batch_gets == [["1:1"], ["A:H"]]
+    assert source_sheet.batch_reads == [[201]]
 
 
 @pytest.mark.asyncio
-async def test_shift_manager_reads_draft_profiles_only_through_summary_terminal(
+async def test_shift_manager_coalesces_same_spreadsheet_source_grid() -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    sheet = FakeShiftValueSheet()
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+    entry = FakeEntryWorksheet(current_entry_rows())
+    main = FakeTeamSourceWorksheet(101, "Main Team")
+    encore = FakeTeamSourceWorksheet(102, "Encore Team")
+    summary = FakeTeamSourceWorksheet(201, "Team Summary", TEAM_SUMMARY_HEADER)
+    source_config = make_team_source_config()
+    source_config.sheet_url = make_shift_metadata(entry).sheet_url
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        source_config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+
+    grids, resolution, summary_grid = await manager._read_shift_and_team_source_locked(  # noqa: SLF001
+        source_config.sheet_url,
+        [entry],
+        shift_register_manager.TeamSourceStatus.AVAILABLE,
+        source_config,
+        source_metadata,
+    )
+
+    assert sheet.batch_reads == [[1, 201]]
+    assert grids[1] == current_entry_rows()
+    assert summary_grid == [TEAM_SUMMARY_HEADER]
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_batches_external_source_grid_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    shift_sheet = FakeShiftValueSheet()
+    manager._google_sheet = shift_sheet  # type: ignore[assignment]  # noqa: SLF001
+    entry = FakeEntryWorksheet(current_entry_rows())
+    draft = FakeEntryWorksheet([], title="Shift Draft", worksheet_id=2)
+    main = FakeTeamSourceWorksheet(101, "Main Team")
+    encore = FakeTeamSourceWorksheet(102, "Encore Team")
+    summary = FakeTeamSourceWorksheet(201, "Team Summary", TEAM_SUMMARY_HEADER)
+    source_config = make_team_source_config()
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        source_config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    source_sheet = FakeTeamSourceSheet([main, encore, summary])
+    monkeypatch.setattr(
+        shift_register_manager,
+        "GoogleSheet",
+        lambda _url, _path: source_sheet,
+    )
+
+    grids, resolution, summary_grid = await manager._read_shift_and_team_source_locked(  # noqa: SLF001
+        make_shift_metadata(entry).sheet_url,
+        [entry, draft],
+        shift_register_manager.TeamSourceStatus.AVAILABLE,
+        source_config,
+        source_metadata,
+    )
+
+    assert shift_sheet.batch_reads == [[1, 2]]
+    assert source_sheet.batch_reads == [[201]]
+    assert grids[1] == current_entry_rows()
+    assert summary_grid == [TEAM_SUMMARY_HEADER]
+    assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_keeps_shift_grid_when_external_source_read_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(
+        make_feature_channel("shift_register"), "service.json"
+    )
+    shift_sheet = FakeShiftValueSheet()
+    manager._google_sheet = shift_sheet  # type: ignore[assignment]  # noqa: SLF001
+    entry = FakeEntryWorksheet(current_entry_rows())
+    main = FakeTeamSourceWorksheet(101, "Main Team")
+    encore = FakeTeamSourceWorksheet(102, "Encore Team")
+    summary = FakeTeamSourceWorksheet(201, "Team Summary", TEAM_SUMMARY_HEADER)
+    source_config = make_team_source_config()
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        source_config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    source_sheet = FakeTeamSourceSheet(
+        [main, encore, summary],
+        read_error=GoogleSheetsError(
+            GoogleSheetsErrorKind.TRANSIENT,
+            "private detail",
+        ),
+    )
+    monkeypatch.setattr(
+        shift_register_manager,
+        "GoogleSheet",
+        lambda _url, _path: source_sheet,
+    )
+
+    grids, resolution, summary_grid = await manager._read_shift_and_team_source_locked(  # noqa: SLF001
+        make_shift_metadata(entry).sheet_url,
+        [entry],
+        shift_register_manager.TeamSourceStatus.AVAILABLE,
+        source_config,
+        source_metadata,
+    )
+
+    assert shift_sheet.batch_reads == [[1]]
+    assert source_sheet.batch_reads == [[201]]
+    assert grids[1] == current_entry_rows()
+    assert resolution.status is shift_register_manager.TeamSourceStatus.UNRESOLVED
+    assert summary_grid is None
+
+
+@pytest.mark.asyncio
+async def test_shift_manager_ignores_admin_values_after_summary_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(
@@ -1154,17 +1278,18 @@ async def test_shift_manager_reads_draft_profiles_only_through_summary_terminal(
             ]
         ],
     )
+    source_sheet = FakeTeamSourceSheet(
+        [
+            FakeTeamSourceWorksheet(101, "Main Team"),
+            FakeTeamSourceWorksheet(102, "Encore Team"),
+            summary,
+        ]
+    )
     configure_team_source_query(
         monkeypatch,
         manager=manager,
         configs=[make_team_source_config()],
-        source_sheet=FakeTeamSourceSheet(
-            [
-                FakeTeamSourceWorksheet(101, "Main Team"),
-                FakeTeamSourceWorksheet(102, "Encore Team"),
-                summary,
-            ]
-        ),
+        source_sheet=source_sheet,
     )
 
     resolution = await manager.resolve_draft_team_profiles()
@@ -1172,7 +1297,8 @@ async def test_shift_manager_reads_draft_profiles_only_through_summary_terminal(
     assert resolution.status is shift_register_manager.TeamSourceStatus.AVAILABLE
     assert resolution.notes_team_source is not None
     assert resolution.notes_team_source.import_last_column == "H"
-    assert summary.batch_gets == [["1:1"], ["A:H"]]
+    assert resolution.profiles["alice"].main_isv == 200
+    assert source_sheet.batch_reads == [[201]]
 
 
 @pytest.mark.asyncio
@@ -1442,23 +1568,24 @@ async def test_shift_manager_rejects_team_source_headers_after_terminal(
         ],
         [["alice", "Alice", "Encore", "same", 200, 40, 250, 50]],
     )
+    source_sheet = FakeTeamSourceSheet(
+        [
+            FakeTeamSourceWorksheet(101, "Main Team"),
+            FakeTeamSourceWorksheet(102, "Encore Team"),
+            summary,
+        ]
+    )
     configure_team_source_query(
         monkeypatch,
         manager=manager,
         configs=[make_team_source_config()],
-        source_sheet=FakeTeamSourceSheet(
-            [
-                FakeTeamSourceWorksheet(101, "Main Team"),
-                FakeTeamSourceWorksheet(102, "Encore Team"),
-                summary,
-            ]
-        ),
+        source_sheet=source_sheet,
     )
 
     resolution = await manager.resolve_team_source()
 
     assert resolution.status is shift_register_manager.TeamSourceStatus.INVALID
-    assert summary.batch_gets == [["1:1"]]
+    assert source_sheet.batch_reads == [[201]]
 
 
 @pytest.mark.asyncio
@@ -1603,9 +1730,9 @@ async def test_team_manager_upserts_team_and_summary_in_one_batch_same_rows(
 
 
 @pytest.mark.asyncio
-async def test_team_manager_reads_only_through_each_terminal_header() -> None:
+async def test_team_manager_batches_complete_grids_and_ignores_admin_values() -> None:
     manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
-    sentinel = "ADMIN_SENTINEL_MUST_NOT_BE_READ"
+    sentinel = "ADMIN_SENTINEL_MUST_BE_IGNORED"
     team_worksheet = FakeTeamGridWorksheet(
         101,
         "Main Team",
@@ -1637,20 +1764,19 @@ async def test_team_manager_reads_only_through_each_terminal_header() -> None:
     )
     await manager.refresh_summary_registration({})
 
-    assert team_worksheet.batch_gets == [["1:1"], ["A2:F100"]]
-    assert summary_worksheet.batch_gets == [["1:1"], ["A2:F100"]]
+    assert sheet.batch_reads == [[101, 201]]
     assert sentinel not in repr(sheet.batch_updates)
 
 
 @pytest.mark.asyncio
-async def test_team_manager_rejects_unbounded_header_before_reading_rows() -> None:
+async def test_team_manager_rejects_unbounded_header_after_batch() -> None:
     manager = TeamRegisterManager(make_feature_channel("team_register"), "service.json")
     team_worksheet = FakeTeamGridWorksheet(
         101,
         "Main Team",
         [
             ["username", "display_name", "manager_note"],
-            ["ADMIN_SENTINEL_MUST_NOT_BE_READ"],
+            ["ADMIN_SENTINEL_MUST_BE_IGNORED"],
         ],
     )
     summary_worksheet = FakeTeamGridWorksheet(
@@ -1675,8 +1801,7 @@ async def test_team_manager_rejects_unbounded_header_before_reading_rows() -> No
             None,
         )
 
-    assert team_worksheet.batch_gets == [["1:1"]]
-    assert summary_worksheet.batch_gets == []
+    assert sheet.batch_reads == [[101, 201]]
     assert sheet.batch_updates == []
 
 
@@ -1719,7 +1844,7 @@ async def test_team_manager_reads_and_repairs_moved_exact_missing_terminal() -> 
 
     await manager.refresh_summary_registration({})
 
-    assert team_worksheet.batch_gets == [["1:1"], ["A2:F100"]]
+    assert sheet.batch_reads == [[101, 201]]
     assert sheet.batch_updates[0][0] == DimensionMutation.insert_columns(
         101,
         start_column=6,
@@ -1761,7 +1886,7 @@ async def test_team_manager_uses_first_terminal_for_duplicate_incident_read() ->
 
     await manager.refresh_summary_registration({})
 
-    assert summary_worksheet.batch_gets == [["1:1"], ["A2:F100"]]
+    assert sheet.batch_reads == [[101, 201]]
 
 
 @pytest.mark.asyncio
@@ -2535,7 +2660,7 @@ async def test_team_manager_clips_reads_to_small_grids_before_atomic_growth() ->
 
     await manager.upsert_user_registration(make_user(), [], team, None)
 
-    assert all(worksheet.batch_gets == [["1:1"], ["A2:B2"]] for worksheet in worksheets)
+    assert sheet.batch_reads == [[101, 102, 201]]
 
 
 @pytest.mark.asyncio
@@ -2965,7 +3090,7 @@ async def test_team_settings_rejects_later_headerless_team_row_before_creation(
             member_by_names={},
         )
 
-    assert main_worksheet.batch_gets == [["1:1"], ["A2:F100"]]
+    assert sheet.batch_reads == [[101, 201]]
     assert sheet.created_titles == []
     manager.upsert_sheet_config.assert_not_awaited()
     assert sheet.batch_updates == []
@@ -3008,7 +3133,7 @@ async def test_team_settings_rejects_later_headerless_summary_row_before_creatio
             member_by_names={},
         )
 
-    assert summary_worksheet.batch_gets == [["1:1"], ["A2:H100"]]
+    assert sheet.batch_reads == [[101, 201]]
     assert sheet.created_titles == []
     manager.upsert_sheet_config.assert_not_awaited()
     assert sheet.batch_updates == []
@@ -3832,7 +3957,8 @@ async def test_shift_sheet_setup_initializes_entry_presentation(
     assert sync_metadata is result
     assert sync_ranges.to_json() == [{"start": 4, "end": 28}]
     assert manager._sync_entry_presentation_locked.await_args.kwargs == {  # noqa: SLF001
-        "force": True
+        "entry_grid": [],
+        "force": True,
     }
 
 
@@ -3993,7 +4119,7 @@ async def test_shift_manager_initializes_empty_entry_worksheet(
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
-    configure_row_source(
+    sheet = configure_row_source(
         manager,
         shift_register_manager.TeamSourceResolution(
             shift_register_manager.TeamSourceStatus.MISSING
@@ -4008,7 +4134,7 @@ async def test_shift_manager_initializes_empty_entry_worksheet(
     )
 
     assert ("enter_worksheet", ("shift-transaction", 1)) in events
-    assert worksheet.batch_gets == [["A1:T2"], ["A1:T2"]]
+    assert sheet.batch_reads == [[1]]
     assert len(worksheet.typed_batch_updates) == 1
     assert [item["range"] for item in worksheet.typed_batch_updates[0]] == [
         "A1",
@@ -4031,7 +4157,7 @@ async def test_shift_manager_repairs_only_required_count_ranges() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
-    configure_row_source(
+    sheet = configure_row_source(
         manager,
         shift_register_manager.TeamSourceResolution(
             shift_register_manager.TeamSourceStatus.MISSING
@@ -4050,10 +4176,7 @@ async def test_shift_manager_repairs_only_required_count_ranges() -> None:
         make_user(), shift, make_shift_metadata(worksheet)
     )
 
-    assert worksheet.batch_gets == [
-        ["A1:AJ2", "A3:C", "F3:AJ"],
-        ["A1:AJ2", "A3:C", "F3:AJ"],
-    ]
+    assert sheet.batch_reads == [[1]]
     assert [item["range"] for item in worksheet.typed_batch_updates[0]][:2] == [
         "A1",
         "F1:AI1",
@@ -4214,6 +4337,7 @@ async def test_empty_shift_entry_presentation_initializes_without_participant() 
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    sheet = configure_shift_value_sheet(manager)
     worksheet = FakeEntryWorksheet(rows=[], row_count=2, col_count=20)
 
     await manager.sync_entry_presentation(
@@ -4233,6 +4357,7 @@ async def test_empty_shift_entry_presentation_initializes_without_participant() 
     assert len(worksheet.rows) == 2
     assert worksheet.typed_minimums == [(3, 36)]
     assert worksheet.presentation_updates[-1]["frozen_column_count"] == 5
+    assert sheet.batch_reads == [[1]]
 
 
 @pytest.mark.asyncio
@@ -4240,6 +4365,7 @@ async def test_empty_shift_entry_repairs_stale_a1_and_blank_header() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    configure_shift_value_sheet(manager)
     worksheet = FakeEntryWorksheet([["stale count label"]], row_count=2)
 
     await manager.sync_entry_presentation(
@@ -4262,6 +4388,7 @@ async def test_recruitment_range_contract_failure_precedes_config_save() -> None
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    configure_shift_value_sheet(manager)
     config = SimpleNamespace(
         recruitment_time_ranges=[{"start": 4, "end": 28}],
         save=AsyncMock(),
@@ -4291,6 +4418,7 @@ async def test_entry_presentation_sync_rejects_duplicate_usernames() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    configure_shift_value_sheet(manager)
     worksheet = FakeEntryWorksheet(
         current_entry_rows(
             entry_participant_row("alice", "Alice"),
@@ -4377,7 +4505,6 @@ async def test_existing_shift_updates_owned_ranges_on_same_row(
     )
 
     assert [event for event in events if event[0] == "enter_worksheet"] == [
-        ("enter_worksheet", ("shift-transaction", 1)),
         ("enter_worksheet", ("shift-transaction", 1)),
         ("enter_worksheet", ("team-source", 201)),
     ]
@@ -4491,6 +4618,7 @@ async def test_repair_team_references_updates_only_changed_populated_c_cells() -
         make_feature_channel("shift_register"), "service.json"
     )
     resolution = renamed_team_source()
+    configure_row_source(manager, resolution)
     source = resolution.source
     assert source is not None
     worksheet = FakeEntryWorksheet(
@@ -4524,6 +4652,8 @@ async def test_repair_team_references_skips_write_when_current() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    resolution = available_team_source()
+    configure_row_source(manager, resolution)
     worksheet = FakeEntryWorksheet(
         current_entry_rows(
             entry_participant_row("alice", "Alice", expected_formula(3)),
@@ -4531,7 +4661,7 @@ async def test_repair_team_references_skips_write_when_current() -> None:
     )
 
     changed = await manager.repair_team_references(
-        make_shift_metadata(worksheet), available_team_source()
+        make_shift_metadata(worksheet), resolution
     )
 
     assert changed == 0
@@ -4554,19 +4684,25 @@ async def test_select_team_source_preflights_before_persist_and_repair() -> None
 
     config = Config()
 
-    async def resolve(*, team_channel_id: int | None = None) -> object:
+    configure_row_source(manager, resolution)
+
+    async def resolve_metadata(
+        *, team_channel_id: int | None = None
+    ) -> tuple[object, object, object]:
         assert team_channel_id == 22
-        return resolution
+        source = resolution.source
+        assert source is not None
+        return resolution.status, source.config, source.metadata
 
     async def fetch() -> ShiftRegisterGoogleSheetsMetadata:
         events.append("fetch")
         return make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
 
-    async def repair(*_args: object) -> int:
+    async def repair(*_args: object, **_kwargs: object) -> int:
         events.append("repair")
         return 0
 
-    manager.resolve_team_source = resolve  # type: ignore[method-assign]
+    manager._resolve_team_source_metadata = resolve_metadata  # type: ignore[method-assign]  # noqa: SLF001
     manager.fetch_google_sheets_metadata = fetch  # type: ignore[method-assign]
     manager._repair_team_references_locked = repair  # type: ignore[method-assign]  # noqa: SLF001
     manager._sheet_config = config  # type: ignore[assignment]  # noqa: SLF001
@@ -4587,6 +4723,7 @@ async def test_shift_delete_removes_physical_username_row() -> None:
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    configure_shift_value_sheet(manager)
     worksheet = FakeEntryWorksheet(
         current_entry_rows(
             entry_participant_row("alice", "Alice", manual_value="alice note"),
@@ -4717,6 +4854,7 @@ async def test_shift_manager_raises_contract_error_before_update(
     manager = ShiftRegisterManager(
         make_feature_channel("shift_register"), "service.json"
     )
+    configure_shift_value_sheet(manager)
     worksheet = FakeEntryWorksheet(rows)
     shift = ShiftParser.parse_submission(make_user(), ["4-8"]).shift
     assert shift is not None

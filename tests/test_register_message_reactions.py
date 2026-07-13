@@ -694,20 +694,15 @@ async def test_shift_listener_marks_old_entry_header_contract_error(
         row_count = 100
         col_count = 36
 
-        async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-            assert ranges == ["A1:AJ2", "A3:C", "F3:AJ"]
-            return [
+        def __init__(self) -> None:
+            self.values = [
+                ["count"],
                 [
-                    ["count"],
-                    [
-                        "username",
-                        "display_name",
-                        *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
-                        "original_message",
-                    ],
+                    "username",
+                    "display_name",
+                    *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
+                    "original_message",
                 ],
-                [],
-                [],
             ]
 
     metadata = ShiftRegisterGoogleSheetsMetadata(
@@ -737,6 +732,7 @@ async def test_shift_listener_marks_old_entry_header_contract_error(
                 shift,
                 metadata,
                 TeamSourceResolution(TeamSourceStatus.UNSET),
+                entry_grid=metadata.entry_worksheets.worksheet.values,
                 recruitment_ranges=recruitment_ranges,
             )
 

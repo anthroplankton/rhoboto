@@ -13,33 +13,24 @@ from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 
 
 class RawWorksheet:
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         *,
         worksheet_id: int = 1,
         title: str = "Worksheet",
-        batch_values: list[list[list[object]]] | None = None,
         metadata: dict[str, object] | None = None,
         row_count: int = 100,
         col_count: int = 20,
     ) -> None:
         self.id = worksheet_id
         self.title = title
-        self.batch_values = batch_values or []
         self.row_count = row_count
         self.col_count = col_count
-        self.batch_get_calls: list[dict[str, object]] = []
         self.delete_calls: list[tuple[int, int | None]] = []
         self.spreadsheet_batch_update_calls: list[dict[str, object]] = []
         self.agcm = RawClientManager()
         self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls, metadata)
         self.extra_attribute = "delegated"
-
-    async def batch_get(
-        self, ranges: list[str], **kwargs: object
-    ) -> list[list[list[object]]]:
-        self.batch_get_calls.append({"ranges": ranges, **kwargs})
-        return self.batch_values
 
     async def delete_rows(self, index: int, end_index: int | None = None) -> None:
         self.delete_calls.append((index, end_index))
@@ -97,11 +88,24 @@ class RawSpreadsheet:
         worksheets: list[RawWorksheet] | None = None,
         *,
         grids: dict[int, list[list[object]]] | None = None,
+        values_batch_get_response: dict[str, object] | None = None,
     ) -> None:
         self._worksheets = worksheets or []
         self.added_worksheets: list[dict[str, object]] = []
         self.batch_update_calls: list[dict[str, object]] = []
+        self.values_batch_get_calls: list[dict[str, object]] = []
+        self.values_batch_get_response = values_batch_get_response or {
+            "valueRanges": []
+        }
         self.grids = copy.deepcopy(grids or {})
+
+    async def values_batch_get(
+        self,
+        ranges: list[str],
+        params: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.values_batch_get_calls.append({"ranges": ranges, "params": params})
+        return copy.deepcopy(self.values_batch_get_response)
 
     async def batch_update(self, body: dict[str, object]) -> None:
         self.batch_update_calls.append(copy.deepcopy(body))
@@ -333,6 +337,67 @@ async def test_batch_update_grid_converts_domain_coordinates_once() -> None:
             ]
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_batch_get_worksheet_values_reads_full_grids_once() -> None:
+    spreadsheet = RawSpreadsheet(
+        values_batch_get_response={
+            "valueRanges": [
+                {"values": [["a"]]},
+                {},
+            ]
+        }
+    )
+    sheet = FakeGoogleSheet(spreadsheet)
+    first = AsyncioGspreadWorksheet(
+        RawWorksheet(
+            worksheet_id=1,
+            title="Main Team",
+            row_count=2,
+            col_count=3,
+        )
+    )
+    second = AsyncioGspreadWorksheet(
+        RawWorksheet(
+            worksheet_id=2,
+            title="Bob's Sheet",
+            row_count=4,
+            col_count=2,
+        )
+    )
+
+    values = await sheet.batch_get_worksheet_values([first, second])
+
+    assert values == {1: [["a"]], 2: []}
+    assert spreadsheet.values_batch_get_calls == [
+        {
+            "ranges": ["'Main Team'!A1:C2", "'Bob''s Sheet'!A1:B4"],
+            "params": {"valueRenderOption": "FORMULA"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_get_worksheet_values_rejects_incomplete_response() -> None:
+    spreadsheet = RawSpreadsheet(values_batch_get_response={"valueRanges": []})
+    sheet = FakeGoogleSheet(spreadsheet)
+    worksheet = AsyncioGspreadWorksheet(RawWorksheet())
+
+    with pytest.raises(GoogleSheetsError) as error:
+        await sheet.batch_get_worksheet_values([worksheet])
+
+    assert error.value.kind is GoogleSheetsErrorKind.UNKNOWN
+    assert error.value.operation == "read_worksheet"
+
+
+@pytest.mark.asyncio
+async def test_batch_get_worksheet_values_skips_empty_request() -> None:
+    spreadsheet = RawSpreadsheet()
+    sheet = FakeGoogleSheet(spreadsheet)
+
+    assert await sheet.batch_get_worksheet_values([]) == {}
+    assert spreadsheet.values_batch_get_calls == []
 
 
 @pytest.mark.asyncio
@@ -691,23 +756,6 @@ def test_grid_mutation_factories_reject_non_integer_coordinates_and_counts(
     assert callable(factory)
     with pytest.raises(ValueError, match="positive integer"):
         factory()
-
-
-@pytest.mark.asyncio
-async def test_adapter_batch_reads_formulas() -> None:
-    batch_values = [[["count"]], [["username"], ["alice"]]]
-    raw = RawWorksheet(batch_values=batch_values)
-    adapter = AsyncioGspreadWorksheet(raw)
-
-    values = await adapter.batch_get_values(["1:2", "A3:C"])
-
-    assert values == batch_values
-    assert raw.batch_get_calls == [
-        {
-            "ranges": ["1:2", "A3:C"],
-            "value_render_option": "FORMULA",
-        }
-    ]
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, overload, override
 
 import pandas as pd
-from gspread.utils import rowcol_to_a1
 
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import (
@@ -203,12 +202,11 @@ class TeamRegisterManager(
         await team_register_config.save()
 
     @staticmethod
-    async def _read_grid(
-        worksheet: AsyncioGspreadWorksheet,
+    def _project_contract_grid(
+        values: list[list[object]],
         expected_bot_headers: list[str],
     ) -> tuple[list[object], list[list[object]]]:
-        (header_range,) = await worksheet.batch_get_values(["1:1"])
-        headers = list(header_range[0]) if header_range else []
+        headers = list(values[0]) if values else []
         marker_positions = [
             index
             for index, header in enumerate(headers)
@@ -223,14 +221,10 @@ class TeamRegisterManager(
             last_column = len(expected_bot_headers)
         else:
             raise WorksheetContractError
-        if worksheet.row_count < TEAM_FIRST_DATA_ROW or worksheet.col_count < 1:
-            return headers, []
-        readable_last_column = min(last_column, worksheet.col_count)
-        last_column_letter = rowcol_to_a1(1, readable_last_column).removesuffix("1")
-        (rows,) = await worksheet.batch_get_values(
-            [f"A{TEAM_FIRST_DATA_ROW}:{last_column_letter}{worksheet.row_count}"]
-        )
-        return headers, list(rows)
+        rows = [list(row[:last_column]) for row in values[TEAM_FIRST_DATA_ROW - 1 :]]
+        while rows and all(value in ("", None) for value in rows[-1]):
+            rows.pop()
+        return headers, rows
 
     @staticmethod
     def _grid_after_mutations(
@@ -342,11 +336,7 @@ class TeamRegisterManager(
             ) from exc
         worksheet_by_title = {}
         for raw_worksheet in raw_worksheets:
-            worksheet = (
-                raw_worksheet
-                if hasattr(raw_worksheet, "batch_get_values")
-                else AsyncioGspreadWorksheet(raw_worksheet)
-            )
+            worksheet = AsyncioGspreadWorksheet(raw_worksheet)
             worksheet_by_title[worksheet.title] = worksheet
         resolved_worksheets = []
         for worksheet_metadata in desired:
@@ -422,6 +412,13 @@ class TeamRegisterManager(
             *SummaryWorksheetContent.COLUMNS,
             *summary_headers,
         ]
+        worksheets = [
+            worksheet.worksheet
+            for worksheet in metadata
+            if worksheet.worksheet is not None
+        ]
+        sheet = await self.get_google_sheet()
+        raw_grids = await sheet.batch_get_worksheet_values(worksheets)
         grids: dict[int, tuple[list[object], list[list[object]]]] = {}
         for worksheet_metadata in metadata:
             worksheet = worksheet_metadata.worksheet
@@ -431,8 +428,8 @@ class TeamRegisterManager(
                     if isinstance(worksheet_metadata, TeamWorksheetMetadata)
                     else expected_summary_headers
                 )
-                grids[worksheet.id] = await self._read_grid(
-                    worksheet,
+                grids[worksheet.id] = self._project_contract_grid(
+                    raw_grids[worksheet.id],
                     expected_headers,
                 )
         migrated_team_grids = []

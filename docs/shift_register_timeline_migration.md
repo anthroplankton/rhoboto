@@ -90,12 +90,14 @@ Rows 3+: participant data
 ```
 
 Value ownership is range-specific: the bot owns `A1`, `F1:AI1`, `A2:AJ2`, and
-participant-row `A:C` plus `F:AJ`. It reads the fixed header only within `A:AJ`
-and participant values only from `A:C` plus `F:AJ`. `C` contains the participant's
-Team formula; `D:E` are its spill area and are not directly read, validated,
-cleared, or value-written, so a manual blocker and its visible `#REF!` are
-preserved. Row-1 `B:E` and `AJ` values are likewise preserved. Columns `AK`
-onward are administrator-owned and are not read or written by normal registration.
+participant-row `A:C` plus `F:AJ`. The spreadsheet-scoped read may physically
+return the complete Entry grid, including `D:E` and `AK+`, but the Entry contract
+projects the fixed header only through `AJ` and participant values only from `A:C`
+plus `F:AJ`. `C` contains the participant's Team formula; `D:E` are its spill area
+and are not consumed, validated, cleared, or value-written, so a manual blocker and
+its visible `#REF!` are preserved. Row-1 `B:E` and `AJ` values are likewise
+preserved. Columns `AK` onward are administrator-owned and are never consumed or
+written by normal registration.
 
 Existing row-1-header worksheets and old worksheets with `4-5` through `27-28`
 are intentionally rejected instead of being silently reinterpreted.

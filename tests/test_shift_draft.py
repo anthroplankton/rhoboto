@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -11,7 +13,6 @@ from utils.shift_register_manager import (
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftTeamProfileResolution,
     ShiftRegisterManager,
-    TeamSourceResolution,
     TeamSourceStatus,
 )
 from utils.shift_register_structs import (
@@ -53,13 +54,25 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         col_count: int = 20,
         **kwargs: object,
     ) -> None:
+        kwargs.setdefault("worksheet_id", 2)
         super().__init__(**kwargs)
         self.row_count = row_count
         self.col_count = col_count
         self.old_axis_rows = old_axis_rows or []
         self.old_threshold_labels = old_threshold_labels or []
         self.old_lookup_labels = old_lookup_labels or []
-        self.batch_get_calls: list[list[str]] = []
+        height = max(
+            len(self.old_axis_rows),
+            len(self.old_threshold_labels),
+            len(self.old_lookup_labels),
+        )
+        self.values = [[""] * 10 for _ in range(height)]
+        for row, value in enumerate(self.old_axis_rows):
+            self.values[row][0:1] = value[:1]
+        for row, value in enumerate(self.old_threshold_labels):
+            self.values[row][8:9] = value[:1]
+        for row, value in enumerate(self.old_lookup_labels):
+            self.values[row][9:10] = value[:1]
         self.typed_batches: list[list[dict[str, object]]] = []
         self.formula_ranges: list[set[str]] = []
         self.background_updates: list[list[tuple[str, str]]] = []
@@ -70,23 +83,6 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.conditional_format_rule_deletes: list[list[int]] = []
         self.conditional_format_rule_adds: list[list[dict[str, object]]] = []
         self.typed_minimums: list[tuple[int | None, int | None]] = []
-
-    async def batch_get_values(
-        self,
-        ranges: list[str],
-    ) -> list[list[list[object]]]:
-        self.batch_get_calls.append(ranges)
-        sources = {
-            "A": self.old_axis_rows,
-            "I": self.old_threshold_labels,
-            "J": self.old_lookup_labels,
-        }
-        values = []
-        for range_name in ranges:
-            start, end = range_name.split(":", maxsplit=1)
-            assert start == f"{start[0]}1"
-            values.append(sources[start[0]][: int(end[1:])])
-        return values
 
     async def batch_update_typed_values(  # noqa: PLR0913
         self,
@@ -130,20 +126,45 @@ class EntryRangeFakeWorksheet(FakeWorksheet):
         self.row_count = row_count
         self.col_count = col_count
         self.range_values = range_values
-        self.batch_get_calls: list[list[str]] = []
-        self.ignored_values = {
-            "A1": "count formula row",
-            "C3:E3": "Team display formulas",
-            "AK3": "admin-owned value",
+        header_rows, identity_rows, availability_rows = range_values
+        self.values = [list(row) for row in header_rows]
+        participant_count = max(len(identity_rows), len(availability_rows))
+        for index in range(participant_count):
+            identity = identity_rows[index] if index < len(identity_rows) else []
+            availability = (
+                availability_rows[index] if index < len(availability_rows) else []
+            )
+            self.values.append(
+                [
+                    *identity,
+                    *("" for _ in range(max(0, 5 - len(identity)))),
+                    *availability,
+                ]
+            )
+
+
+class DraftValueGoogleSheet:
+    sheet_url = "https://docs.google.com/spreadsheets/d/shift-draft/edit"
+
+    def __init__(self) -> None:
+        self.batch_reads: list[list[int]] = []
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: list[FakeWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        return {
+            worksheet.id: copy.deepcopy(worksheet.values) for worksheet in worksheets
         }
 
-    async def batch_get_values(
-        self,
-        ranges: list[str],
-    ) -> list[list[list[object]]]:
-        self.batch_get_calls.append(ranges)
-        assert ranges == ["A1:AJ2", "A3:C", "F3:AJ"]
-        return self.range_values
+
+def configure_draft_value_sheet(
+    manager: ShiftRegisterManager,
+) -> DraftValueGoogleSheet:
+    sheet = DraftValueGoogleSheet()
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+    return sheet
 
 
 def build_entry_ranges(
@@ -164,6 +185,52 @@ def build_entry_ranges(
         identities,
         availability,
     ]
+
+
+def build_entry_grid(
+    rows: list[tuple[str, str, set[int]]],
+) -> list[list[object]]:
+    grid = [EntryWorksheetContent.count_row(), EntryWorksheetContent.COLUMNS]
+    for username, display_name, slots in rows:
+        grid.append(
+            [
+                username,
+                display_name,
+                "",
+                "ignored spill",
+                "ignored spill",
+                *(1 if index in slots else 0 for index in range(30)),
+                "message",
+                "ignored admin",
+            ]
+        )
+    return grid
+
+
+def test_entry_state_projects_owned_columns_from_complete_grid() -> None:
+    layout, identities, participants = shift_register_manager._entry_state_from_grid(  # noqa: SLF001
+        build_entry_grid([("alice", "Alice", {4, 6})])
+    )
+
+    assert layout == []
+    assert identities == [["alice", "Alice"]]
+    assert participants == [(3, "alice", "", False)]
+
+
+def test_draft_control_state_projects_only_signed_control_columns() -> None:
+    grid = [[""] * 10 for _ in range(37)]
+    grid[0][0] = "JST"
+    grid[1][0] = "4-5"
+    grid[31][0] = '=LET(owner, "rhoboto-shift-draft-notes", owner)'
+    grid[3][8] = DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL
+    grid[5][9] = "名前を貼り付け"
+
+    project_controls = shift_register_manager._draft_control_state_from_grid  # noqa: SLF001
+    axis, threshold, lookup = project_controls(grid)
+
+    assert axis[-1] == ['=LET(owner, "rhoboto-shift-draft-notes", owner)']
+    assert threshold == [[], [], [], [DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL]]
+    assert lookup[-1] == ["名前を貼り付け"]
 
 
 def make_shift(username: str, slots: Iterable[int]) -> Shift:
@@ -690,6 +757,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[
             {"start": 4, "end": 7},
@@ -749,7 +817,10 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ],
     )
 
-    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
+    def resolve_profiles(
+        _resolution: object,
+        _summary_grid: object,
+    ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(
             TeamSourceStatus.AVAILABLE,
             {
@@ -774,13 +845,14 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             ),
         )
 
-    async def resolve_source() -> TeamSourceResolution:
-        return TeamSourceResolution(TeamSourceStatus.AVAILABLE)
-
-    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
     monkeypatch.setattr(
         manager,
-        "_resolve_draft_team_profiles_locked",
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.AVAILABLE, None, None)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_draft_team_profiles_from_grid",
         resolve_profiles,
     )
 
@@ -968,8 +1040,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     )
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
-    assert entry_worksheet.batch_get_calls == [["A1:AJ2", "A3:C", "F3:AJ"]]
-    assert draft_worksheet.batch_get_calls == [["A1:A33", "I1:I32", "J1:J37"]]
+    assert value_sheet.batch_reads == [[1, 2]]
 
 
 @pytest.mark.asyncio
@@ -977,6 +1048,7 @@ async def test_generate_draft_accepts_completely_empty_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
@@ -995,16 +1067,20 @@ async def test_generate_draft_accepts_completely_empty_entry(
         ],
     )
 
-    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
+    def resolve_profiles(
+        _resolution: object,
+        _summary_grid: object,
+    ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
 
-    async def resolve_source() -> TeamSourceResolution:
-        return TeamSourceResolution(TeamSourceStatus.UNSET)
-
-    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
     monkeypatch.setattr(
         manager,
-        "_resolve_draft_team_profiles_locked",
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_draft_team_profiles_from_grid",
         resolve_profiles,
     )
 
@@ -1013,7 +1089,7 @@ async def test_generate_draft_accepts_completely_empty_entry(
     assert result.schedule.display_names == {}
     assert result.schedule.hours == [4]
     assert {"A4", "I1"} <= draft_worksheet.formula_ranges[-1]
-    assert draft_worksheet.batch_get_calls == [["A1:A1"]]
+    assert value_sheet.batch_reads == [[1, 2]]
     assert draft_worksheet.typed_minimums == [(38, 13)]
 
 
@@ -1035,6 +1111,7 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
     clears_old_anchor: bool,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
@@ -1058,16 +1135,20 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         ],
     )
 
-    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
+    def resolve_profiles(
+        _resolution: object,
+        _summary_grid: object,
+    ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
 
-    async def resolve_source() -> TeamSourceResolution:
-        return TeamSourceResolution(TeamSourceStatus.UNSET)
-
-    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
     monkeypatch.setattr(
         manager,
-        "_resolve_draft_team_profiles_locked",
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_draft_team_profiles_from_grid",
         resolve_profiles,
     )
 
@@ -1097,6 +1178,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
     status: TeamSourceStatus,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
@@ -1113,16 +1195,20 @@ async def test_generate_draft_falls_back_without_team_profiles(
         ],
     )
 
-    async def resolve_profiles(_resolution: object) -> DraftTeamProfileResolution:
+    def resolve_profiles(
+        _resolution: object,
+        _summary_grid: object,
+    ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(status, {})
 
-    async def resolve_source() -> TeamSourceResolution:
-        return TeamSourceResolution(status)
-
-    monkeypatch.setattr(manager, "resolve_team_source", resolve_source)
     monkeypatch.setattr(
         manager,
-        "_resolve_draft_team_profiles_locked",
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(status, None, None)),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_draft_team_profiles_from_grid",
         resolve_profiles,
     )
 
@@ -1169,6 +1255,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
 @pytest.mark.asyncio
 async def test_generate_draft_rejects_old_entry_header() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )
@@ -1200,8 +1287,9 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_draft_rejects_nonbinary_entry_before_draft_io() -> None:
+async def test_generate_draft_rejects_nonbinary_entry_before_draft_write() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )
@@ -1221,13 +1309,14 @@ async def test_generate_draft_rejects_nonbinary_entry_before_draft_io() -> None:
     with pytest.raises(WorksheetContractError):
         await manager.generate_draft(metadata, encore_power_threshold=35)
 
-    assert draft_worksheet.batch_get_calls == []
+    assert value_sheet.batch_reads == [[1, 2]]
     assert draft_worksheet.typed_batches == []
 
 
 @pytest.mark.asyncio
 async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )

@@ -11,13 +11,18 @@ import pandas as pd
 from async_lru import alru_cache
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
-from gspread.utils import a1_range_to_grid_range
+from gspread.utils import a1_range_to_grid_range, absolute_range_name, rowcol_to_a1
 
 from utils.google_sheets_errors import (
     GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS,
     GoogleSheetsError,
     classify_google_sheets_exception,
 )
+
+
+class _InvalidValuesBatchResponseError(ValueError):
+    pass
+
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -227,19 +232,6 @@ class AsyncioGspreadWorksheet:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._worksheet, name)
-
-    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        """Read disjoint ranges while preserving formula text."""
-        try:
-            values = await self._worksheet.batch_get(
-                ranges,
-                value_render_option="FORMULA",
-            )
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "read_worksheet")
-        return [list(value_range) for value_range in values]
 
     async def get_conditional_format_rules(self) -> list[dict[str, object]]:
         """Return this worksheet's conditional-format rules."""
@@ -684,6 +676,53 @@ class GoogleSheet:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "update_worksheet")
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: Sequence[AsyncioGspreadWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        """Read complete value grids from this spreadsheet in one request."""
+        if not worksheets:
+            return {}
+        try:
+            sh = await self.sheet
+            ranges = [
+                absolute_range_name(
+                    worksheet.title,
+                    f"A1:{rowcol_to_a1(worksheet.row_count, worksheet.col_count)}",
+                )
+                for worksheet in worksheets
+            ]
+            response = await sh.values_batch_get(
+                ranges,
+                params={"valueRenderOption": "FORMULA"},
+            )
+            if not isinstance(response, dict):
+                raise _InvalidValuesBatchResponseError
+            value_ranges = response.get("valueRanges")
+            if not isinstance(value_ranges, list) or len(value_ranges) != len(
+                worksheets
+            ):
+                raise _InvalidValuesBatchResponseError
+            result: dict[int, list[list[object]]] = {}
+            for worksheet, value_range in zip(
+                worksheets,
+                value_ranges,
+                strict=True,
+            ):
+                if not isinstance(value_range, dict):
+                    raise _InvalidValuesBatchResponseError
+                values = value_range.get("values", [])
+                if not isinstance(values, list) or any(
+                    not isinstance(row, list) for row in values
+                ):
+                    raise _InvalidValuesBatchResponseError
+                result[worksheet.id] = [list(row) for row in values]
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
+        return result
 
     async def get_worksheet(self, worksheet_id: int) -> AsyncioGspreadWorksheet | None:
         """

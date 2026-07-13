@@ -9,7 +9,7 @@ rollout and manual Discord and Google Sheets integration validation remain.
 
 Generalize Shift Register's current Team Summary integration into a reusable Team
 Source. The same resolved source must support the Shift settings panel, existing
-Shift Entry formulas, and a future draft-generation workflow without duplicating
+Shift Entry formulas, and Draft generation without duplicating
 Team Register configuration or worksheet metadata.
 
 This change also establishes one configuration-level contract for the worksheet
@@ -17,14 +17,16 @@ used as each register feature's default user-facing Google Sheet destination.
 
 ## Existing Behavior
 
-`ShiftRegisterManager.resolve_team_summary_source()` queries Team Register
-configurations in the Shift Register guild. No configuration produces `MISSING`,
-more than one produces `AMBIGUOUS`, and exactly one is inspected as the source.
+`ShiftRegisterManager.resolve_team_source()` follows the explicitly saved Team
+Register FeatureChannel. An unset selection produces `UNSET`; invalid metadata and
+temporarily unreadable data remain distinct states.
 
 For a unique source, the resolver loads all configured Team worksheets and the Team
-Summary worksheet. It validates the Summary header and records the column positions
-needed by the Shift Entry formula. The Shift settings panel then shows the Team
-Register channel and explicitly uses the Summary worksheet as the displayed source.
+Summary worksheet. One complete Summary grid read validates the header and provides
+the row data needed by Draft profiles. Header-derived projections stop at the unique
+terminal `original_message`; physically returned administrator columns after that
+marker are not consumed. The Shift settings panel shows the Team Register channel
+and uses its configured landing worksheet as the displayed source.
 
 Team Register and Shift Register guide links separately override
 `_guide_worksheet_id()` in both their feature-management and user-command cogs. Team
@@ -112,7 +114,7 @@ The following names will change:
 5. Build `TeamRegisterGoogleSheetsMetadata` from those worksheets.
 6. Return `INVALID` if a configured worksheet is missing or the configured landing
    worksheet cannot be found in the metadata.
-7. Read and validate the Summary worksheet header.
+7. Batch-read the complete Summary value grid once and validate its header.
 8. Resolve the username, encore-role, Main ISV, optional Encore ISV, and final import
    column positions into `TeamSummaryColumns`.
 9. Return `AVAILABLE` with `TeamSource(config, metadata, summary_columns)`.
@@ -196,14 +198,15 @@ Latest Guide as appropriate.
 
 An invalid saved source does not silently switch to a different Team Register.
 
-### Future Draft Generation
+### Draft Generation
 
-Draft generation is outside this change. A future draft workflow may reuse the
-resolved source through `source.metadata.team_worksheets` and
-`source.metadata.summary_worksheet`, depending on its approved data contract.
-
-`resolve_team_source()` will not load all registered member rows. A separate,
-purpose-specific operation should read Team data only when draft generation needs it.
+Draft generation resolves Team Source metadata before acquiring worksheet locks,
+then reads the complete Team Summary grid once inside the locked phase. The same
+grid supplies both header validation and the purpose-specific
+`username -> DraftTeamProfile` projection. If Team Summary shares the Shift
+spreadsheet, Summary is included in the same values batch as Entry and Draft;
+otherwise each spreadsheet receives one batch request. Administrator columns after
+the Summary terminal marker may be transported but are not interpreted or imported.
 
 ## Affected Files
 
@@ -348,7 +351,7 @@ env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q \
 ## Out of Scope
 
 - Google Sheets worksheet, column, or formula changes.
-- Draft-generation implementation.
+- Final Schedule generation.
 - Listing all Team worksheet links in Shift settings.
 - Discord command, permission, or localized public-template changes.
 - Compatibility aliases for the old Team Summary Source names.

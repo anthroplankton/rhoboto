@@ -29,7 +29,7 @@ Draft-to-Final workflow can reuse before posting hourly Discord mention updates.
 This change includes:
 
 - A required non-negative Encore Power threshold slash-command option.
-- Purpose-specific Team Summary reads through the existing Team Source resolver.
+- One complete Team Summary grid read with purpose-specific Team Source projection.
 - Encore eligibility based on configured Encore roles and the selected team's Power.
 - ISV-first Encore, Honso, and standby scheduling.
 - Cross-role continuity and same-column Honso placement.
@@ -125,13 +125,18 @@ uses the latest Shift Entry values available after confirmation.
 
 ## Team Source Data Flow
 
-Draft generation must call the existing
-`ShiftRegisterManager.resolve_team_source()` helper. It must not use Shift Entry's
-`Main ISV`, `Encore ISV`, or `Team Info` cells as scheduling authority.
+Draft generation resolves Team Source metadata without performing a preliminary
+Summary value read. After acquiring the Entry, Draft, and optional Summary locks,
+it issues one values batch per spreadsheet. If all three worksheets share a
+spreadsheet, they are read together. It must not use Shift Entry's `Main ISV`,
+`Encore ISV`, or `Team Info` cells as scheduling authority.
 
-When Team Source is available, a purpose-specific manager operation reads the Team
-Summary and builds a mapping from Shift Entry username to a small immutable Draft
-team profile. The profile contains only the values the scheduler needs:
+When Team Source is available, the complete physical Team Summary grid is read once.
+The unique terminal `original_message` bounds the header-derived contract, and a
+purpose-specific projection builds a mapping from Shift Entry username to a small
+immutable Draft team profile. Administrator columns after the terminal may be
+returned by the API but are not consumed. The profile contains only the values the
+scheduler needs:
 
 - Main ISV.
 - Main Power.
@@ -422,8 +427,9 @@ The left Draft body has a `#000000` thin solid outer border over dynamic range
 body grid. Active recruitment rows use background `#FFFFFF`; visible min-max-axis
 rows outside the configured recruitment slots use `#CCCCCC` only in `B:G`, leaving
 the JST label in column `A` white. Rows are not hidden. Before overwriting,
-generation reads `A1:A31` and defines the old body
-as the consecutive valid JST labels beginning at `A2`. It clears only border and
+generation reads the complete physical Draft grid in the spreadsheet batch, then
+projects column `A` through the bounded old-control rows and defines the old body as
+the consecutive valid JST labels beginning at `A2`. It clears only border and
 background fields over the union of old and new body extents, then reapplies the
 new body formatting. This prevents stale gray rows and borders after a shorter
 regeneration without changing font, bold, alignment, column width, validation, or
@@ -607,15 +613,16 @@ storage-error response.
 
 ## Affected Files
 
-Expected application changes:
+Implemented application shape:
 
 - `cogs/shift_register.py`
   - Add and describe the required range-validated threshold.
   - Pass the threshold into Draft generation.
   - Report the threshold and Team Source fallback status.
 - `utils/shift_register_manager.py`
-  - Reuse `resolve_team_source()`.
-  - Read purpose-specific Team Summary profiles.
+  - Resolve Team Source metadata before the locked value batch.
+  - Read the complete Summary grid once and project purpose-specific profiles.
+  - Coalesce Entry, Draft, and Summary when they share one spreadsheet.
   - Fall back safely for unavailable auxiliary Team data.
   - Read the old Draft extent and write schedule, formulas, clears, and formats
     through one typed batch.
