@@ -28,6 +28,7 @@ from components.ui_settings_flow import (
     disable_view_items,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_contract_error,
     send_settings_partial_success,
     send_settings_refresh_failure,
     send_settings_storage_error,
@@ -35,6 +36,7 @@ from components.ui_settings_flow import (
     settings_description,
     settings_title,
 )
+from utils.structs_base import WorksheetContractError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -382,6 +384,15 @@ class TeamRegisterSheetModal(Modal):
                     summary_worksheet_title=summary_worksheet_title,
                 )
             )
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="team_register_setup",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_partial_success(
                 interaction,

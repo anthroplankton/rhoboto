@@ -16,7 +16,7 @@ from components.ui_team_register import (
     get_fresh_team_register_config_or_respond,
 )
 from utils.key_async_lock import KeyAsyncLock
-from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.storage_errors import (
     StorageOperationContext,
     classify_storage_exception,
@@ -117,15 +117,15 @@ class TeamRegister(
     ) -> ClassifiedTeams | None:
         teams = submission
         self.logger.info(
-            "Parsed teams in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%s)",
+            (
+                "Parsed Team Register submission. operation=team_register_parse "
+                "feature=%s guild=%s channel=%s message=%s teams=%s"
+            ),
+            self.feature_name,
             message.guild.id,
             message.channel.id,
-            self.feature_name,
-            message.author.display_name,
-            ", ".join(
-                f"{t.leader_skill_value}/{t.internal_skill_value}/{t.team_power}"
-                for t in teams
-            ),
+            message.id,
+            len(teams),
         )
 
         if self.bot.user is not None:
@@ -164,14 +164,13 @@ class TeamRegister(
                     raise
                 raise error from error.__cause__
 
-        if self.bot.user is not None:
-            await remove_reaction_if_present(
-                message,
-                config.PROCESSING_EMOJI,
-                self.bot.user,
-                log=self.logger,
-            )
-            await add_reaction_if_possible(message, "✅", log=self.logger)
+        await transition_processing_reaction(
+            message,
+            ("✅",),
+            processing_emoji=config.PROCESSING_EMOJI,
+            user=self.bot.user,
+            log=self.logger,
+        )
 
         return classified_teams
 

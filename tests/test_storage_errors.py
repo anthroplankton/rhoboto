@@ -73,16 +73,6 @@ def test_other_orm_exception_is_not_storage_error() -> None:
     assert classify_storage_exception(raw_error) is None
 
 
-def test_explicit_malformed_sheet_error_uses_safe_copy() -> None:
-    error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-
-    content = storage_error_content(error, reference_id="STG-12345678")
-
-    assert "could not be processed" in content
-    assert "Reopen settings" in content
-    assert "STG-12345678" in content
-
-
 def test_partial_success_storage_error_wraps_classified_cause() -> None:
     raw_error = DBConnectionError("private database host")
 

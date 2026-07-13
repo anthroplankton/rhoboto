@@ -21,7 +21,7 @@ from components.ui_shift_register import (
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.key_async_lock import KeyAsyncLock
-from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     ShiftRegisterManager,
@@ -250,12 +250,15 @@ class ShiftRegister(
         recruitment_ranges: RecruitmentTimeRanges,
     ) -> Shift:
         self.logger.info(
-            "Parsed shift in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%r)",
+            (
+                "Parsed Shift Register submission. operation=shift_register_parse "
+                "feature=%s guild=%s channel=%s message=%s slots=%s"
+            ),
+            self.feature_name,
             message.guild.id,
             message.channel.id,
-            self.feature_name,
-            message.author.display_name,
-            shift,
+            message.id,
+            len(set(shift)),
         )
 
         if self.bot.user is not None:
@@ -285,14 +288,13 @@ class ShiftRegister(
                     raise
                 raise error from error.__cause__
 
-        if self.bot.user is not None:
-            await remove_reaction_if_present(
-                message,
-                config.PROCESSING_EMOJI,
-                self.bot.user,
-                log=self.logger,
-            )
-            await add_reaction_if_possible(message, "✅", log=self.logger)
+        await transition_processing_reaction(
+            message,
+            ("✅",),
+            processing_emoji=config.PROCESSING_EMOJI,
+            user=self.bot.user,
+            log=self.logger,
+        )
 
         return shift
 

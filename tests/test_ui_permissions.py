@@ -29,6 +29,7 @@ from components.ui_feature_channel import (
 from components.ui_language_settings import AnnouncementLanguageSettingsView
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
 from components.ui_settings_flow import (
+    SETTINGS_STORAGE_EXCEPTIONS,
     SETTINGS_VIEW_TIMEOUT_SECONDS,
     attach_settings_view_message,
 )
@@ -64,6 +65,7 @@ from utils.shift_register_manager import (
     TeamSourceStatus,
     TeamSummaryColumns,
 )
+from utils.structs_base import WorksheetContractError
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
     TeamRegisterGoogleSheetsMetadata,
@@ -1501,6 +1503,35 @@ async def test_team_setup_modal_reports_partial_success_for_sheet_save_error() -
 
 
 @pytest.mark.asyncio
+async def test_team_setup_modal_reports_contract_error_without_partial_success() -> (
+    None
+):
+    manager = RecordingTeamRegisterManager()
+    contract_error = WorksheetContractError(log_hint="required_header_duplicate")
+    manager.upsert_error = contract_error
+    interaction = FakeInteraction()
+    modal = TeamRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        team_worksheet_titles=["Team 1"],
+        summary_worksheet_title="Summary",
+    )
+
+    assert not isinstance(contract_error, SETTINGS_STORAGE_EXCEPTIONS)
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "The configured Google Sheet could not be processed" in content
+    assert "Some changes may have been saved" not in content
+    assert "Reference: `WSC-" in content
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 async def test_team_setup_modal_reports_partial_success_when_initial_save_fails() -> (
     None
 ):
@@ -2852,6 +2883,38 @@ async def test_shift_setup_modal_reports_partial_success_for_sheet_save_error() 
     assert_no_private_storage_terms(content)
     assert kwargs == {"ephemeral": True}
     assert "private.sheet.example" not in str(interaction.followup.messages)
+
+
+@pytest.mark.asyncio
+async def test_shift_setup_modal_reports_contract_error_without_partial_success() -> (
+    None
+):
+    manager = RecordingShiftRegisterManager()
+    contract_error = WorksheetContractError(log_hint="required_header_missing")
+    manager.upsert_error = contract_error
+    interaction = FakeInteraction()
+    modal = ShiftRegisterSheetModal(
+        manager,
+        sheet_url="https://sheet.example",
+        entry_worksheet_title="Entry",
+        draft_worksheet_title="Draft",
+        final_schedule_worksheet_title="Final",
+        final_schedule_anchor_cell="B2",
+    )
+
+    assert not isinstance(contract_error, SETTINGS_STORAGE_EXCEPTIONS)
+
+    await modal.on_submit(interaction)
+
+    assert interaction.response.deferred == [True]
+    assert manager.anchor_updates == []
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "The configured Google Sheet could not be processed" in content
+    assert "Some changes may have been saved" not in content
+    assert "Reference: `WSC-" in content
+    assert kwargs == {"ephemeral": True}
 
 
 @pytest.mark.asyncio

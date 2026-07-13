@@ -11,12 +11,14 @@ from components.ui_storage_errors import (
     mark_storage_message_failure,
     send_storage_error,
 )
+from components.ui_worksheet_contract_errors import send_worksheet_contract_error
 from tests.fakes import FakeInteraction
 from utils.storage_errors import (
     StorageError,
     StorageErrorKind,
     StorageOperationContext,
 )
+from utils.structs_base import WorksheetContractError
 
 
 class FakeMessage:
@@ -58,6 +60,42 @@ def chained_database_storage_error() -> StorageError:
     )
     error.__cause__ = DBConnectionError("private database host")
     return error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("after_defer", [False, True], ids=["initial", "followup"])
+async def test_send_worksheet_contract_error_uses_exact_ephemeral_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    after_defer: bool,
+) -> None:
+    monkeypatch.setattr(
+        "components.ui_worksheet_contract_errors.secrets.token_hex",
+        lambda _length: "12345678",
+    )
+    interaction = FakeInteraction()
+    if after_defer:
+        await interaction.response.defer(ephemeral=True)
+
+    await send_worksheet_contract_error(
+        interaction,
+        WorksheetContractError(log_hint="required_header_missing"),
+        operation="settings_save",
+        feature_name="team_register",
+        log=RecordingLogger(),
+    )
+
+    expected = (
+        "⚠️📏 The configured Google Sheet layout needs correction. Reopen "
+        "settings, verify the worksheets, and try again. Reference: "
+        "`WSC-12345678`"
+    )
+    if after_defer:
+        assert interaction.response.messages == []
+        assert interaction.followup.messages == [(expected, {"ephemeral": True})]
+    else:
+        assert interaction.response.messages == [(expected, {"ephemeral": True})]
+        assert interaction.followup.messages == []
 
 
 @pytest.mark.asyncio

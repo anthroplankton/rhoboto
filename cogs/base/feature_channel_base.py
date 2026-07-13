@@ -49,6 +49,10 @@ from components.ui_storage_errors import (
     mark_storage_message_failure,
     send_storage_error,
 )
+from components.ui_worksheet_contract_errors import (
+    WORKSHEET_CONTRACT_FAILURE_REACTIONS,
+    send_worksheet_contract_error,
+)
 from models.feature_channel import FeatureChannel
 from models.feature_channel_message_state import (
     FeatureChannelMessageKind,
@@ -65,7 +69,7 @@ from utils.announcement_languages import (
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.manager_base import ManagerBase
 from utils.message_templates import locale_to_template_code, render_message_template
-from utils.reactions import add_reaction_if_possible
+from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.register_i18n import register_user_text
 from utils.storage_errors import (
     StorageError,
@@ -74,7 +78,12 @@ from utils.storage_errors import (
     generate_error_reference,
     storage_error_content,
 )
-from utils.structs_base import GoogleSheetsMetadata, SubmissionParseResult, UserInfo
+from utils.structs_base import (
+    GoogleSheetsMetadata,
+    SubmissionParseResult,
+    UserInfo,
+    WorksheetContractError,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -104,6 +113,7 @@ HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING = (
     "Feature settings were cleared, but the previous latest guide message could "
     "not be deleted. Check bot permissions and delete it manually if needed."
 )
+INTERNAL_FAILURE_REACTIONS = (config.WARNING_EMOJI, "🚧")
 
 
 @dataclass(frozen=True)
@@ -232,6 +242,16 @@ class FeatureChannelErrorHandler:
         source: GuildChannelSource,
         operation: str,
     ) -> None:
+        if isinstance(exc, WorksheetContractError):
+            await send_worksheet_contract_error(
+                interaction,
+                exc,
+                operation=operation,
+                feature_name=self.feature_name,
+                log=self.logger,
+            )
+            return
+
         error = classify_storage_exception(exc)
         if error is None:
             raise exc
@@ -431,11 +451,16 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
         if message.guild is None or message.channel is None:
             return
         self.logger.debug(
-            "Received message in Guild: `%s` Channel: `%s` (Feature: `%s`): %r",
+            (
+                "Received feature message. operation=message_receive feature=%s "
+                "guild=%s channel=%s message=%s lines=%s characters=%s"
+            ),
+            self.feature_name,
             message.guild.id,
             message.channel.id,
-            self.feature_name,
-            message.content,
+            message.id,
+            len(message.content.splitlines()),
+            len(message.content),
         )
 
     async def _add_invalid_registration_reactions(self, message: Message) -> None:
@@ -475,9 +500,32 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                     message,
                     feature_channel_context,
                 )
+        except WorksheetContractError as error:
+            await transition_processing_reaction(
+                message,
+                WORKSHEET_CONTRACT_FAILURE_REACTIONS,
+                processing_emoji=config.PROCESSING_EMOJI,
+                user=getattr(getattr(self, "bot", None), "user", None),
+                log=getattr(self, "logger", None),
+            )
+            await send_worksheet_contract_error(
+                interaction,
+                error,
+                operation="context_menu_upsert",
+                feature_name=self.feature_name,
+                log=getattr(self, "logger", None),
+            )
+            return
         except Exception as exc:
             error = classify_storage_exception(exc)
             if error is None:
+                await transition_processing_reaction(
+                    message,
+                    INTERNAL_FAILURE_REACTIONS,
+                    processing_emoji=config.PROCESSING_EMOJI,
+                    user=getattr(getattr(self, "bot", None), "user", None),
+                    log=getattr(self, "logger", None),
+                )
                 raise
             bot_user = getattr(getattr(self, "bot", None), "user", None)
             reference = generate_error_reference()
@@ -580,9 +628,36 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
                     message,
                     feature_channel_context,
                 )
+            except WorksheetContractError as error:
+                self.logger.warning(
+                    (
+                        "Worksheet contract message action failed. operation=%s "
+                        "feature=%s guild=%s channel=%s message=%s hint=%s"
+                    ),
+                    "message_upsert",
+                    self.feature_name,
+                    message.guild.id,
+                    message.channel.id,
+                    message.id,
+                    error.log_hint,
+                )
+                await transition_processing_reaction(
+                    message,
+                    WORKSHEET_CONTRACT_FAILURE_REACTIONS,
+                    processing_emoji=config.PROCESSING_EMOJI,
+                    user=getattr(getattr(self, "bot", None), "user", None),
+                    log=self.logger,
+                )
             except Exception as exc:
                 error = classify_storage_exception(exc)
                 if error is None:
+                    await transition_processing_reaction(
+                        message,
+                        INTERNAL_FAILURE_REACTIONS,
+                        processing_emoji=config.PROCESSING_EMOJI,
+                        user=getattr(getattr(self, "bot", None), "user", None),
+                        log=self.logger,
+                    )
                     raise
                 await mark_storage_message_failure(
                     message,

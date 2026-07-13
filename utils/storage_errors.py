@@ -19,7 +19,6 @@ class StorageErrorKind(StrEnum):
     GOOGLE_SHEETS_MISSING_WORKSHEET = "google_sheets_missing_worksheet"
     GOOGLE_SHEETS_TRANSIENT = "google_sheets_transient"
     GOOGLE_SHEETS_UNKNOWN = "google_sheets_unknown"
-    MALFORMED_SHEET = "malformed_sheet"
     PARTIAL_SUCCESS = "partial_success"
 
 
@@ -134,10 +133,6 @@ _STORAGE_ERROR_CONTENT = {
     StorageErrorKind.GOOGLE_SHEETS_TRANSIENT: (
         "Google Sheets is temporarily unavailable. Try again later. "
         "Reference: `{reference_id}`"
-    ),
-    StorageErrorKind.MALFORMED_SHEET: (
-        "The configured Google Sheet could not be processed. Reopen settings "
-        "and verify the worksheet configuration. Reference: `{reference_id}`"
     ),
     StorageErrorKind.PARTIAL_SUCCESS: (
         "Some changes may have been saved, but this action could not be completed. "

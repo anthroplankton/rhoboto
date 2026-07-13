@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 # ruff: noqa: SLF001
+import logging
+from contextlib import asynccontextmanager
 from types import MethodType, SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ from cogs.base.feature_channel_base import FeatureChannelBase
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
+from utils import structs_base
 from utils.shift_register_manager import ShiftRegisterManager
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
@@ -20,6 +23,48 @@ from utils.shift_register_structs import (
 )
 
 PRIVATE_DATABASE_ERROR = "private database"
+
+
+def test_required_unique_header_index_returns_zero_based_index() -> None:
+    assert (
+        structs_base.required_unique_header_index(
+            ["other", "required", "third"],
+            "required",
+        )
+        == 1
+    )
+
+
+def test_worksheet_contract_error_replaces_unknown_log_hint() -> None:
+    error = structs_base.WorksheetContractError(log_hint="private-header")
+
+    assert error.log_hint == "invalid_worksheet_contract"
+    assert "private-header" not in str(error)
+
+
+def test_required_unique_header_index_rejects_missing_header_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    headers = ["private-alpha", "private-beta"]
+
+    with pytest.raises(structs_base.WorksheetContractError) as exc_info:
+        structs_base.required_unique_header_index(headers, "private-required")
+
+    assert "private" not in str(exc_info.value)
+    assert "private" not in caplog.text
+
+
+def test_required_unique_header_index_rejects_duplicate_header_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    headers = ["private-required", "private-other", "private-required"]
+
+    with pytest.raises(structs_base.WorksheetContractError) as exc_info:
+        structs_base.required_unique_header_index(headers, "private-required")
+
+    assert exc_info.value.log_hint == "required_header_duplicate"
+    assert "private" not in str(exc_info.value)
+    assert "private" not in caplog.text
 
 
 class FakeLogger:
@@ -56,12 +101,15 @@ class FakeMessage:
         self.channel = SimpleNamespace(id=222)
         self.added_reactions: list[str] = []
         self.removed_reactions: list[tuple[str, object]] = []
+        self.reaction_events: list[tuple[object, ...]] = []
 
     async def add_reaction(self, emoji: str) -> None:
         self.added_reactions.append(emoji)
+        self.reaction_events.append(("add", emoji))
 
     async def remove_reaction(self, emoji: str, user: object) -> None:
         self.removed_reactions.append((emoji, user))
+        self.reaction_events.append(("remove", emoji, user))
 
 
 async def fake_enabled_feature_channel_get_or_none(
@@ -236,6 +284,111 @@ async def test_team_message_ordinary_text_adds_no_reaction(
 
     assert result is None
     assert message.added_reactions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bot_user_present",
+    [True, False],
+    ids=["with-bot-user", "without-bot-user"],
+)
+async def test_team_listener_adds_success_before_removing_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bot_user_present: bool,
+) -> None:
+    class SuccessfulTeamManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            metadata: object,
+            *,
+            count: int,
+        ) -> object:
+            assert count == 2
+            return metadata
+
+        async def upsert_user_teams(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        async def upsert_user_summary(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", SuccessfulTeamManager)
+    bot_user = object() if bot_user_present else None
+    subject = make_subject("team_register")
+    subject.bot = SimpleNamespace(user=bot_user)
+    subject.sheet_write_lock = unlocked
+    message = FakeMessage("150/740/33")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    expected = [("add", "✅")]
+    if bot_user is not None:
+        expected = [
+            ("add", config.PROCESSING_EMOJI),
+            *expected,
+            ("remove", config.PROCESSING_EMOJI, bot_user),
+        ]
+    assert message.reaction_events == expected
+
+
+@pytest.mark.asyncio
+async def test_team_contract_failure_never_logs_private_pre_operation_data(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ContractTeamManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> None:
+            raise structs_base.WorksheetContractError(
+                log_hint="required_header_missing"
+            )
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(TeamRegister, "ManagerType", ContractTeamManager)
+    log = logging.getLogger("tests.register_reactions.team_contract_privacy")
+    caplog.set_level(logging.DEBUG, logger=log.name)
+    subject = make_subject("team_register")
+    subject.bot = SimpleNamespace(user=object())
+    subject.logger = log
+    subject.sheet_write_lock = unlocked
+    message = FakeMessage("151/741/33.5")
+    message.author.display_name = "private-team-display"
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert message.content not in caplog.text
+    assert message.author.display_name not in caplog.text
+    assert "741" not in caplog.text
+    assert "message=123" in caplog.text
+    assert "teams=1" in caplog.text
+    assert "operation=message_upsert" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -561,3 +714,110 @@ async def test_shift_message_ordinary_text_adds_no_reaction(
 
     assert result is None
     assert message.added_reactions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bot_user_present",
+    [True, False],
+    ids=["with-bot-user", "without-bot-user"],
+)
+async def test_shift_listener_adds_success_before_removing_processing(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bot_user_present: bool,
+) -> None:
+    class SuccessfulShiftManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            metadata: object,
+        ) -> object:
+            return metadata
+
+        async def upsert_or_delete_user_shift(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", SuccessfulShiftManager)
+    bot_user = object() if bot_user_present else None
+    subject = make_subject("shift_register")
+    subject.bot = SimpleNamespace(user=bot_user)
+    subject.sheet_write_lock = unlocked
+    subject._write_shift_registration = MethodType(
+        ShiftRegister._write_shift_registration,
+        subject,
+    )
+    message = FakeMessage("4-8")
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    expected = [("add", "✅")]
+    if bot_user is not None:
+        expected = [
+            ("add", config.PROCESSING_EMOJI),
+            *expected,
+            ("remove", config.PROCESSING_EMOJI, bot_user),
+        ]
+    assert message.reaction_events == expected
+
+
+@pytest.mark.asyncio
+async def test_shift_contract_failure_never_logs_private_pre_operation_data(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class ContractShiftManager(ConfiguredDummyManager):
+        async def fetch_google_sheets_metadata(self) -> None:
+            raise structs_base.WorksheetContractError(
+                log_hint="required_header_duplicate"
+            )
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_get_or_none,
+    )
+    monkeypatch.setattr(ShiftRegister, "ManagerType", ContractShiftManager)
+    log = logging.getLogger("tests.register_reactions.shift_contract_privacy")
+    caplog.set_level(logging.DEBUG, logger=log.name)
+    subject = make_subject("shift_register")
+    subject.bot = SimpleNamespace(user=object())
+    subject.logger = log
+    subject.sheet_write_lock = unlocked
+    subject._write_shift_registration = MethodType(
+        ShiftRegister._write_shift_registration,
+        subject,
+    )
+    message = FakeMessage("4-8")
+    message.author.display_name = "private-shift-display"
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert message.content not in caplog.text
+    assert message.author.display_name not in caplog.text
+    assert "ranges=4-8" not in caplog.text
+    assert "message=123" in caplog.text
+    assert "slots=4" in caplog.text
+    assert "operation=message_upsert" in caplog.text

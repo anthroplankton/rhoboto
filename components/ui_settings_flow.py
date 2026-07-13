@@ -8,6 +8,7 @@ from discord.ui import View
 from tortoise.exceptions import DBConnectionError, IntegrityError, OperationalError
 
 from components.ui_storage_errors import send_storage_error
+from components.ui_worksheet_contract_errors import send_worksheet_contract_error
 from utils.google_sheets_errors import GoogleSheetsError
 from utils.storage_errors import (
     StorageError,
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from discord import Embed, Interaction, Message
 
     from utils.manager_base import ManagerBase
+    from utils.structs_base import WorksheetContractError
 
 
 SETTINGS_VIEW_TIMEOUT_SECONDS: Final[float] = 180.0
@@ -153,6 +155,23 @@ async def send_settings_storage_error(
             operation=operation,
             feature_name=feature_name,
         ),
+        log=log,
+    )
+
+
+async def send_settings_contract_error(
+    interaction: Interaction,
+    error: WorksheetContractError,
+    *,
+    operation: str,
+    feature_name: str,
+    log: logging.Logger | None = None,
+) -> None:
+    await send_worksheet_contract_error(
+        interaction,
+        error,
+        operation=operation,
+        feature_name=feature_name,
         log=log,
     )
 

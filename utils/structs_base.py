@@ -10,13 +10,43 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
+    from collections.abc import Generator, Iterator, Sequence
     from typing import ClassVar, Self
 
     from utils.google_sheets import AsyncioGspreadWorksheet
 
 
 CELL_PATTERN = re.compile(r"^[A-Z]+[1-9][0-9]*$")
+_SAFE_WORKSHEET_CONTRACT_LOG_HINTS = {
+    "invalid_worksheet_contract",
+    "required_header_missing",
+    "required_header_duplicate",
+}
+
+
+class WorksheetContractError(Exception):
+    """Raised when a worksheet does not match the required bot-owned layout."""
+
+    def __init__(self, *, log_hint: str = "invalid_worksheet_contract") -> None:
+        super().__init__("Worksheet contract validation failed.")
+        self.log_hint = (
+            log_hint
+            if log_hint in _SAFE_WORKSHEET_CONTRACT_LOG_HINTS
+            else "invalid_worksheet_contract"
+        )
+
+
+def required_unique_header_index(
+    headers: Sequence[object],
+    required_header: object,
+) -> int:
+    """Return a required header's zero-based index without exposing header values."""
+    matches = [index for index, value in enumerate(headers) if value == required_header]
+    if not matches:
+        raise WorksheetContractError(log_hint="required_header_missing")
+    if len(matches) > 1:
+        raise WorksheetContractError(log_hint="required_header_duplicate")
+    return matches[0]
 
 
 def validate_anchor_cell(cell: str) -> str:

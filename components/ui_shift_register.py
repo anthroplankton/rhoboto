@@ -24,6 +24,7 @@ from components.ui_settings_flow import (
     SettingsTimeoutView,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_contract_error,
     send_settings_partial_success,
     send_settings_refresh_failure,
     send_settings_storage_error,
@@ -53,6 +54,7 @@ from utils.shift_register_timeline import (
     format_iso_hour,
     parse_shift_timeline_input,
 )
+from utils.structs_base import WorksheetContractError
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -515,6 +517,15 @@ class ShiftRegisterSheetModal(Modal):
                     draft_worksheet_title=draft_worksheet_title,
                     final_schedule_worksheet_title=final_schedule_worksheet_title,
                 )
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="shift_register_setup",
+                feature_name=SHIFT_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
             await send_settings_partial_success(
                 interaction,

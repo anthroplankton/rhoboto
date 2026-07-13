@@ -60,7 +60,11 @@ from utils.shift_register_structs import (
 )
 from utils.shift_scheduler import DraftSchedule, HourShiftAssignment
 from utils.storage_errors import StorageError, StorageErrorKind
-from utils.structs_base import UserInfo
+from utils.structs_base import (
+    UserInfo,
+    WorksheetContractError,
+    required_unique_header_index,
+)
 from utils.team_register_structs import Team as RegisterTeam, TeamParser
 
 PRIVATE_DATABASE_ERROR = "private database"
@@ -359,6 +363,76 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(
 
 
 @pytest.mark.asyncio
+async def test_generate_shift_draft_reports_contract_error_without_storage_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+    )
+
+    class Manager:
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def ensure_worksheets_and_upsert_sheet_config(
+            self,
+            _metadata: object,
+        ) -> SimpleNamespace:
+            return metadata
+
+        async def generate_draft(self, *_args: object, **_kwargs: object) -> None:
+            raise WorksheetContractError(log_hint="required_header_missing")
+
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
+
+    async def get_feature_channel_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=Manager(), feature_config=config)
+
+    class ConfirmView:
+        value = True
+
+        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+            assert requesting_user_id == 333
+            assert draft_sheet_url.endswith("#gid=222")
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_channel_context
+    subject._get_configured_feature_channel_context = get_configured_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_draft.callback(subject, interaction, 35)
+
+    assert len(interaction.followup.messages) == 1
+    content, kwargs = interaction.followup.messages[0]
+    assert content is not None
+    assert "The configured Google Sheet could not be processed" in content
+    assert "Reference: `WSC-" in content
+    assert "STG-" not in content
+    assert "Some changes may have been saved" not in content
+    assert kwargs == {"ephemeral": True}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("confirmation", [False, None])
 async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     monkeypatch: pytest.MonkeyPatch,
@@ -499,12 +573,15 @@ class FakeMessage:
     def __init__(self) -> None:
         self.added_reactions: list[str] = []
         self.removed_reactions: list[tuple[str, object]] = []
+        self.reaction_events: list[tuple[object, ...]] = []
 
     async def add_reaction(self, emoji: str) -> None:
         self.added_reactions.append(emoji)
+        self.reaction_events.append(("add", emoji))
 
     async def remove_reaction(self, emoji: str, user: object) -> None:
         self.removed_reactions.append((emoji, user))
+        self.reaction_events.append(("remove", emoji, user))
 
 
 class IdRecordingFollowup(FakeDiscordFollowup):
@@ -2243,6 +2320,96 @@ async def test_context_menu_db_failure_marks_message_and_sends_safe_error(
 
 
 @pytest.mark.asyncio
+async def test_context_menu_contract_failure_marks_message_and_responds_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    bot_user = object()
+    message = FakeMessage()
+
+    async def raise_contract_error(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        required_unique_header_index(
+            ["private-header", "private-header"],
+            "private-header",
+        )
+
+    interaction = FakeInteraction()
+    log = logging.getLogger("tests.feature_channel.context_menu_contract")
+    caplog.set_level(logging.WARNING, logger=log.name)
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=raise_contract_error,
+        bot=SimpleNamespace(user=bot_user),
+        logger=log,
+    )
+
+    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+
+    contents = interaction_contents(interaction)
+    assert len(contents) == 1
+    assert "The configured Google Sheet could not be processed" in contents[0]
+    assert "Reference: `WSC-" in contents[0]
+    assert "private-header" not in contents[0]
+    assert "private-header" not in caplog.text
+    assert interaction.followup.messages[0][1] == {"ephemeral": True}
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "📏",
+    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
+
+
+@pytest.mark.asyncio
+async def test_context_menu_marks_internal_error_and_preserves_traceback() -> None:
+    bot_user = object()
+    message = FakeMessage()
+    internal_error = RuntimeError("internal bug")
+
+    async def raise_internal_error(
+        message: FakeMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        raise internal_error
+
+    interaction = FakeInteraction()
+    subject = feature_channel_context_subject(
+        feature_name="team_register",
+        feature_display_name="Team Register",
+        _get_message_feature_channel_context_or_none=(
+            fake_context_menu_feature_channel_context
+        ),
+        _process_feature_channel_message_with_outcome=raise_internal_error,
+        bot=SimpleNamespace(user=bot_user),
+        logger=NullLogger(),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await FeatureChannelBase.upsert_from_content_menu(
+            subject,
+            interaction,
+            message,
+        )
+
+    assert exc_info.value is internal_error
+    assert exc_info.traceback[-1].name == "raise_internal_error"
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🚧",
+    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
+
+
+@pytest.mark.asyncio
 async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     message = FakeMessage()
 
@@ -2424,6 +2591,124 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         config.WARNING_EMOJI,
         "🛠️",
     ]
+    assert message.reaction_events == [
+        ("add", config.PROCESSING_EMOJI),
+        ("add", config.WARNING_EMOJI),
+        ("add", "🛠️"),
+        ("remove", config.PROCESSING_EMOJI, bot_user),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_message_listener_marks_worksheet_contract_error() -> None:
+    bot_user = object()
+    message = FakeRegisterMessage()
+
+    async def get_message_context(_message: FakeRegisterMessage) -> object:
+        return object()
+
+    async def raise_contract_error(
+        message: FakeRegisterMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        required_unique_header_index([], "required")
+
+    subject = SimpleNamespace(
+        _get_message_feature_channel_context_or_none=get_message_context,
+        _process_feature_channel_message_with_outcome=raise_contract_error,
+        _refresh_auto_guide_if_enabled=_noop_async,
+        feature_name="team_register",
+        bot=SimpleNamespace(user=bot_user),
+        logger=NullLogger(),
+    )
+
+    await FeatureChannelBase.on_message(subject, message)
+
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "📏",
+    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
+
+
+@pytest.mark.asyncio
+async def test_message_listener_marks_internal_error_and_preserves_traceback() -> None:
+    bot_user = object()
+    message = FakeRegisterMessage()
+    internal_error = RuntimeError("internal bug")
+
+    async def get_message_context(_message: FakeRegisterMessage) -> object:
+        return object()
+
+    async def raise_internal_error(
+        message: FakeRegisterMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        raise internal_error
+
+    subject = SimpleNamespace(
+        _get_message_feature_channel_context_or_none=get_message_context,
+        _process_feature_channel_message_with_outcome=raise_internal_error,
+        _refresh_auto_guide_if_enabled=_noop_async,
+        feature_name="team_register",
+        bot=SimpleNamespace(user=bot_user),
+        logger=NullLogger(),
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await FeatureChannelBase.on_message(subject, message)
+
+    assert exc_info.value is internal_error
+    assert exc_info.traceback[-1].name == "raise_internal_error"
+    assert message.added_reactions == [
+        config.PROCESSING_EMOJI,
+        config.WARNING_EMOJI,
+        "🚧",
+    ]
+    assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
+
+
+@pytest.mark.asyncio
+async def test_listener_reaction_failure_does_not_hide_internal_error() -> None:
+    internal_error = RuntimeError("internal bug")
+    reaction_error = RuntimeError("reaction delivery failed")
+
+    class ReactionFailingMessage(FakeRegisterMessage):
+        async def add_reaction(self, emoji: str) -> None:
+            await super().add_reaction(emoji)
+            if emoji != config.PROCESSING_EMOJI:
+                raise reaction_error
+
+    message = ReactionFailingMessage()
+
+    async def get_message_context(_message: FakeRegisterMessage) -> object:
+        return object()
+
+    async def raise_internal_error(
+        message: FakeRegisterMessage,
+        _feature_channel_context: object,
+    ) -> None:
+        await message.add_reaction(config.PROCESSING_EMOJI)
+        raise internal_error
+
+    logger = RecordingLogger()
+    subject = SimpleNamespace(
+        _get_message_feature_channel_context_or_none=get_message_context,
+        _process_feature_channel_message_with_outcome=raise_internal_error,
+        _refresh_auto_guide_if_enabled=_noop_async,
+        feature_name="team_register",
+        bot=SimpleNamespace(user=object()),
+        logger=logger,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await FeatureChannelBase.on_message(subject, message)
+
+    assert exc_info.value is internal_error
+    assert len(logger.exceptions) == 2
 
 
 @pytest.mark.asyncio

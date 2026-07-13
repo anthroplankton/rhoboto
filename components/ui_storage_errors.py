@@ -4,7 +4,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from bot import config
-from utils.reactions import add_reactions_if_possible, remove_reaction_if_present
+from utils.reactions import transition_processing_reaction
 from utils.storage_errors import (
     StorageError,
     StorageOperationContext,
@@ -93,16 +93,11 @@ async def mark_storage_message_failure(  # noqa: PLR0913
         error.log_hint,
         **_safe_storage_log_kwargs(error),
     )
-    if bot_user is not None:
-        await remove_reaction_if_present(
-            message,
-            config.PROCESSING_EMOJI,
-            bot_user,
-            log=active_logger,
-        )
-    await add_reactions_if_possible(
+    await transition_processing_reaction(
         message,
         STORAGE_FAILURE_REACTIONS,
+        processing_emoji=config.PROCESSING_EMOJI,
+        user=bot_user,
         log=active_logger,
     )
 
