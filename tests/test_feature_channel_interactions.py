@@ -27,7 +27,12 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
 )
 from cogs.shift import Shift
-from cogs.shift_register import ShiftRegister, _format_generate_draft_confirmation
+from cogs.shift_register import (
+    _DRAFT_REPORT_SECTION_PREFIXES,
+    ShiftRegister,
+    _format_generate_draft_confirmation,
+    _split_draft_report,
+)
 from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components import ui_shift_register, ui_team_register
@@ -84,6 +89,36 @@ def test_generate_draft_requires_non_negative_power_threshold() -> None:
     assert threshold.min_value == 0
     assert parameters["runner"].required is False
     assert parameters["runner"].type.value == 6
+
+
+def test_split_draft_report_uses_semantic_boundaries_with_unicode_limit() -> None:
+    report = "\n".join(
+        [
+            "draft generated",
+            _DRAFT_REPORT_SECTION_PREFIXES[0]
+            + "、".join(f"😀user{index}" for index in range(8)),
+            _DRAFT_REPORT_SECTION_PREFIXES[1] + "assigned",
+            "hour 4: 😀alice, 😀bob, 😀carol",
+            _DRAFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
+            "hour 4: 😀dave, 😀eve",
+            "notes attached",
+        ]
+    )
+
+    messages = _split_draft_report(report, limit=80)
+
+    assert len(messages) > 1
+    assert all(len(message.encode("utf-16-le")) // 2 <= 80 for message in messages)
+    assert any(
+        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[0]) for message in messages
+    )
+    assert any(
+        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[1]) for message in messages
+    )
+    assert any(
+        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[2]) for message in messages
+    )
+    assert "".join(messages).replace("\n", "") == report.replace("\n", "")
 
 
 def test_generate_draft_confirmation_formats_new_destinations() -> None:
@@ -370,7 +405,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
                 team_source_warning=None,
                 recruitment_ranges=ranges,
                 notes_snapshot=notes_snapshot,
-                unregistered_usernames=("carol",),
+                unregistered_usernames=(
+                    "carol",
+                    *(f"user{index}" for index in range(300)),
+                ),
                 team_summary_url=(
                     "https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333"
                 ),
@@ -428,7 +466,14 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     prompt, prompt_kwargs = interaction.original_response_edits[0]
     assert "`A1:G31`" in prompt
     assert isinstance(prompt_kwargs["view"], ConfirmView)
-    content, kwargs = interaction.followup.messages[0]
+    assert len(interaction.followup.messages) > 1
+    assert all(
+        len((content or "").encode("utf-16-le")) // 2 <= 2000
+        for content, _kwargs in interaction.followup.messages
+    )
+    content = "\n".join(
+        content or "" for content, _kwargs in interaction.followup.messages
+    )
     assert (
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit?gid=222#gid=222)"
         in (content or "")
@@ -440,12 +485,19 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         in (content or "")
     )
     assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
+    kwargs = interaction.followup.messages[0][1]
     attachment = kwargs["file"]
     assert isinstance(attachment, File)
     assert attachment.filename == "shift-draft-notes.txt"
     attachment.fp.seek(0)
     assert attachment.fp.read().decode("utf-8") == notes_snapshot
-    assert kwargs["ephemeral"] is True
+    assert (
+        sum("file" in kwargs for _content, kwargs in interaction.followup.messages) == 1
+    )
+    assert all(
+        kwargs["ephemeral"] is True
+        for _content, kwargs in interaction.followup.messages
+    )
 
 
 @pytest.mark.asyncio

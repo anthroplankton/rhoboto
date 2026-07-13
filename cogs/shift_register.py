@@ -61,6 +61,84 @@ def _format_display_name(name: str) -> str:
     return escape_markdown(name) if "`" in name else f"`{name}`"
 
 
+_DRAFT_REPORT_SECTION_PREFIXES = (
+    "⚠️ 編成未登録：",  # noqa: RUF001
+    "- 已排入（",  # noqa: RUF001
+    "- 未排入（",  # noqa: RUF001
+)
+_MAX_BMP_CODE_POINT = 0xFFFF
+
+
+def _discord_content_length(content: str) -> int:
+    return len(content.encode("utf-16-le")) // 2
+
+
+def _split_long_draft_report_section(section: str, limit: int) -> list[str]:
+    chunks: list[str] = []
+    start = 0
+    width = 0
+    last_break: int | None = None
+    width_after_break = 0
+
+    for index, char in enumerate(section):
+        char_width = 2 if ord(char) > _MAX_BMP_CODE_POINT else 1
+        width += char_width
+        if last_break is not None:
+            width_after_break += char_width
+        if width > limit:
+            if last_break is not None:
+                chunks.append(section[start:last_break].removesuffix("\n"))
+                start = last_break
+                width = width_after_break
+            else:
+                chunks.append(section[start:index])
+                start = index
+                width = char_width
+            last_break = None
+            width_after_break = 0
+        if char in "\n、":
+            last_break = index + 1
+            width_after_break = 0
+
+    if start < len(section):
+        chunks.append(section[start:])
+    return chunks
+
+
+def _split_draft_report(report: str, *, limit: int = 2000) -> list[str]:
+    """Split a report at semantic boundaries within Discord's content limit."""
+    if _discord_content_length(report) <= limit:
+        return [report]
+
+    messages: list[str] = []
+    pending_lines: list[str] = []
+    pending_length = 0
+    for line in report.splitlines():
+        line_chunks = _split_long_draft_report_section(line, limit)
+        for chunk_index, chunk in enumerate(line_chunks):
+            chunk_length = _discord_content_length(chunk)
+            starts_section = chunk_index == 0 and line.startswith(
+                _DRAFT_REPORT_SECTION_PREFIXES
+            )
+            if pending_lines and (
+                starts_section or pending_length + 1 + chunk_length > limit
+            ):
+                messages.append("\n".join(pending_lines))
+                pending_lines = []
+                pending_length = 0
+            if pending_lines:
+                pending_length += 1
+            pending_lines.append(chunk)
+            pending_length += chunk_length
+            if chunk_index < len(line_chunks) - 1:
+                messages.append("\n".join(pending_lines))
+                pending_lines = []
+                pending_length = 0
+    if pending_lines:
+        messages.append("\n".join(pending_lines))
+    return messages
+
+
 def _format_generate_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
     draft_sheet_url: str,
@@ -562,7 +640,7 @@ class ShiftRegister(
             )
             return
 
-        await interaction.followup.send(
+        report_messages = _split_draft_report(
             self._format_draft_report(
                 schedule,
                 draft_sheet_url,
@@ -572,13 +650,16 @@ class ShiftRegister(
                 team_summary_url=result.team_summary_url,
                 team_source_warning=result.team_source_warning,
                 unregistered_usernames=result.unregistered_usernames,
-            ),
-            file=File(
-                BytesIO(result.notes_snapshot.encode("utf-8")),
-                filename="shift-draft-notes.txt",
-            ),
-            ephemeral=True,
+            )
         )
+        for index, report_message in enumerate(report_messages):
+            send_kwargs: dict[str, object] = {"ephemeral": True}
+            if index == 0:
+                send_kwargs["file"] = File(
+                    BytesIO(result.notes_snapshot.encode("utf-8")),
+                    filename="shift-draft-notes.txt",
+                )
+            await interaction.followup.send(report_message, **send_kwargs)
 
     @staticmethod
     def _format_draft_report(
