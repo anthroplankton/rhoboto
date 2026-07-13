@@ -81,6 +81,14 @@ def partial_success_storage_error(exc: Exception) -> StorageError | None:
 
 
 def storage_error_content(error: StorageError, *, reference_id: str) -> str:
+    if (
+        error.kind is StorageErrorKind.PARTIAL_SUCCESS
+        and error.log_hint == "team_summary_refreshed_draft_incomplete"
+    ):
+        return (
+            "Team Summary was refreshed, but Shift Draft was not completed. "
+            f"Verify the worksheets before retrying. Reference: `{reference_id}`"
+        )
     template = _STORAGE_ERROR_CONTENT.get(error.kind, _GENERIC_STORAGE_ERROR_CONTENT)
     return template.format(reference_id=reference_id)
 

@@ -466,6 +466,59 @@ def test_summary_worksheet_index_uses_title_derived_headers() -> None:
     assert index.row_by_username == {"alice": 2}
 
 
+def test_summary_index_classifies_retired_reusable_and_occupied_rows() -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [
+        ["alice", "Alice", "", 268, 33.4, "main", "active admin"],
+        [
+            "bob (archived)",
+            "Bob",
+            "",
+            248,
+            35.3,
+            "old message",
+            "retired admin",
+        ],
+        ["", "", "", "", "", "", "reusable admin"],
+        ["", "manual", "", "", "", "", "occupied admin"],
+    ]
+
+    index = SummaryWorksheetContent.index_physical_rows(headers, rows, titles)
+
+    assert index.row_by_username == {"alice": 2}
+    assert index.archived_row_by_username == {"bob": 3}
+    assert index.reusable_rows == (4,)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[" (archived)", "Alice", "", 268, 33.4, "main"]],
+        [["alice (archived) (archived)", "Alice", "", 268, 33.4, "main"]],
+        [["alice (archived)"], ["alice (archived)"]],
+        [
+            ["alice", "Alice", "", 268, 33.4, "main"],
+            ["alice (archived)", "Alice", "", 268, 33.4, "main"],
+        ],
+    ],
+)
+def test_summary_index_rejects_invalid_archived_username_contract(
+    rows: list[list[object]],
+) -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.index_physical_rows(headers, rows, titles)
+
+
 def test_summary_worksheet_index_preserves_reordered_title_pairs() -> None:
     titles = ["Main Team", "Encore Team"]
     headers = [
@@ -538,19 +591,26 @@ def test_summary_upsert_serializes_explicit_title_values_in_header_order() -> No
         "manager_note",
     ]
     rows = [["alice", "Old", "", 0, 0, 0, 0, "old", "preserve"]]
-    user = UserInfo(username="alice", display_name="Alice")
-    main = TeamParser.parse_line(user, "150/740/33.4 main")
-    encore = TeamParser.parse_line(user, "140/680/35.3 encore")
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 140, 680, 35.3, "140/680/35.3 encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
 
     mutations = SummaryWorksheetContent.plan_upsert(
         42,
         headers,
         rows,
-        UserInfoWithEncoreRoles("alice", "Alice", "Encore"),
-        {
-            "Main Team": main,
-            "Encore Team": encore,
-        },
+        summary,
+        ["Main Team", "Encore Team"],
     )
 
     assert mutations == (
@@ -575,6 +635,45 @@ def test_summary_upsert_serializes_explicit_title_values_in_header_order() -> No
     )
 
 
+def test_summary_upsert_revives_matching_archived_row() -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [
+        [
+            "alice (archived)",
+            "Old Alice",
+            "",
+            1,
+            1,
+            "old message",
+            "preserve",
+        ]
+    ]
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "")},
+    )[0]
+
+    (update,) = SummaryWorksheetContent.plan_upsert(
+        42,
+        headers,
+        rows,
+        summary,
+        titles,
+    )
+
+    assert update.start_row_index == 1
+    assert update.rows[0][-1] == "150/740/33.4 main"
+
+
 def test_summary_upsert_follows_moved_base_headers_and_repeated_messages() -> None:
     headers = [
         "encore_roles",
@@ -588,15 +687,22 @@ def test_summary_upsert_follows_moved_base_headers_and_repeated_messages() -> No
         ["Old", "alice", "Old Alice", 1, 1, "same"],
         ["", "bob", "Bob", 2, 2, "same"],
     ]
-    user = UserInfo(username="alice", display_name="Alice")
-    main = TeamParser.parse_line(user, "150/740/33.4 same")
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 same"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
 
     (update,) = SummaryWorksheetContent.plan_upsert(
         42,
         headers,
         rows,
-        UserInfoWithEncoreRoles("alice", "Alice", "Encore"),
-        {"Main Team": main},
+        summary,
+        ["Main Team"],
     )
 
     assert update.start_row_index == 1
@@ -622,16 +728,26 @@ def test_summary_upsert_follows_interleaved_required_headers() -> None:
         "original_message",
     ]
     rows = [[1, "Old Alice", 1, "alice", 1, "Old", 1, "old"]]
-    user = UserInfo(username="alice", display_name="Alice")
-    main = TeamParser.parse_line(user, "150/740/33.4 main")
-    encore = TeamParser.parse_line(user, "140/680/35.3 encore")
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 140, 680, 35.3, "140/680/35.3 encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
 
     (update,) = SummaryWorksheetContent.plan_upsert(
         42,
         headers,
         rows,
-        UserInfoWithEncoreRoles("alice", "Alice", "Encore"),
-        {"Main Team": main, "Encore Team": encore},
+        summary,
+        ["Main Team", "Encore Team"],
     )
 
     assert update.rows[0] == (
@@ -1207,28 +1323,82 @@ def test_summary_duplicate_terminal_near_misses_fail_closed(
 
 
 def test_summary_reconciliation_validates_every_consumed_team_row() -> None:
-    summary_headers = [
-        *SummaryWorksheetContent.COLUMNS,
-        "Main Team ISV",
-        "Main Team Power",
-        "original_message",
-    ]
     team_rows = [
         ["alice", "Alice", 150, 740, 33.4, "main"],
         ["bob", "Bob", "not-int", 680, 35.3, "bad"],
     ]
 
     with pytest.raises(WorksheetContractError):
-        SummaryWorksheetContent.plan_reconciliation(
-            worksheet_id=42,
-            headers=summary_headers,
-            rows=[],
-            team_worksheets={"Main Team": (TeamWorksheetContent.COLUMNS, team_rows)},
-            users={},
+        SummaryWorksheetContent.derive_summaries(
+            {"Main Team": (TeamWorksheetContent.COLUMNS, team_rows)},
+            {},
         )
 
 
-def test_summary_reconciliation_updates_reuses_and_deletes_physical_rows() -> None:
+def test_summary_derivation_uses_discord_users_and_first_team_fallback() -> None:
+    summaries = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [
+                    ["alice", "Team Alice", 150, 740, 33.4, "alice main"],
+                    ["bob", "Team Bob", 130, 600, 30.0, "bob main"],
+                ],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Team Alice", 140, 680, 35.3, "alice encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Discord Alice", "Encore")},
+    )
+
+    assert [summary.username for summary in summaries] == ["alice", "bob"]
+    assert [(summary.display_name, summary.encore_roles) for summary in summaries] == [
+        ("Discord Alice", "Encore"),
+        ("Team Bob", ""),
+    ]
+    assert getattr(summaries[0], "Main Team ISV") == 268
+    assert getattr(summaries[0], "Encore Team Power") == 35.3
+    assert getattr(summaries[1], "Encore Team ISV") == ""
+
+
+def test_summary_reconciliation_serializes_prederived_summaries() -> None:
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+    summaries = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "main"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Discord Alice", "Encore")},
+    )
+
+    (update,) = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=headers,
+        rows=[],
+        titles=["Main Team"],
+        summaries=summaries,
+    )
+
+    assert update.rows[0] == (
+        "alice",
+        "Discord Alice",
+        "Encore",
+        268,
+        33.4,
+        "main",
+    )
+
+
+def test_summary_reconciliation_updates_reuses_and_retires_physical_rows() -> None:
     summary_headers = [
         *SummaryWorksheetContent.COLUMNS,
         "Encore Team ISV",
@@ -1250,18 +1420,22 @@ def test_summary_reconciliation_updates_reuses_and_deletes_physical_rows() -> No
     ]
     encore_rows = [["alice", "Alice", 140, 680, 35.3, "same"]]
 
+    team_worksheets = {
+        "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
+        "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
+    }
     mutations = SummaryWorksheetContent.plan_reconciliation(
         worksheet_id=42,
         headers=summary_headers,
         rows=summary_rows,
-        team_worksheets={
-            "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
-            "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
-        },
-        users={
-            "alice": UserInfoWithEncoreRoles("alice", "Alice New", "Lead"),
-            "bob": UserInfoWithEncoreRoles("bob", "Bob", ""),
-        },
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {
+                "alice": UserInfoWithEncoreRoles("alice", "Alice New", "Lead"),
+                "bob": UserInfoWithEncoreRoles("bob", "Bob", ""),
+            },
+        ),
     )
 
     assert mutations == (
@@ -1288,8 +1462,50 @@ def test_summary_reconciliation_updates_reuses_and_deletes_physical_rows() -> No
             start_column=1,
             values=[["bob", "Bob", "", "", "", 224, 30.0, "bob main"]],
         ),
-        DimensionMutation.delete_rows(42, start_row=2),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=2,
+            start_column=1,
+            values=[["carol (archived)"]],
+        ),
     )
+
+
+def test_summary_reconciliation_revives_matching_archived_row() -> None:
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [
+        [
+            "alice (archived)",
+            "Old Alice",
+            "",
+            1,
+            1,
+            "old message",
+            "preserve",
+        ]
+    ]
+    team_rows = [["alice", "Alice", 150, 740, 33.4, "main"]]
+
+    team_worksheets = {"Main Team": (TeamWorksheetContent.COLUMNS, team_rows)}
+    (update,) = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=headers,
+        rows=rows,
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "")},
+        ),
+    )
+
+    assert update.start_row_index == 1
+    assert update.rows[0][-1] == "main"
 
 
 def test_summary_reconciliation_follows_moved_team_and_summary_usernames() -> None:
@@ -1315,12 +1531,16 @@ def test_summary_reconciliation_follows_moved_team_and_summary_usernames() -> No
         ["Bob", "bob", 140, 680, 35.3, "same"],
     ]
 
+    team_worksheets = {"Main Team": (team_headers, team_rows)}
     mutations = SummaryWorksheetContent.plan_reconciliation(
         worksheet_id=42,
         headers=summary_headers,
         rows=summary_rows,
-        team_worksheets={"Main Team": (team_headers, team_rows)},
-        users={"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        ),
     )
 
     assert [mutation.rows[0] for mutation in mutations] == [
@@ -1347,15 +1567,19 @@ def test_summary_reconciliation_follows_interleaved_required_headers() -> None:
     ]
     encore_rows = [["alice", "Alice", 140, 680, 35.3, "same"]]
 
+    team_worksheets = {
+        "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
+        "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
+    }
     mutations = SummaryWorksheetContent.plan_reconciliation(
         worksheet_id=42,
         headers=summary_headers,
         rows=summary_rows,
-        team_worksheets={
-            "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
-            "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
-        },
-        users={"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        ),
     )
 
     assert [mutation.rows[0] for mutation in mutations] == [

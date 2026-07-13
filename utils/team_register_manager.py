@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools as it
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, overload, override
 
 import pandas as pd
@@ -50,6 +51,16 @@ if TYPE_CHECKING:
 TEAM_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
 SUMMARY_TITLE_PAIR_COLUMN_COUNT = 2
 TEAM_FIRST_DATA_ROW = 2
+
+
+@dataclass(frozen=True)
+class SummaryReconciliationPlan:
+    """One fully derived Summary refresh ready for spreadsheet dispatch."""
+
+    mutations: tuple[GridValueUpdate | DimensionMutation, ...]
+    summaries: tuple[Summary, ...]
+    summary_headers: tuple[str, ...]
+    frame: pd.DataFrame
 
 
 def _raise_partial_after_side_effect(
@@ -146,7 +157,7 @@ class TeamRegisterManager(
             force_structure=True,
         ) as (metadata, grids, side_effect):
             try:
-                mutations, _ = self._plan_summary_reconciliation(
+                summary_plan = self.plan_summary_reconciliation(
                     metadata,
                     grids,
                     member_by_names or {},
@@ -156,7 +167,7 @@ class TeamRegisterManager(
                 _raise_partial_after_side_effect(exc, side_effect=side_effect)
                 raise
             try:
-                await self._google_sheet.batch_update_grid(mutations)
+                await self._google_sheet.batch_update_grid(summary_plan.mutations)
             except Exception as exc:
                 error = partial_success_storage_error(exc)
                 if error is None:
@@ -702,13 +713,13 @@ class TeamRegisterManager(
             for mutation in summary_migration
         )
         if inserts_title_pair:
-            reconciliation, _ = self._plan_summary_reconciliation(
+            reconciliation = self.plan_summary_reconciliation(
                 metadata,
                 simulated_grids,
                 {},
                 encore_role_ids,
                 {user.username: summary_user},
-            )
+            ).mutations
             row_updates = [
                 mutation
                 for mutation in data_mutations
@@ -806,8 +817,14 @@ class TeamRegisterManager(
                 summary_worksheet.id,
                 summary_headers,
                 summary_rows,
-                summary_user,
-                team_by_title,
+                Summary(
+                    summary_user.username,
+                    summary_user.display_name,
+                    summary_user.encore_roles,
+                    list(team_by_title),
+                    list(team_by_title.values()),
+                ),
+                list(team_by_title),
             )
         )
         row_updates = [
@@ -964,12 +981,12 @@ class TeamRegisterManager(
                 for mutation in summary_migration
             )
             if inserts_title_pair:
-                reconciliation, _ = self._plan_summary_reconciliation(
+                reconciliation = self.plan_summary_reconciliation(
                     metadata,
                     simulated_grids,
                     {},
                     [],
-                )
+                ).mutations
                 reconciliation_columns = [
                     mutation
                     for mutation in reconciliation
@@ -1092,14 +1109,15 @@ class TeamRegisterManager(
             )
             raise
 
-    def _plan_summary_reconciliation(
-        self,
+    @classmethod
+    def plan_summary_reconciliation(
+        cls,
         metadata: TeamRegisterGoogleSheetsMetadata,
         grids: dict[int, tuple[list[object], list[list[object]]]],
         member_by_names: dict[str, Member],
         encore_role_ids: list[int],
         user_overrides: dict[str, UserInfoWithEncoreRoles] | None = None,
-    ) -> tuple[list[GridValueUpdate | DimensionMutation], pd.DataFrame]:
+    ) -> SummaryReconciliationPlan:
         column_mutations: list[DimensionMutation] = []
         header_updates: list[GridValueUpdate] = []
         dimensions: dict[int, tuple[int, int]] = {}
@@ -1119,7 +1137,7 @@ class TeamRegisterManager(
                 rows,
                 column_count=worksheet.col_count,
             )
-            headers, rows = self._grid_after_mutations(headers, rows, migration)
+            headers, rows = cls._grid_after_mutations(headers, rows, migration)
             column_mutations.extend(
                 mutation
                 for mutation in migration
@@ -1134,7 +1152,7 @@ class TeamRegisterManager(
 
         summary_worksheet = metadata.summary_worksheet.worksheet
         if summary_worksheet is None:
-            return [], pd.DataFrame()
+            return SummaryReconciliationPlan((), (), (), pd.DataFrame())
         dimensions[summary_worksheet.id] = (
             summary_worksheet.row_count,
             summary_worksheet.col_count,
@@ -1147,7 +1165,7 @@ class TeamRegisterManager(
             list(team_grids),
             column_count=summary_worksheet.col_count,
         )
-        summary_headers, summary_rows = self._grid_after_mutations(
+        summary_headers, summary_rows = cls._grid_after_mutations(
             original_headers,
             original_rows,
             summary_migration,
@@ -1163,31 +1181,7 @@ class TeamRegisterManager(
             if isinstance(mutation, GridValueUpdate)
         )
 
-        summary_index = SummaryWorksheetContent.index_physical_rows(
-            summary_headers,
-            summary_rows,
-            list(team_grids),
-        )
         users = {}
-        for username, row_number in summary_index.row_by_username.items():
-            row = summary_rows[row_number - 2]
-            display_name_index = summary_index.column_by_header["display_name"] - 1
-            encore_roles_index = summary_index.column_by_header["encore_roles"] - 1
-            users[str(username)] = UserInfoWithEncoreRoles(
-                str(username),
-                str(
-                    row[display_name_index]
-                    if len(row) > display_name_index
-                    and row[display_name_index] is not None
-                    else ""
-                ),
-                str(
-                    row[encore_roles_index]
-                    if len(row) > encore_roles_index
-                    and row[encore_roles_index] is not None
-                    else ""
-                ),
-            )
         for username, member in member_by_names.items():
             users[username] = UserInfoWithEncoreRoles(
                 username,
@@ -1198,12 +1192,13 @@ class TeamRegisterManager(
             )
         users.update(user_overrides or {})
 
+        summaries = SummaryWorksheetContent.derive_summaries(team_grids, users)
         reconciliation = SummaryWorksheetContent.plan_reconciliation(
             worksheet_id=summary_worksheet.id,
             headers=summary_headers,
             rows=summary_rows,
-            team_worksheets=team_grids,
-            users=users,
+            titles=list(team_grids),
+            summaries=summaries,
         )
         row_updates = [
             mutation
@@ -1215,20 +1210,20 @@ class TeamRegisterManager(
             for mutation in reconciliation
             if isinstance(mutation, DimensionMutation)
         ]
-        growth = self._plan_grid_growth(
+        growth = cls._plan_grid_growth(
             dimensions,
             column_mutations,
             [*header_updates, *row_updates],
         )
-        mutations: list[GridValueUpdate | DimensionMutation] = [
+        mutations = (
             *column_mutations,
             *growth,
             *header_updates,
             *row_updates,
             *row_deletions,
-        ]
+        )
 
-        final_headers, final_rows = self._grid_after_mutations(
+        final_headers, final_rows = cls._grid_after_mutations(
             original_headers,
             original_rows,
             (*summary_migration, *reconciliation),
@@ -1256,7 +1251,12 @@ class TeamRegisterManager(
         final = final.drop(columns=[Summary.original_message_title()])
         team_columns = final.columns.difference(["display_name", "encore_roles"])
         final[team_columns] = final[team_columns].replace("", pd.NA)
-        return mutations, final
+        return SummaryReconciliationPlan(
+            mutations=mutations,
+            summaries=summaries,
+            summary_headers=final_index.bot_headers,
+            frame=final,
+        )
 
     async def refresh_summary_registration(
         self,
@@ -1270,18 +1270,18 @@ class TeamRegisterManager(
         ) as (metadata, grids, side_effect):
             try:
                 encore_role_ids = (await self.get_sheet_config()).encore_role_ids
-                mutations, final = self._plan_summary_reconciliation(
+                summary_plan = self.plan_summary_reconciliation(
                     metadata,
                     grids,
                     member_by_names,
                     encore_role_ids,
                 )
                 sheet = await self.get_google_sheet()
-                await sheet.batch_update_grid(mutations)
+                await sheet.batch_update_grid(summary_plan.mutations)
             except Exception as exc:
                 _raise_partial_after_side_effect(exc, side_effect=side_effect)
                 raise
-            return final
+            return summary_plan.frame
 
     async def update_encore_role_ids_and_summary(
         self,
@@ -1295,7 +1295,7 @@ class TeamRegisterManager(
             validate_summary_sources=True,
         ) as (metadata, grids, side_effect):
             try:
-                mutations, _ = self._plan_summary_reconciliation(
+                summary_plan = self.plan_summary_reconciliation(
                     metadata,
                     grids,
                     member_by_names,
@@ -1314,7 +1314,7 @@ class TeamRegisterManager(
                 _raise_partial_after_side_effect(exc, side_effect=side_effect)
                 raise
             try:
-                await sheet.batch_update_grid(mutations)
+                await sheet.batch_update_grid(summary_plan.mutations)
             except Exception as exc:
                 error = partial_success_storage_error(exc)
                 if error is None:

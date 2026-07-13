@@ -553,6 +553,21 @@ class WorksheetPhysicalIndex:
         return self.reusable_rows[0] if self.reusable_rows else None
 
 
+@dataclass(frozen=True, slots=True)
+class SummaryPhysicalIndex:
+    """Exact Summary rows, including bot-owned archived-row markers."""
+
+    bot_headers: tuple[str, ...]
+    column_by_header: dict[str, int]
+    row_by_username: dict[object, int]
+    archived_row_by_username: dict[str, int]
+    reusable_rows: tuple[int, ...]
+
+    @property
+    def first_reusable_row(self) -> int | None:
+        return self.reusable_rows[0] if self.reusable_rows else None
+
+
 def _build_physical_index(
     bot_headers: tuple[str, ...],
     rows: Sequence[Sequence[object]],
@@ -657,24 +672,6 @@ def _summary_title_header_positions(
     if any(set(pair) != {"isv", "power"} for pair in positions.values()):
         raise WorksheetContractError
     return {title: (pair["isv"], pair["power"]) for title, pair in positions.items()}
-
-
-def _summary_values_by_header(
-    user: UserInfoWithEncoreRoles,
-    team_by_title: Mapping[str, Team | None],
-) -> dict[str, object]:
-    values: dict[str, object] = {
-        "username": user.username,
-        "display_name": user.display_name,
-        "encore_roles": user.encore_roles,
-        Summary.original_message_title(): Summary.join_original_messages(
-            team.original_message for team in team_by_title.values() if team is not None
-        ),
-    }
-    for title, team in team_by_title.items():
-        values[Summary.isv_title(title)] = team.effective_skill_value if team else ""
-        values[Summary.power_title(title)] = team.team_power if team else ""
-    return values
 
 
 def _plan_duplicate_terminal_repair(
@@ -873,6 +870,25 @@ class SummaryWorksheetContent:
         f.name for f in dataclasses.fields(UserInfoWithEncoreRoles)
     ]
     INDEX_NAME: ClassVar[str] = COLUMNS[0]
+    ARCHIVED_USERNAME_SUFFIX: ClassVar[str] = " (archived)"
+
+    @classmethod
+    def archived_username(cls, username: str) -> str:
+        """Return the reserved Summary username for one archived identity."""
+        if not username or username.endswith(cls.ARCHIVED_USERNAME_SUFFIX):
+            raise WorksheetContractError
+        return f"{username}{cls.ARCHIVED_USERNAME_SUFFIX}"
+
+    @classmethod
+    def _active_username_from_archived(cls, value: object) -> str | None:
+        if not isinstance(value, str) or not value.endswith(
+            cls.ARCHIVED_USERNAME_SUFFIX
+        ):
+            return None
+        username = value.removesuffix(cls.ARCHIVED_USERNAME_SUFFIX)
+        if not username or username.endswith(cls.ARCHIVED_USERNAME_SUFFIX):
+            raise WorksheetContractError
+        return username
 
     @classmethod
     def plan_header_migration(
@@ -1004,7 +1020,7 @@ class SummaryWorksheetContent:
         headers: Sequence[object],
         rows: Sequence[Sequence[object]],
         titles: Sequence[str],
-    ) -> WorksheetPhysicalIndex:
+    ) -> SummaryPhysicalIndex:
         """Index a Summary worksheet using exact title-derived bot headers."""
         dynamic_headers, _ = cls.extended_columns_dtypes_from_titles(list(titles))
         expected_headers = [*cls.COLUMNS, *dynamic_headers]
@@ -1020,10 +1036,41 @@ class SummaryWorksheetContent:
         ):
             raise WorksheetContractError
         bot_headers = cast("tuple[str, ...]", bot_headers)
-        return _build_physical_index(
-            bot_headers,
-            rows,
-            index_name=cls.INDEX_NAME,
+        column_by_header = {
+            header: column for column, header in enumerate(bot_headers, start=1)
+        }
+        username_index = column_by_header[cls.INDEX_NAME] - 1
+        row_by_username: dict[object, int] = {}
+        archived_row_by_username: dict[str, int] = {}
+        reusable_rows = []
+        for row_number, row in enumerate(rows, start=2):
+            username = row[username_index] if len(row) > username_index else ""
+            archived_username = cls._active_username_from_archived(username)
+            bot_values = [
+                row[index] if len(row) > index else ""
+                for index in range(len(bot_headers))
+            ]
+            if archived_username is not None:
+                if (
+                    archived_username in row_by_username
+                    or archived_username in archived_row_by_username
+                ):
+                    raise WorksheetContractError
+                archived_row_by_username[archived_username] = row_number
+                continue
+            if username not in (None, ""):
+                if username in row_by_username or username in archived_row_by_username:
+                    raise WorksheetContractError
+                row_by_username[username] = row_number
+                continue
+            if all(value in (None, "") for value in bot_values):
+                reusable_rows.append(row_number)
+        return SummaryPhysicalIndex(
+            bot_headers=bot_headers,
+            column_by_header=column_by_header,
+            row_by_username=row_by_username,
+            archived_row_by_username=archived_row_by_username,
+            reusable_rows=tuple(reusable_rows),
         )
 
     @classmethod
@@ -1032,24 +1079,23 @@ class SummaryWorksheetContent:
         worksheet_id: int,
         headers: Sequence[object],
         rows: Sequence[Sequence[object]],
-        user: UserInfoWithEncoreRoles,
-        team_by_title: Mapping[str, Team | None],
+        summary: Summary,
+        titles: Sequence[str],
     ) -> tuple[GridValueUpdate, ...]:
-        """Plan one Summary update from an explicit title-to-Team mapping."""
-        titles = list(team_by_title)
+        """Plan one Summary upsert from one derived Summary row."""
         index = cls.index_physical_rows(headers, rows, titles)
         row = (
-            index.row_by_username.get(user.username)
+            index.row_by_username.get(summary.username)
+            or index.archived_row_by_username.get(summary.username)
             or index.first_reusable_row
             or len(rows) + 2
         )
-        values_by_header = _summary_values_by_header(user, team_by_title)
         return (
             GridValueUpdate.from_values(
                 worksheet_id=worksheet_id,
                 start_row=row,
                 start_column=1,
-                values=[[values_by_header[header] for header in index.bot_headers]],
+                values=[[getattr(summary, header) for header in index.bot_headers]],
             ),
         )
 
@@ -1071,72 +1117,92 @@ class SummaryWorksheetContent:
         return (DimensionMutation.delete_rows(worksheet_id, start_row=row),)
 
     @classmethod
-    def plan_reconciliation(
+    def derive_summaries(
         cls,
-        *,
-        worksheet_id: int,
-        headers: Sequence[object],
-        rows: Sequence[Sequence[object]],
         team_worksheets: Mapping[
             str,
             tuple[Sequence[object], Sequence[Sequence[object]]],
         ],
         users: Mapping[str, UserInfoWithEncoreRoles],
-    ) -> tuple[GridValueUpdate | DimensionMutation, ...]:
-        """Plan a full Summary reconciliation from validated Team rows."""
+    ) -> tuple[Summary, ...]:
+        """Derive active Summary rows from validated Team worksheet rows."""
         titles = list(team_worksheets)
-        index = cls.index_physical_rows(headers, rows, titles)
         teams_by_title: dict[str, dict[str, Team]] = {}
-        desired_usernames: list[str] = []
+        usernames: list[str] = []
         first_team_by_username: dict[str, Team] = {}
         for title, (team_headers, team_rows) in team_worksheets.items():
             teams = TeamWorksheetContent.validated_teams(team_headers, team_rows)
             teams_by_title[title] = {team.username: team for team in teams}
             for team in teams:
                 first_team_by_username.setdefault(team.username, team)
-                if team.username not in desired_usernames:
-                    desired_usernames.append(team.username)
+                if team.username not in usernames:
+                    usernames.append(team.username)
+        summaries = []
+        for username in usernames:
+            user = users.get(
+                username,
+                UserInfoWithEncoreRoles(
+                    username,
+                    first_team_by_username[username].display_name,
+                    "",
+                ),
+            )
+            summaries.append(
+                Summary(
+                    username=username,
+                    display_name=user.display_name,
+                    encore_roles=user.encore_roles,
+                    titles=titles,
+                    teams=[teams_by_title[title].get(username) for title in titles],
+                )
+            )
+        return tuple(summaries)
 
+    @classmethod
+    def plan_reconciliation(
+        cls,
+        *,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        titles: Sequence[str],
+        summaries: Sequence[Summary],
+    ) -> tuple[GridValueUpdate | DimensionMutation, ...]:
+        """Plan a full Summary reconciliation from derived Summary rows."""
+        index = cls.index_physical_rows(headers, rows, titles)
         updates: list[GridValueUpdate | DimensionMutation] = []
         reusable_rows = iter(index.reusable_rows)
         appended_rows = 0
-        for username in desired_usernames:
+        for summary in summaries:
+            username = summary.username
             row = index.row_by_username.get(username)
+            if row is None:
+                row = index.archived_row_by_username.get(username)
             if row is None:
                 row = next(reusable_rows, None)
             if row is None:
                 row = len(rows) + 2 + appended_rows
                 appended_rows += 1
-            fallback_team = first_team_by_username[username]
-            user = users.get(
-                username,
-                UserInfoWithEncoreRoles(username, fallback_team.display_name, ""),
-            )
-            user = UserInfoWithEncoreRoles(
-                username,
-                user.display_name,
-                user.encore_roles,
-            )
-            values_by_header = _summary_values_by_header(
-                user,
-                {title: teams_by_title[title].get(username) for title in titles},
-            )
             updates.append(
                 GridValueUpdate.from_values(
                     worksheet_id=worksheet_id,
                     start_row=row,
                     start_column=1,
-                    values=[[values_by_header[header] for header in index.bot_headers]],
+                    values=[[getattr(summary, header) for header in index.bot_headers]],
                 )
             )
 
-        desired = set(desired_usernames)
+        desired = {summary.username for summary in summaries}
         updates.extend(
-            DimensionMutation.delete_rows(worksheet_id, start_row=row)
+            GridValueUpdate.from_values(
+                worksheet_id=worksheet_id,
+                start_row=row,
+                start_column=index.column_by_header[cls.INDEX_NAME],
+                values=[[cls.archived_username(str(username))]],
+            )
             for username, row in sorted(
                 index.row_by_username.items(),
                 key=lambda item: item[1],
-                reverse=True,
             )
             if username not in desired
         )

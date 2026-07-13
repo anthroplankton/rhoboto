@@ -25,6 +25,7 @@ from utils.reactions import add_reaction_if_possible, transition_processing_reac
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     ShiftRegisterManager,
+    TeamSourceStatus,
     fresh_shift_channel_transaction,
 )
 from utils.shift_register_structs import (
@@ -63,6 +64,8 @@ def _format_display_name(name: str) -> str:
 def _format_generate_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
     draft_sheet_url: str,
+    team_source_status: TeamSourceStatus,
+    team_summary_url: str | None,
 ) -> str:
     ranges = recruitment_ranges.ranges.ranges
     final_row = ranges[-1].end - ranges[0].start + 1
@@ -82,6 +85,16 @@ def _format_generate_draft_confirmation(
             f"- 反查：`J{final_row + 3}:L{final_row + 5}`",  # noqa: RUF001
             (
                 f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"  # noqa: RUF001
+            ),
+            (
+                "- Team Summary：Team Source 可用時，以目前 Discord 成員與 "  # noqa: RUF001
+                f"Team 資料同步至 [Team Summary]({team_summary_url})"
+                if team_summary_url is not None
+                else (
+                    "- Team Summary：未設定 Team Source，本次不會同步"  # noqa: RUF001
+                    if team_source_status is TeamSourceStatus.UNSET
+                    else "- Team Summary：Team Source 設定無效，本次不會同步"  # noqa: RUF001
+                )
             ),
             "",
             (
@@ -440,9 +453,15 @@ class ShiftRegister(
                 context.feature_config.sheet_url,
                 context.feature_config.draft_worksheet_id,
             )
+            (
+                team_source_status,
+                team_summary_url,
+            ) = await context.manager.get_saved_team_summary_destination()
             confirmation_content = _format_generate_draft_confirmation(
                 recruitment_ranges,
                 draft_sheet_url,
+                team_source_status,
+                team_summary_url,
             )
             view = GenerateDraftConfirmView(
                 requesting_user_id=interaction.user.id,
@@ -482,10 +501,16 @@ class ShiftRegister(
                     fresh_config.sheet_url,
                     fresh_config.draft_worksheet_id,
                 )
+                (
+                    fresh_team_source_status,
+                    fresh_team_summary_url,
+                ) = await context.manager.get_saved_team_summary_destination()
                 if (
                     _format_generate_draft_confirmation(
                         fresh_ranges,
                         fresh_draft_sheet_url,
+                        fresh_team_source_status,
+                        fresh_team_summary_url,
                     )
                     != confirmation_content
                 ):
@@ -500,8 +525,12 @@ class ShiftRegister(
 
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
+                member_by_names = {
+                    member.name: member for member in source.guild.members
+                }
                 result = await context.manager.generate_draft(
                     metadata,
+                    member_by_names=member_by_names,
                     encore_power_threshold=float(encore_power_threshold),
                     runner=runner,
                 )
@@ -512,7 +541,8 @@ class ShiftRegister(
                     current_config.draft_worksheet_id,
                 )
                 member_mentions = {
-                    member.name: member.mention for member in source.guild.members
+                    username: member.mention
+                    for username, member in member_by_names.items()
                 }
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -530,6 +560,7 @@ class ShiftRegister(
                 member_mentions,
                 encore_power_threshold=float(encore_power_threshold),
                 recruitment_ranges=result.recruitment_ranges,
+                team_summary_url=result.team_summary_url,
                 team_source_warning=result.team_source_warning,
                 unregistered_usernames=result.unregistered_usernames,
             ),
@@ -548,6 +579,7 @@ class ShiftRegister(
         *,
         encore_power_threshold: float,
         recruitment_ranges: RecruitmentTimeRanges,
+        team_summary_url: str | None,
         team_source_warning: str | None,
         unregistered_usernames: tuple[str, ...] = (),
     ) -> str:
@@ -565,10 +597,12 @@ class ShiftRegister(
             "### ✅ 班表草稿已產生",
             f"- Runner（ランナー）：{schedule.runner or '`Not set`'}",  # noqa: RUF001
             f"- 安可綜合力閾值：{encore_power_threshold:g}",  # noqa: RUF001
-            (
-                f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
-            ),
         ]
+        if team_summary_url is not None:
+            lines.append(f"- [Team Summary]({team_summary_url})：已同步")  # noqa: RUF001
+        lines.append(
+            f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
+        )
         if team_source_warning is not None:
             lines.append(team_source_warning)
         if unregistered_usernames:

@@ -531,6 +531,28 @@ async def test_batch_update_grid_skips_empty_mutation_list() -> None:
 
 
 @pytest.mark.asyncio
+async def test_batch_update_grid_appends_typed_requests_after_grid_mutations() -> None:
+    spreadsheet = RawSpreadsheet(grids={1: [[""]], 2: [[""]]})
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutation = google_sheets_module.GridValueUpdate.from_values(
+        worksheet_id=1,
+        start_row=1,
+        start_column=1,
+        values=[["Summary"]],
+    )
+    draft_request = {
+        "appendDimension": {"sheetId": 2, "dimension": "ROWS", "length": 1}
+    }
+
+    await sheet.batch_update_grid([mutation], worksheet_requests=[draft_request])
+
+    assert spreadsheet.batch_update_calls[0]["requests"] == [
+        google_sheets_module._grid_mutation_request(mutation),  # noqa: SLF001
+        draft_request,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_batch_update_grid_rolls_back_on_invalid_late_request() -> None:
     spreadsheet = RawSpreadsheet(grids={1: [["original"]]})
     sheet = FakeGoogleSheet(spreadsheet)
@@ -791,6 +813,26 @@ async def test_adapter_batch_updates_mixed_cell_types_atomically() -> None:
         {"numberValue": 1},
         {"boolValue": False},
     ]
+
+
+def test_adapter_builds_typed_requests_without_sending() -> None:
+    raw = RawWorksheet(row_count=2, col_count=2)
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    requests = adapter.typed_update_requests(
+        [{"range": "A3", "values": [["=SUM(A1:A2)"]]}],
+        formula_ranges={"A3"},
+        min_rows=3,
+    )
+
+    assert raw.spreadsheet_batch_update_calls == []
+    assert [next(iter(request)) for request in requests] == [
+        "appendDimension",
+        "updateCells",
+    ]
+    assert requests[-1]["updateCells"]["rows"][0]["values"][0]["userEnteredValue"] == {
+        "formulaValue": "=SUM(A1:A2)"
+    }
 
 
 @pytest.mark.asyncio

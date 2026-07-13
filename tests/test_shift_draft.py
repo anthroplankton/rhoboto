@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -34,6 +34,12 @@ from utils.shift_scheduler import (
 )
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import WorksheetContractError
+from utils.team_register_structs import (
+    SummaryWorksheetMetadata,
+    TeamRegisterGoogleSheetsMetadata,
+    TeamWorksheetContent,
+    TeamWorksheetMetadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -84,7 +90,7 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.conditional_format_rule_adds: list[list[dict[str, object]]] = []
         self.typed_minimums: list[tuple[int | None, int | None]] = []
 
-    async def batch_update_typed_values(  # noqa: PLR0913
+    def typed_update_requests(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
@@ -97,7 +103,7 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         frozen_column_count: int | None = None,
         min_rows: int | None = None,
         min_cols: int | None = None,
-    ) -> None:
+    ) -> list[dict[str, object]]:
         self.typed_batches.append(data)
         self.formula_ranges.append(formula_ranges)
         self.background_updates.append(list(background_updates))
@@ -109,6 +115,14 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.conditional_format_rule_adds.append(list(conditional_format_rule_adds))
         self.frozen_column_counts.append(frozen_column_count)
         self.typed_minimums.append((min_rows, min_cols))
+        return data
+
+    async def batch_update_typed_values(
+        self,
+        data: list[dict[str, object]],
+        **kwargs: object,
+    ) -> None:
+        self.typed_update_requests(data, **kwargs)  # type: ignore[arg-type]
 
     async def get_conditional_format_rules(self) -> list[dict[str, object]]:
         return self.conditional_format_rules
@@ -148,6 +162,8 @@ class DraftValueGoogleSheet:
 
     def __init__(self) -> None:
         self.batch_reads: list[list[int]] = []
+        self.batch_updates: list[tuple[list[object], list[dict[str, object]]]] = []
+        self.batch_update_error: Exception | None = None
 
     async def batch_get_worksheet_values(
         self,
@@ -157,6 +173,16 @@ class DraftValueGoogleSheet:
         return {
             worksheet.id: copy.deepcopy(worksheet.values) for worksheet in worksheets
         }
+
+    async def batch_update_grid(
+        self,
+        mutations: list[object],
+        *,
+        worksheet_requests: list[dict[str, object]] = (),
+    ) -> None:
+        self.batch_updates.append((list(mutations), list(worksheet_requests)))
+        if self.batch_update_error is not None:
+            raise self.batch_update_error
 
 
 def configure_draft_value_sheet(
@@ -828,9 +854,51 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ],
     )
 
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    main.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 150, 740, 33.4, "main"],
+        ["bob", "Team Bob", 140, 680, 32.0, "main"],
+        ["carol", "Team Carol", 130, 620, 30.0, "main"],
+    ]
+    main.row_count = 100
+    main.col_count = 20
+    encore = FakeWorksheet(title="Encore Team", worksheet_id=102)
+    encore.values = [TeamWorksheetContent.COLUMNS]
+    encore.row_count = 100
+    encore.col_count = 20
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    summary.values = [
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+        ]
+    ]
+    summary.row_count = 100
+    summary.col_count = 20
+    source_config = SimpleNamespace(
+        sheet_url=metadata.sheet_url,
+        landing_worksheet_id=201,
+        encore_role_ids=[],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        metadata.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+
     def resolve_profiles(
-        _resolution: object,
-        _summary_grid: object,
+        _source: object,
+        _summaries: object,
     ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(
             TeamSourceStatus.AVAILABLE,
@@ -859,16 +927,23 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     monkeypatch.setattr(
         manager,
         "_resolve_team_source_metadata",
-        AsyncMock(return_value=(TeamSourceStatus.AVAILABLE, None, None)),
+        AsyncMock(
+            return_value=(
+                TeamSourceStatus.AVAILABLE,
+                source_config,
+                source_metadata,
+            )
+        ),
     )
     monkeypatch.setattr(
         manager,
-        "_draft_team_profiles_from_grid",
+        "_draft_profiles_from_summary",
         resolve_profiles,
     )
 
     result = await manager.generate_draft(
         metadata,
+        member_by_names={},
         encore_power_threshold=35,
         runner="Run",
     )
@@ -1073,7 +1148,281 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     )
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
-    assert value_sheet.batch_reads == [[1, 2]]
+    assert value_sheet.batch_reads == [[1, 2, 101, 102, 201]]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_uses_shared_live_summary_without_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    entry_worksheet = EntryRangeFakeWorksheet(
+        build_entry_ranges([("alice", "Shift Alice", {4})])
+    )
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        value_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    main.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 150, 740, 33.4, "main"],
+    ]
+    main.row_count = 100
+    main.col_count = 20
+    encore = FakeWorksheet(title="Encore Team", worksheet_id=102)
+    encore.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 140, 680, 35.3, "encore"],
+    ]
+    encore.row_count = 100
+    encore.col_count = 20
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    summary.values = [
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+        ],
+        ["alice", "Stale Alice", "Stale Role", 1, 2, 3, 4, "stale"],
+    ]
+    summary.row_count = 100
+    summary.col_count = 20
+    source_config = SimpleNamespace(
+        sheet_url=value_sheet.sheet_url,
+        landing_worksheet_id=201,
+        encore_role_ids=[10],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        value_sheet.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(
+                TeamSourceStatus.AVAILABLE,
+                source_config,
+                source_metadata,
+            )
+        ),
+    )
+
+    result = await manager.generate_draft(
+        metadata,
+        member_by_names={
+            "alice": SimpleNamespace(
+                display_name="Discord Alice",
+                roles=[SimpleNamespace(id=10, name="Encore")],
+            )
+        },
+        encore_power_threshold=35,
+    )
+
+    assert value_sheet.batch_reads == [[1, 2, 101, 102, 201]]
+    assert len(value_sheet.batch_updates) == 1
+    summary_mutations, draft_requests = value_sheet.batch_updates[0]
+    assert summary_mutations
+    assert draft_requests == draft_worksheet.typed_batches[-1]
+    assert any(
+        "Discord Alice" in mutation.rows[0]
+        for mutation in summary_mutations
+        if hasattr(mutation, "rows")
+    )
+    assert result.team_source_status is TeamSourceStatus.AVAILABLE
+    assert (
+        result.team_summary_url
+        == "https://docs.google.com/spreadsheets/d/shift-draft/edit?gid=201#gid=201"
+    )
+    assert result.unregistered_usernames == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_stage", "structure_changed"),
+    [
+        (None, False),
+        ("planning", False),
+        ("contract", False),
+        ("repair", False),
+        ("summary", False),
+        ("draft", False),
+        ("draft", True),
+    ],
+)
+async def test_generate_draft_writes_once_per_separate_spreadsheet(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failure_stage: str | None,
+    structure_changed: bool,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet([[], [], []])
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    source_config = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/team-source/edit",
+        encore_role_ids=[],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        source_config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    source = shift_register_manager.TeamSource(
+        source_config,
+        source_metadata,
+        shift_register_manager.TeamSummaryColumns(1, 3, 4, 5, None, None, "F"),
+    )
+    resolution = shift_register_manager.TeamSourceResolution(
+        TeamSourceStatus.AVAILABLE,
+        source,
+    )
+    read_resolution = (
+        shift_register_manager.TeamSourceResolution(TeamSourceStatus.INVALID)
+        if failure_stage in {"contract", "repair"}
+        else resolution
+    )
+    source_sheet = DraftValueGoogleSheet()
+    source_sheet.sheet_url = source_config.sheet_url
+    if failure_stage == "summary":
+        source_sheet.batch_update_error = StorageError(
+            StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        )
+    if failure_stage == "draft":
+        shift_sheet.batch_update_error = StorageError(
+            StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        )
+    planned_result = SimpleNamespace()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(TeamSourceStatus.AVAILABLE, source_config, source_metadata)
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_shift_and_team_source_locked",
+        AsyncMock(
+            return_value=(
+                {entry.id: entry.values, draft.id: draft.values},
+                read_resolution,
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_summary_grid_plan",
+        Mock(
+            side_effect=(
+                WorksheetContractError if failure_stage == "contract" else None
+            ),
+            return_value=SimpleNamespace(
+                summary_headers=(),
+                summaries=(),
+                mutations=("summary",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(manager, "_build_team_source", Mock(return_value=resolution))
+    monkeypatch.setattr(
+        manager,
+        "_draft_profiles_from_summary",
+        Mock(return_value=DraftTeamProfileResolution(TeamSourceStatus.AVAILABLE, {})),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_plan_draft_locked",
+        AsyncMock(
+            side_effect=(
+                WorksheetContractError if failure_stage == "planning" else None
+            ),
+            return_value=(planned_result, [{"draft": True}]),
+        ),
+    )
+    if structure_changed:
+        monkeypatch.setattr(
+            manager,
+            "_ensure_current_worksheets",
+            AsyncMock(return_value=(metadata, True)),
+        )
+    monkeypatch.setattr(
+        shift_register_manager,
+        "GoogleSheet",
+        lambda _url, _path: source_sheet,
+    )
+
+    if failure_stage in {"planning", "contract"}:
+        with pytest.raises(WorksheetContractError):
+            await manager.generate_draft(
+                metadata,
+                member_by_names={},
+                encore_power_threshold=35,
+            )
+    elif failure_stage in {"summary", "draft"}:
+        with pytest.raises(StorageError) as exc_info:
+            await manager.generate_draft(
+                metadata,
+                member_by_names={},
+                encore_power_threshold=35,
+            )
+        if failure_stage == "summary":
+            assert exc_info.value.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        else:
+            assert exc_info.value.kind is StorageErrorKind.PARTIAL_SUCCESS
+            assert exc_info.value.log_hint == "team_summary_refreshed_draft_incomplete"
+            assert isinstance(exc_info.value.__cause__, StorageError)
+            assert (
+                exc_info.value.__cause__.kind
+                is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+            )
+    else:
+        result = await manager.generate_draft(
+            metadata,
+            member_by_names={},
+            encore_power_threshold=35,
+        )
+        assert result is planned_result
+
+    assert source_sheet.batch_updates == (
+        [] if failure_stage in {"planning", "contract"} else [(["summary"], [])]
+    )
+    assert shift_sheet.batch_updates == (
+        [([], [{"draft": True}])] if failure_stage in {None, "repair", "draft"} else []
+    )
 
 
 @pytest.mark.asyncio
@@ -1100,29 +1449,24 @@ async def test_generate_draft_accepts_completely_empty_entry(
         ],
     )
 
-    def resolve_profiles(
-        _resolution: object,
-        _summary_grid: object,
-    ) -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
-
     monkeypatch.setattr(
         manager,
         "_resolve_team_source_metadata",
         AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
     )
-    monkeypatch.setattr(
-        manager,
-        "_draft_team_profiles_from_grid",
-        resolve_profiles,
+
+    result = await manager.generate_draft(
+        metadata,
+        member_by_names={},
+        encore_power_threshold=35,
     )
 
-    result = await manager.generate_draft(metadata, encore_power_threshold=35)
-
     assert result.schedule.display_names == {}
+    assert result.team_summary_url is None
     assert result.schedule.hours == [4]
     assert {"A4", "I1"} <= draft_worksheet.formula_ranges[-1]
     assert value_sheet.batch_reads == [[1, 2]]
+    assert len(value_sheet.batch_updates) == 1
     assert draft_worksheet.typed_minimums == [(38, 13)]
 
 
@@ -1168,24 +1512,17 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         ],
     )
 
-    def resolve_profiles(
-        _resolution: object,
-        _summary_grid: object,
-    ) -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
-
     monkeypatch.setattr(
         manager,
         "_resolve_team_source_metadata",
         AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
     )
-    monkeypatch.setattr(
-        manager,
-        "_draft_team_profiles_from_grid",
-        resolve_profiles,
-    )
 
-    await manager.generate_draft(metadata, encore_power_threshold=35)
+    await manager.generate_draft(
+        metadata,
+        member_by_names={},
+        encore_power_threshold=35,
+    )
 
     cleared_ranges = {
         str(item["range"])
@@ -1228,31 +1565,22 @@ async def test_generate_draft_falls_back_without_team_profiles(
         ],
     )
 
-    def resolve_profiles(
-        _resolution: object,
-        _summary_grid: object,
-    ) -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(status, {})
-
     monkeypatch.setattr(
         manager,
         "_resolve_team_source_metadata",
         AsyncMock(return_value=(status, None, None)),
     )
-    monkeypatch.setattr(
-        manager,
-        "_draft_team_profiles_from_grid",
-        resolve_profiles,
-    )
 
     result = await manager.generate_draft(
         metadata,
+        member_by_names={},
         encore_power_threshold=35,
     )
 
     assignment = result.schedule.assignments[0]
     assert "encore" not in assignment.supporter_usernames_by_slot
     assert result.team_source_warning is not None
+    assert result.team_summary_url is None
     assert result.unregistered_usernames == ()
     expected_marker = "⚠️ " if status is TeamSourceStatus.UNSET else "⚠️🛠️ "
     assert result.team_source_warning.startswith(expected_marker)
@@ -1312,6 +1640,7 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
     with pytest.raises(WorksheetContractError):
         await manager.generate_draft(
             metadata,
+            member_by_names={},
             encore_power_threshold=35,
             runner="Run",
         )
@@ -1340,7 +1669,11 @@ async def test_generate_draft_rejects_nonbinary_entry_before_draft_write() -> No
     )
 
     with pytest.raises(WorksheetContractError):
-        await manager.generate_draft(metadata, encore_power_threshold=35)
+        await manager.generate_draft(
+            metadata,
+            member_by_names={},
+            encore_power_threshold=35,
+        )
 
     assert value_sheet.batch_reads == [[1, 2]]
     assert draft_worksheet.typed_batches == []
@@ -1376,6 +1709,7 @@ async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
     with pytest.raises(StorageError) as exc_info:
         await manager.generate_draft(
             metadata,
+            member_by_names={},
             encore_power_threshold=35,
             runner="Run",
         )

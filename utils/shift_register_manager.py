@@ -8,22 +8,33 @@ from itertools import pairwise
 from typing import TYPE_CHECKING, overload, override
 
 from models.feature_channel import FeatureChannel
+from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import BORDER_NAMES, GoogleSheet, WorksheetCreationStatus
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.structs_base import WorksheetContractError, validate_anchor_cell
-from utils.team_register_structs import Summary, TeamRegisterGoogleSheetsMetadata
+from utils.team_register_manager import SummaryReconciliationPlan, TeamRegisterManager
+from utils.team_register_structs import (
+    Summary,
+    SummaryWorksheetContent,
+    TeamRegisterGoogleSheetsMetadata,
+    TeamWorksheetContent,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Hashable
+    from collections.abc import AsyncIterator, Hashable, Sequence
     from datetime import date, datetime
+
+    from discord import Member
 
     from utils.google_sheets import AsyncioGspreadWorksheet
     from utils.shift_scheduler import DraftSchedule
     from utils.structs_base import UserInfo
 
-from models.shift_register import ShiftRegisterConfig
-from utils.google_sheets_urls import normalize_google_sheet_url
+from utils.google_sheets_urls import (
+    google_sheet_url_with_gid,
+    normalize_google_sheet_url,
+)
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import (
     ManagerBase,
@@ -121,6 +132,7 @@ class DraftGenerationResult:
     recruitment_ranges: RecruitmentTimeRanges
     notes_snapshot: str
     unregistered_usernames: tuple[str, ...] = ()
+    team_summary_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +183,26 @@ class ShiftRegisterManager(
             return None
         source = await FeatureChannel.get_or_none(id=source_id)
         return source.channel_id if source is not None else None
+
+    async def get_saved_team_summary_destination(
+        self,
+    ) -> tuple[TeamSourceStatus, str | None]:
+        """Return the DB-configured Summary destination without Sheets access."""
+        config = await self.get_sheet_config()
+        source_id = getattr(config, "team_source_feature_channel_id", None)
+        if source_id is None:
+            return TeamSourceStatus.UNSET, None
+        configs = await TeamRegisterConfig.filter(feature_channel_id=source_id)
+        if len(configs) != 1:
+            return TeamSourceStatus.INVALID, None
+        source = configs[0]
+        return (
+            TeamSourceStatus.AVAILABLE,
+            google_sheet_url_with_gid(
+                source.sheet_url,
+                source.summary_worksheet_id,
+            ),
+        )
 
     async def resolve_team_source(
         self,
@@ -256,46 +288,15 @@ class ShiftRegisterManager(
             return status, None, None
         return TeamSourceStatus.AVAILABLE, config, metadata
 
-    async def resolve_draft_team_profiles(self) -> DraftTeamProfileResolution:
-        """Read Draft scheduling values from the configured Team Summary."""
-        status, config, metadata = await self._resolve_team_source_metadata()
-        if config is None or metadata is None:
-            return DraftTeamProfileResolution(status, {})
-        resource = worksheet_transaction_key(
-            config.sheet_url,
-            metadata.summary_worksheet.id,
-        )
-        async with worksheet_transactions([resource]):
-            resolution, summary_grid = await self._read_team_source_locked(
-                config,
-                metadata,
-            )
-            return self._draft_team_profiles_from_grid(resolution, summary_grid)
-
-    def _draft_team_profiles_from_grid(
+    def _draft_profiles_from_summary(
         self,
-        resolution: TeamSourceResolution,
-        summary_grid: list[list[object]] | None,
+        source: TeamSource,
+        summaries: Sequence[Summary],
     ) -> DraftTeamProfileResolution:
-        source = resolution.source
-        if resolution.status is not TeamSourceStatus.AVAILABLE or source is None:
-            return DraftTeamProfileResolution(resolution.status, {})
-
-        columns = source.summary_columns
-        if columns.main_power is None or (
-            columns.encore_isv is not None and columns.encore_power is None
-        ):
-            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
-
-        if summary_grid is None:
-            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
-        try:
-            profiles = _draft_profiles_from_summary(summary_grid, columns)
-        except (IndexError, ValueError):
-            return DraftTeamProfileResolution(TeamSourceStatus.INVALID, {})
-        summary_title = source.metadata.summary_worksheet.title
+        """Project Draft-only values from the shared active Summary snapshot."""
         main_title = source.metadata.team_worksheets[0].title
-        if summary_title is None or main_title is None:
+        summary_title = source.metadata.summary_worksheet.title
+        if main_title is None or summary_title is None:
             msg = "Resolved Team Source is missing a worksheet title."
             raise ValueError(msg)
         encore_title = (
@@ -303,25 +304,55 @@ class ShiftRegisterManager(
             if len(source.metadata.team_worksheets) > 1
             else None
         )
-        notes_team_source = DraftNotesTeamSource(
-            sheet_url=source.config.sheet_url,
-            worksheet_title=summary_title,
-            import_last_column=columns.import_last_column,
-            username_header="username",
-            roles_header="encore_roles",
-            main_isv_header=Summary.isv_title(main_title),
-            main_power_header=Summary.power_title(main_title),
-            encore_isv_header=(
-                Summary.isv_title(encore_title) if encore_title is not None else None
-            ),
-            encore_power_header=(
-                Summary.power_title(encore_title) if encore_title is not None else None
-            ),
-        )
+        if encore_title is None and len(source.metadata.team_worksheets) > 1:
+            msg = "Resolved Team Source is missing a worksheet title."
+            raise ValueError(msg)
+
+        profiles = {
+            summary.username: DraftTeamProfile(
+                main_isv=_optional_float(
+                    getattr(summary, Summary.isv_title(main_title))
+                ),
+                main_power=_optional_float(
+                    getattr(summary, Summary.power_title(main_title))
+                ),
+                encore_isv=(
+                    _optional_float(getattr(summary, Summary.isv_title(encore_title)))
+                    if encore_title is not None
+                    else None
+                ),
+                encore_power=(
+                    _optional_float(getattr(summary, Summary.power_title(encore_title)))
+                    if encore_title is not None
+                    else None
+                ),
+                has_encore_role=bool(summary.encore_roles.strip()),
+            )
+            for summary in summaries
+        }
+        columns = source.summary_columns
         return DraftTeamProfileResolution(
             TeamSourceStatus.AVAILABLE,
             profiles,
-            notes_team_source,
+            DraftNotesTeamSource(
+                sheet_url=source.config.sheet_url,
+                worksheet_title=summary_title,
+                import_last_column=columns.import_last_column,
+                username_header="username",
+                roles_header="encore_roles",
+                main_isv_header=Summary.isv_title(main_title),
+                main_power_header=Summary.power_title(main_title),
+                encore_isv_header=(
+                    Summary.isv_title(encore_title)
+                    if encore_title is not None
+                    else None
+                ),
+                encore_power_header=(
+                    Summary.power_title(encore_title)
+                    if encore_title is not None
+                    else None
+                ),
+            ),
         )
 
     async def _read_team_source_locked(
@@ -341,7 +372,7 @@ class ShiftRegisterManager(
         summary_grid = grids[summary_worksheet.id]
         return self._build_team_source(config, metadata, summary_grid), summary_grid
 
-    async def _read_shift_and_team_source_locked(
+    async def _read_shift_and_summary_locked(
         self,
         shift_sheet_url: str,
         shift_worksheets: list[AsyncioGspreadWorksheet],
@@ -386,6 +417,71 @@ class ShiftRegisterManager(
         )
         return grids, resolution, summary_grid
 
+    async def _read_shift_and_team_source_locked(
+        self,
+        shift_sheet_url: str,
+        shift_worksheets: list[AsyncioGspreadWorksheet],
+        source_status: TeamSourceStatus,
+        source_config: TeamRegisterConfig | None,
+        source_metadata: TeamRegisterGoogleSheetsMetadata | None,
+    ) -> tuple[
+        dict[int, list[list[object]]],
+        TeamSourceResolution,
+        dict[int, list[list[object]]] | None,
+    ]:
+        """Read all confirmed Draft inputs with one batch per spreadsheet."""
+        shift_sheet = await self.get_google_sheet()
+        if source_config is None or source_metadata is None:
+            grids = await shift_sheet.batch_get_worksheet_values(shift_worksheets)
+            return grids, TeamSourceResolution(source_status), None
+
+        summary_worksheet = source_metadata.summary_worksheet.worksheet
+        team_worksheets = [
+            metadata.worksheet
+            for metadata in source_metadata.team_worksheets
+            if metadata.worksheet is not None
+        ]
+        if summary_worksheet is None or len(team_worksheets) != len(
+            source_metadata.team_worksheets
+        ):
+            grids = await shift_sheet.batch_get_worksheet_values(shift_worksheets)
+            return grids, TeamSourceResolution(TeamSourceStatus.INVALID), None
+
+        source_worksheets = [*team_worksheets, summary_worksheet]
+        source_sheet_url = normalize_google_sheet_url(source_config.sheet_url)
+        if source_sheet_url == normalize_google_sheet_url(shift_sheet_url):
+            grids = await shift_sheet.batch_get_worksheet_values(
+                [*shift_worksheets, *source_worksheets]
+            )
+            source_grids = {
+                worksheet.id: grids[worksheet.id] for worksheet in source_worksheets
+            }
+            resolution = self._build_team_source(
+                source_config,
+                source_metadata,
+                source_grids[summary_worksheet.id],
+            )
+            return grids, resolution, source_grids
+
+        shift_grids = await shift_sheet.batch_get_worksheet_values(shift_worksheets)
+        try:
+            source_sheet = GoogleSheet(
+                source_config.sheet_url,
+                self.service_account_path,
+            )
+            source_grids = await source_sheet.batch_get_worksheet_values(
+                source_worksheets
+            )
+        except GoogleSheetsError as exc:
+            self.logger.warning("Could not read auxiliary Team source: %s", exc.kind)
+            return shift_grids, TeamSourceResolution(TeamSourceStatus.UNRESOLVED), None
+        resolution = self._build_team_source(
+            source_config,
+            source_metadata,
+            source_grids[summary_worksheet.id],
+        )
+        return shift_grids, resolution, source_grids
+
     async def get_team_source_candidate_channel_ids(self) -> tuple[int, ...]:
         """Return same-guild Team Register channels available for UI selection."""
         configs = await TeamRegisterConfig.filter(
@@ -425,7 +521,7 @@ class ShiftRegisterManager(
                 grids,
                 resolution,
                 _summary_grid,
-            ) = await self._read_shift_and_team_source_locked(
+            ) = await self._read_shift_and_summary_locked(
                 metadata.sheet_url,
                 [worksheet],
                 resolution.status,
@@ -499,7 +595,7 @@ class ShiftRegisterManager(
                 grids,
                 resolution,
                 _summary_grid,
-            ) = await self._read_shift_and_team_source_locked(
+            ) = await self._read_shift_and_summary_locked(
                 metadata.sheet_url,
                 [worksheet],
                 status,
@@ -918,7 +1014,7 @@ class ShiftRegisterManager(
                     grids,
                     resolution,
                     _summary_grid,
-                ) = await self._read_shift_and_team_source_locked(
+                ) = await self._read_shift_and_summary_locked(
                     metadata.sheet_url,
                     [worksheet],
                     source_status,
@@ -1067,10 +1163,11 @@ class ShiftRegisterManager(
             worksheet.title,
         )
 
-    async def generate_draft(
+    async def generate_draft(  # noqa: C901, PLR0912
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
+        member_by_names: dict[str, Member],
         encore_power_threshold: float,
         runner: str | None = None,
     ) -> DraftGenerationResult:
@@ -1096,18 +1193,17 @@ class ShiftRegisterManager(
             worksheet_transaction_key(metadata.sheet_url, draft_worksheet.id),
         ]
         if source_config is not None and source_metadata is not None:
-            resources.append(
-                worksheet_transaction_key(
-                    source_config.sheet_url,
-                    source_metadata.summary_worksheet.id,
-                )
+            resources.extend(
+                worksheet_transaction_key(source_config.sheet_url, worksheet.id)
+                for worksheet in source_metadata
+                if worksheet.id is not None
             )
         try:
             async with worksheet_transactions(resources):
                 (
-                    grids,
+                    shift_grids,
                     resolution,
-                    summary_grid,
+                    source_grids,
                 ) = await self._read_shift_and_team_source_locked(
                     metadata.sheet_url,
                     [entry_worksheet, draft_worksheet],
@@ -1115,33 +1211,151 @@ class ShiftRegisterManager(
                     source_config,
                     source_metadata,
                 )
-                profile_resolution = self._draft_team_profiles_from_grid(
-                    resolution,
-                    summary_grid,
-                )
-                return await self._generate_draft_locked(
+                summary_mutations = ()
+                source = resolution.source
+                if (
+                    source_config is not None
+                    and source_metadata is not None
+                    and source_grids is not None
+                ):
+                    source_grid_plan = self._summary_grid_plan(
+                        source_config,
+                        source_metadata,
+                        source_grids,
+                        member_by_names,
+                    )
+                    resolution = self._build_team_source(
+                        source_config,
+                        source_metadata,
+                        [list(source_grid_plan.summary_headers)],
+                    )
+                    source = resolution.source
+                    if source is None:
+                        profile_resolution = DraftTeamProfileResolution(
+                            TeamSourceStatus.INVALID,
+                            {},
+                        )
+                    else:
+                        profile_resolution = self._draft_profiles_from_summary(
+                            source,
+                            source_grid_plan.summaries,
+                        )
+                        summary_mutations = source_grid_plan.mutations
+                else:
+                    profile_resolution = DraftTeamProfileResolution(
+                        resolution.status,
+                        {},
+                    )
+                result, draft_requests = await self._plan_draft_locked(
                     metadata,
                     profile_resolution,
-                    entry_grid=grids[entry_worksheet.id],
-                    draft_grid=grids[draft_worksheet.id],
+                    team_summary_url=(
+                        google_sheet_url_with_gid(
+                            source.config.sheet_url,
+                            source.metadata.summary_worksheet.id,
+                        )
+                        if source is not None
+                        else None
+                    ),
+                    entry_grid=shift_grids[entry_worksheet.id],
+                    draft_grid=shift_grids[draft_worksheet.id],
                     encore_power_threshold=encore_power_threshold,
                     runner=runner,
                 )
+                shift_sheet = await self.get_google_sheet()
+                if source is None:
+                    await shift_sheet.batch_update_grid(
+                        (),
+                        worksheet_requests=draft_requests,
+                    )
+                elif normalize_google_sheet_url(source.config.sheet_url) == (
+                    normalize_google_sheet_url(metadata.sheet_url)
+                ):
+                    await shift_sheet.batch_update_grid(
+                        summary_mutations,
+                        worksheet_requests=draft_requests,
+                    )
+                else:
+                    source_sheet = GoogleSheet(
+                        source.config.sheet_url,
+                        self.service_account_path,
+                    )
+                    await source_sheet.batch_update_grid(summary_mutations)
+                    try:
+                        await shift_sheet.batch_update_grid(
+                            (),
+                            worksheet_requests=draft_requests,
+                        )
+                    except Exception as exc:
+                        partial = partial_success_storage_error(exc)
+                        if partial is None:
+                            raise
+                        partial.log_hint = "team_summary_refreshed_draft_incomplete"
+                        raise partial from partial.__cause__
+                return result
         except Exception as exc:
+            if (
+                isinstance(exc, StorageError)
+                and exc.kind is StorageErrorKind.PARTIAL_SUCCESS
+            ):
+                raise
             if structure_changed and (partial := partial_success_storage_error(exc)):
                 raise partial from partial.__cause__
             raise
 
-    async def _generate_draft_locked(  # noqa: PLR0913
+    def _summary_grid_plan(
+        self,
+        source_config: TeamRegisterConfig,
+        source_metadata: TeamRegisterGoogleSheetsMetadata,
+        source_grids: dict[int, list[list[object]]],
+        member_by_names: dict[str, Member],
+    ) -> SummaryReconciliationPlan:
+        """Project full source grids into the Team manager's shared plan input."""
+        titles = [worksheet.title for worksheet in source_metadata.team_worksheets]
+        if any(title is None for title in titles):
+            raise WorksheetContractError
+        dynamic_headers, _ = (
+            SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+                [title for title in titles if title is not None]
+            )
+        )
+        expected_summary_headers = [
+            *SummaryWorksheetContent.COLUMNS,
+            *dynamic_headers,
+        ]
+        grids = {
+            worksheet.id: TeamRegisterManager._project_contract_grid(  # noqa: SLF001
+                source_grids[worksheet.id],
+                TeamWorksheetContent.COLUMNS,
+            )
+            for worksheet in source_metadata.team_worksheets
+            if worksheet.id is not None
+        }
+        summary_worksheet = source_metadata.summary_worksheet
+        if summary_worksheet.id is None:
+            raise WorksheetContractError
+        grids[summary_worksheet.id] = TeamRegisterManager._project_contract_grid(  # noqa: SLF001
+            source_grids[summary_worksheet.id],
+            expected_summary_headers,
+        )
+        return TeamRegisterManager.plan_summary_reconciliation(
+            source_metadata,
+            grids,
+            member_by_names,
+            source_config.encore_role_ids,
+        )
+
+    async def _plan_draft_locked(  # noqa: PLR0913
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         profile_resolution: DraftTeamProfileResolution,
         *,
+        team_summary_url: str | None,
         entry_grid: list[list[object]],
         draft_grid: list[list[object]],
         encore_power_threshold: float,
         runner: str | None,
-    ) -> DraftGenerationResult:
+    ) -> tuple[DraftGenerationResult, list[dict[str, object]]]:
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet
         if entry_worksheet is None or draft_worksheet is None:
@@ -1309,7 +1523,7 @@ class ShiftRegisterManager(
             for index, rule in reversed(list(enumerate(current_rules)))
             if DRAFT_CANDIDATE_RULE_MARKER in _entry_conditional_formula(rule)
         )
-        await draft_worksheet.batch_update_typed_values(
+        draft_requests = draft_worksheet.typed_update_requests(
             [
                 {
                     "range": f"A1:G{DraftWorksheetContent.DRAFT_VALUE_LAST_ROW}",
@@ -1340,13 +1554,17 @@ class ShiftRegisterManager(
             len(schedule.hours),
             schedule.total_shortage,
         )
-        return DraftGenerationResult(
-            schedule=schedule,
-            team_source_status=profile_resolution.status,
-            team_source_warning=team_source_warning,
-            recruitment_ranges=recruitment_ranges,
-            notes_snapshot=notes_snapshot,
-            unregistered_usernames=unregistered_usernames,
+        return (
+            DraftGenerationResult(
+                schedule=schedule,
+                team_source_status=profile_resolution.status,
+                team_source_warning=team_source_warning,
+                recruitment_ranges=recruitment_ranges,
+                notes_snapshot=notes_snapshot,
+                unregistered_usernames=unregistered_usernames,
+                team_summary_url=team_summary_url,
+            ),
+            draft_requests,
         )
 
 
@@ -1999,38 +2217,6 @@ def _optional_float(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return result if math.isfinite(result) else None
-
-
-def _summary_value(row: list[object], column: int | None) -> object:
-    if column is None or column > len(row):
-        return ""
-    return row[column - 1]
-
-
-def _draft_profiles_from_summary(
-    rows: list[list[object]],
-    columns: TeamSummaryColumns,
-) -> dict[str, DraftTeamProfile]:
-    if not rows:
-        msg = "Team Summary returned no header row."
-        raise ValueError(msg)
-
-    profiles: dict[str, DraftTeamProfile] = {}
-    for row in rows[1:]:
-        username = str(_summary_value(row, columns.username)).strip()
-        if not username:
-            continue
-        if username in profiles:
-            msg = f"Duplicate Team Summary username: {username!r}."
-            raise ValueError(msg)
-        profiles[username] = DraftTeamProfile(
-            main_isv=_optional_float(_summary_value(row, columns.main_isv)),
-            main_power=_optional_float(_summary_value(row, columns.main_power)),
-            encore_isv=_optional_float(_summary_value(row, columns.encore_isv)),
-            encore_power=_optional_float(_summary_value(row, columns.encore_power)),
-            has_encore_role=bool(str(_summary_value(row, columns.roles)).strip()),
-        )
-    return profiles
 
 
 def _unique_header_column(header: list[object], name: str) -> int:

@@ -84,6 +84,18 @@ def test_partial_success_storage_error_wraps_classified_cause() -> None:
     assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
 
 
+def test_team_summary_draft_partial_error_discloses_completed_summary() -> None:
+    error = StorageError(
+        StorageErrorKind.PARTIAL_SUCCESS,
+        log_hint="team_summary_refreshed_draft_incomplete",
+    )
+
+    content = storage_error_content(error, reference_id="STG-12345678")
+
+    assert "Team Summary was refreshed" in content
+    assert "Shift Draft was not completed" in content
+
+
 def test_storage_operation_context_has_safe_defaults() -> None:
     context = StorageOperationContext(operation="settings_open")
 

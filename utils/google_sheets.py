@@ -255,7 +255,7 @@ class AsyncioGspreadWorksheet:
         )
         return list(sheet.get("conditionalFormats", []))
 
-    async def batch_update_typed_values(  # noqa: PLR0913
+    def typed_update_requests(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
@@ -270,8 +270,8 @@ class AsyncioGspreadWorksheet:
         frozen_column_count: int | None = None,
         min_rows: int | None = None,
         min_cols: int | None = None,
-    ) -> None:
-        """Atomically write typed values plus narrow grid formatting."""
+    ) -> list[dict[str, object]]:
+        """Build typed value and narrow formatting requests without sending them."""
         requests = _worksheet_growth_requests(
             self.id,
             current_rows=self._worksheet.row_count,
@@ -362,6 +362,39 @@ class AsyncioGspreadWorksheet:
                     }
                 }
             )
+        return requests
+
+    async def batch_update_typed_values(  # noqa: PLR0913
+        self,
+        data: list[dict[str, object]],
+        *,
+        formula_ranges: set[str],
+        background_updates: Sequence[tuple[str, str]] = (),
+        border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        format_updates: Sequence[tuple[str, dict[str, object], str]] = (),
+        column_width_updates: Sequence[tuple[str, int]] = (),
+        hidden_column_updates: Sequence[tuple[str, bool]] = (),
+        conditional_format_rule_deletes: Sequence[int] = (),
+        conditional_format_rule_adds: Sequence[dict[str, object]] = (),
+        frozen_column_count: int | None = None,
+        min_rows: int | None = None,
+        min_cols: int | None = None,
+    ) -> None:
+        """Atomically write typed values plus narrow grid formatting."""
+        requests = self.typed_update_requests(
+            data,
+            formula_ranges=formula_ranges,
+            background_updates=background_updates,
+            border_updates=border_updates,
+            format_updates=format_updates,
+            column_width_updates=column_width_updates,
+            hidden_column_updates=hidden_column_updates,
+            conditional_format_rule_deletes=conditional_format_rule_deletes,
+            conditional_format_rule_adds=conditional_format_rule_adds,
+            frozen_column_count=frozen_column_count,
+            min_rows=min_rows,
+            min_cols=min_cols,
+        )
         if not requests:
             return
         try:
@@ -659,19 +692,19 @@ class GoogleSheet:
     async def batch_update_grid(
         self,
         mutations: Sequence[GridValueUpdate | DimensionMutation],
+        *,
+        worksheet_requests: Sequence[dict[str, object]] = (),
     ) -> None:
-        """Apply ordered spreadsheet-grid mutations in one atomic request."""
-        if not mutations:
+        """Apply ordered grid mutations and typed worksheet requests atomically."""
+        requests = [
+            *(_grid_mutation_request(mutation) for mutation in mutations),
+            *worksheet_requests,
+        ]
+        if not requests:
             return
         try:
             sh = await self.sheet
-            await sh.batch_update(
-                {
-                    "requests": [
-                        _grid_mutation_request(mutation) for mutation in mutations
-                    ]
-                }
-            )
+            await sh.batch_update({"requests": requests})
         except GoogleSheetsError:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:

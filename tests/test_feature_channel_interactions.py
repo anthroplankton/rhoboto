@@ -93,6 +93,8 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     content = _format_generate_draft_confirmation(
         ranges,
         "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        TeamSourceStatus.AVAILABLE,
+        "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
     )
 
     assert (
@@ -117,7 +119,40 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     assert "候補：`I1`、閾值・圖例 `I26:M26`" in content  # noqa: RUF001
     assert "`J28:L30`" in content
     assert "`J31`" in content
+    assert (
+        "Team Source 可用時，以目前 Discord 成員與 Team 資料同步至 "  # noqa: RUF001
+        "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
+        in content
+    )
     assert "#REF!" in content
+
+
+@pytest.mark.parametrize(
+    ("status", "expected"),
+    [
+        (
+            TeamSourceStatus.UNSET,
+            "Team Summary：未設定 Team Source，本次不會同步",  # noqa: RUF001
+        ),
+        (
+            TeamSourceStatus.INVALID,
+            "Team Summary：Team Source 設定無效，本次不會同步",  # noqa: RUF001
+        ),
+    ],
+)
+def test_generate_draft_confirmation_formats_missing_team_source(
+    status: TeamSourceStatus,
+    expected: str,
+) -> None:
+    content = _format_generate_draft_confirmation(
+        RecruitmentTimeRanges.default(),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        status,
+        None,
+    )
+
+    assert expected in content
+    assert "[Team Summary]" not in content
 
 
 def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
@@ -181,6 +216,7 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         recruitment_ranges=RecruitmentTimeRanges.from_json(
             [{"start": 4, "end": 8}, {"start": 9, "end": 12}]
         ),
+        team_summary_url="https://docs.google.com/spreadsheets/d/team/edit#gid=333",
         team_source_warning=None,
         unregistered_usernames=("carol", "eve"),
     )
@@ -189,6 +225,8 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         "### ✅ 班表草稿已產生\n"
         "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
         "- 安可綜合力閾值：35\n"  # noqa: RUF001
+        "- [Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
+        "：已同步\n"  # noqa: RUF001
         "‼️ 已將班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
         "，並覆蓋原有內容。\n"  # noqa: RUF001
@@ -224,6 +262,7 @@ def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
         {},
         encore_power_threshold=35,
         recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        team_summary_url=None,
         team_source_warning=None,
     )
 
@@ -247,11 +286,16 @@ def test_format_shift_draft_report_places_team_warning_before_assignments(
         {},
         encore_power_threshold=35,
         recruitment_ranges=RecruitmentTimeRanges.default(),
+        team_summary_url=None,
         team_source_warning=warning,
     )
 
     assert report.index(warning) < report.index("募集時間") < report.index("已排入")
+    assert report.index("已排入") == report.index("募集時間") + len(
+        f"募集時間【{RecruitmentTimeRanges.default().announcement_display()}】\n- "
+    )
     assert report.index("已排入") < report.index("附件是生成時資料")
+    assert "[Team Summary]" not in report
 
 
 @pytest.mark.asyncio
@@ -278,6 +322,15 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
 
     class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, str]:
+            events.append("destination")
+            return (
+                TeamSourceStatus.AVAILABLE,
+                "https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333",
+            )
+
         async def get_fresh_sheet_config(self) -> SimpleNamespace:
             events.append("fresh")
             return config
@@ -302,9 +355,11 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
             self,
             _metadata: object,
             *,
+            member_by_names: dict[str, object],
             encore_power_threshold: float,
             runner: str | None,
         ) -> DraftGenerationResult:
+            assert list(member_by_names) == ["carol"]
             assert encore_power_threshold == 35
             assert runner is None
             return DraftGenerationResult(
@@ -314,6 +369,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
                 recruitment_ranges=ranges,
                 notes_snapshot=notes_snapshot,
                 unregistered_usernames=("carol",),
+                team_summary_url=(
+                    "https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333"
+                ),
             )
 
     async def get_feature_channel_context(_source: object) -> object:
@@ -357,10 +415,12 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
 
-    assert events[:4] == [
+    assert events[:6] == [
+        "destination",
         "wait",
         "channel",
         "fresh",
+        "destination",
         "sheet",
     ]
     prompt, prompt_kwargs = interaction.original_response_edits[0]
@@ -373,6 +433,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     )
     assert "<@333>" in (content or "")
     assert "募集時間【4-5】" in (content or "")
+    assert (
+        "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333)"
+        in (content or "")
+    )
     assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
     attachment = kwargs["file"]
     assert isinstance(attachment, File)
@@ -397,6 +461,11 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     )
 
     class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
         async def get_fresh_sheet_config(self) -> SimpleNamespace:
             return config
 
@@ -490,6 +559,11 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     )
 
     class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
         async def get_fresh_sheet_config(self) -> SimpleNamespace:
             return config
 
@@ -567,6 +641,11 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     confirmation: bool | None,
 ) -> None:
     class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
         async def fetch_google_sheets_metadata(self) -> None:
             msg = "Google Sheets must not be accessed before confirmation"
             raise AssertionError(msg)
@@ -625,6 +704,11 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
 
         async def get_fresh_sheet_config(self) -> SimpleNamespace:
             return self.current_config
+
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
 
         async def fetch_google_sheets_metadata(self) -> None:
             msg = "changed destinations must abort before Google Sheets"
