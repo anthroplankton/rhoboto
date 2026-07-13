@@ -887,11 +887,11 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         "range": "I20:M20",
         "values": [
             [
+                "仮配置済：緑背景",  # noqa: RUF001
+                "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
                 "アンコ候補閾値",
                 35,
                 "万総合力",
-                "仮配置済：緑背景",  # noqa: RUF001
-                "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
             ]
         ],
     } in data
@@ -907,7 +907,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     assert "本走候補（実効値：高→低）" in str(  # noqa: RUF001
         candidate_update["values"][0][0]
     )
-    assert "threshold, IF(ISNUMBER(J20), J20, NA())" in str(
+    assert "threshold, IF(ISNUMBER(L20), L20, NA())" in str(
         candidate_update["values"][0][0]
     )
     assert {"A21", "I1", "L22", "K23", "K24", "J26"} <= (
@@ -918,10 +918,10 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     assert draft_worksheet.background_updates[-1][1:] == [
         *((f"B{row}:G{row}", "#CCCCCC") for row in range(5, 18)),
         ("I24:M24", "#FFFFFF"),
-        ("I20", "#A4C2F4"),
-        ("J20", "#FFF2CC"),
+        ("I20:J20", "#D9EAD3"),
         ("K20", "#A4C2F4"),
-        ("L20:M20", "#D9EAD3"),
+        ("L20", "#FFF2CC"),
+        ("M20", "#A4C2F4"),
         ("J25:L29", "#FFFFFF"),
         ("J22:L24", "#FFFFFF"),
         ("J22:J24", "#A4C2F4"),
@@ -941,7 +941,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ("J24:M24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("I1:I20", "#000000", "SOLID", ("left",)),
         ("I20:M20", "#000000", "SOLID", ("bottom",)),
-        ("J20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
+        ("L20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
         ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L22", "#000000", "SOLID", ("top",)),
@@ -955,6 +955,17 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     ]
     assert draft_worksheet.format_updates[-1] == [
         (
+            "J24",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+        (
             "M24",
             {
                 "textFormat": {
@@ -966,11 +977,22 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             "userEnteredFormat.textFormat.foregroundColorStyle",
         ),
         (
-            "M20",
+            "J20",
             {
                 "textFormat": {
                     "foregroundColorStyle": {
                         "rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+        (
+            "M20",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
                     }
                 }
             },
@@ -1240,10 +1262,10 @@ async def test_generate_draft_falls_back_without_team_profiles(
     formula = str(notes_update["values"][0][0])
     assert result.team_source_warning in formula
     assert draft_worksheet.background_updates[-1][-7:] == [
-        ("I3", "#A4C2F4"),
-        ("J3", "#FFF2CC"),
+        ("I3:J3", "#D9EAD3"),
         ("K3", "#A4C2F4"),
-        ("L3:M3", "#D9EAD3"),
+        ("L3", "#FFF2CC"),
+        ("M3", "#A4C2F4"),
         ("J5:L7", "#FFFFFF"),
         ("J5:J7", "#A4C2F4"),
         ("K5", "#FFF2CC"),

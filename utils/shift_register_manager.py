@@ -1224,7 +1224,7 @@ class ShiftRegisterManager(
         team_source_warning = _draft_team_source_warning(profile_resolution.status)
         new_last_row = len(schedule.assignments) + 1
         threshold_row = new_last_row + 1
-        threshold_cell = f"J{threshold_row}"
+        threshold_cell = f"L{threshold_row}"
         notes_formula = DraftWorksheetContent.notes_formula(
             schedule,
             entry_worksheet_title=entry_worksheet.title,
@@ -1286,11 +1286,11 @@ class ShiftRegisterManager(
                 "range": f"I{threshold_row}:M{threshold_row}",
                 "values": [
                     [
+                        "仮配置済：緑背景",  # noqa: RUF001
+                        "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
                         DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL,
                         encore_power_threshold,
                         "万総合力",
-                        "仮配置済：緑背景",  # noqa: RUF001
-                        "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
                     ]
                 ],
             }
@@ -1436,10 +1436,10 @@ def _draft_format_updates(  # noqa: PLR0913
         )
     background_updates.extend(
         [
-            (f"I{threshold_row}", "#A4C2F4"),
-            (f"J{threshold_row}", "#FFF2CC"),
+            (f"I{threshold_row}:J{threshold_row}", "#D9EAD3"),
             (f"K{threshold_row}", "#A4C2F4"),
-            (f"L{threshold_row}:M{threshold_row}", "#D9EAD3"),
+            (f"L{threshold_row}", "#FFF2CC"),
+            (f"M{threshold_row}", "#A4C2F4"),
         ]
     )
     if old_lookup_row is not None:
@@ -1486,7 +1486,7 @@ def _draft_format_updates(  # noqa: PLR0913
                 ("bottom",),
             ),
             (
-                f"J{threshold_row}",
+                f"L{threshold_row}",
                 "#FF0000",
                 "SOLID_MEDIUM",
                 OUTER_BORDER_SIDES,
@@ -1548,16 +1548,21 @@ def _draft_legend_format_updates(
 ) -> tuple[tuple[str, dict[str, object], str], ...]:
     field = "userEnteredFormat.textFormat.foregroundColorStyle"
 
-    def update(row: int, color: str) -> tuple[str, dict[str, object], str]:
+    def update(column: str, row: int, color: str) -> tuple[str, dict[str, object], str]:
         return (
-            f"M{row}",
+            f"{column}{row}",
             {"textFormat": {"foregroundColorStyle": {"rgbColor": _entry_rgb(color)}}},
             field,
         )
 
     return (
-        *((update(old_threshold_row, "#000000"),) if old_threshold_row else ()),
-        update(threshold_row, "#FF0000"),
+        *(
+            (update(column, old_threshold_row, "#000000") for column in ("J", "M"))
+            if old_threshold_row
+            else ()
+        ),
+        update("J", threshold_row, "#FF0000"),
+        update("M", threshold_row, "#000000"),
     )
 
 

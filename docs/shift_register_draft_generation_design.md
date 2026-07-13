@@ -343,10 +343,11 @@ source-level failure must not label every participant unregistered. Later
 `IMPORTRANGE` or formula failures remain visible instead of silently changing the
 formula to fallback behavior; regeneration re-resolves Team Source status.
 
-If `R` is the final schedule row, `I{R+1}:K{R+1}` contains
-`アンコ候補閾値 | [editable numeric input] | 万総合力`. Generation seeds the
-input with the slash command's required threshold, and the live candidate formula
-references that cell rather than embedding the command value. Editing a number
+If `R` is the final schedule row, `I{R+1}:M{R+1}` contains
+`仮配置済：緑背景 | アンコ配置済：緑背景＋赤字 | アンコ候補閾値 | [editable numeric input] | 万総合力`.
+Generation seeds the input with the slash command's required threshold, and the
+live candidate formula references that cell rather than embedding the command
+value. Editing a number
 recalculates Encore candidates immediately. Blank or nonnumeric input intentionally
 produces a visible candidate-formula error instead of being treated as zero or
 silently falling back to the command value. Regeneration replaces the input with
@@ -442,11 +443,12 @@ existing frozen-row setting is preserved.
 
 The candidate spill keeps no background fill. A thin black left border runs from
 `I1` through the threshold-control row. One thin black bottom border is applied
-across `I{R+1}:M{R+1}`. The label and `万総合力` suffix cells use `#A4C2F4`;
-the middle input uses `#FFF2CC` plus the same medium solid four-sided `#FF0000`
-border as the lookup input, applied after the black bottom border so red wins at
-the shared edge. `仮配置済：緑背景` and `アンコ配置済：緑背景＋赤字` follow in
-`#D9EAD3`; the latter also uses `#FF0000` text. No border follows the candidate
+across `I{R+1}:M{R+1}`. `仮配置済：緑背景` and
+`アンコ配置済：緑背景＋赤字` come first in `#D9EAD3`; the latter also uses
+`#FF0000` text. The `アンコ候補閾値` and `万総合力` suffix cells use `#A4C2F4`;
+the input between them uses `#FFF2CC` plus the same medium solid four-sided
+`#FF0000` border as the lookup input, applied after the black bottom border so
+red wins at the shared edge. No border follows the candidate
 spill's dynamic right edge. The formula's
 blank separator columns and explicit Japanese headings provide the remaining
 grouping. Dynamic Notes keep no generated borders or fills because warning rows
