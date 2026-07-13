@@ -84,7 +84,9 @@ Use emoji and custom reaction markers consistently by intent, not by feature, in
 | `✅` | Success. | The requested operation completed successfully. |
 | `✖️` | Cancelled with no changes applied. | A user-visible flow ends before applying changes. |
 | `⚠️` | Blocked, failed, abnormal, or needs correction. | A flow cannot continue, may not have completed, or needs user/admin action. |
-| `🛠️` | External service or repair-needed failure. | A failure likely needs external-service, configuration, or maintainer repair. |
+| `📏` | Structure or format needs correction. | Pair after `⚠️` when configured structure does not match the expected contract. |
+| `🛠️` | Storage or external service failure. | Pair after `⚠️` when storage or an external service fails and may need repair. |
+| `🚧` | Unexpected program error. | Pair after `⚠️` when an unexpected internal error occurs. |
 | `⤴️` | Replied-message reference. | Text points users to the message this bot message replies to. |
 | `👀` | View or verify existing results. | Opening existing content or recorded results so users can review or confirm them without changing data. |
 | `🟢` / `⚫` | Enabled or disabled status. | Showing enabled or disabled state. |
