@@ -2,8 +2,8 @@
 
 ## Status
 
-Implemented in the working tree. Automated validation passed; database migration
-rollout and manual Discord and Google Sheets integration validation remain.
+Implemented in the working tree. Automated validation passes; live Discord and
+Google Sheets integration validation remains. No database migration is required.
 
 ## Goal
 
@@ -22,11 +22,13 @@ Register FeatureChannel. An unset selection produces `UNSET`; invalid metadata a
 temporarily unreadable data remain distinct states.
 
 For a unique source, the resolver loads all configured Team worksheets and the Team
-Summary worksheet. One complete Summary grid read validates the header and provides
-the row data needed by Draft profiles. Header-derived projections stop at the unique
-terminal `original_message`; physically returned administrator columns after that
-marker are not consumed. The Shift settings panel shows the Team Register channel
-and uses its configured landing worksheet as the displayed source.
+Summary worksheet. Summary-only settings and Entry-formula flows read the complete
+Summary grid to validate its header. Confirmed Draft generation instead reads every
+Team worksheet plus Summary in one values batch per spreadsheet and projects
+profiles from the shared live derivation. Header-derived projections stop at the
+unique terminal `original_message`; physically returned administrator columns after
+that marker are not consumed. The Shift settings panel shows the Team Register
+channel and uses its configured landing worksheet as the displayed source.
 
 Team Register and Shift Register guide links separately override
 `_guide_worksheet_id()` in both their feature-management and user-command cogs. Team
@@ -201,14 +203,59 @@ An invalid saved source does not silently switch to a different Team Register.
 ### Draft Generation
 
 Draft generation resolves Team Source metadata before acquiring worksheet locks,
-then reads the complete Team Summary grid once inside the locked phase. The same
-grid supplies both header validation and the purpose-specific
-`username -> DraftTeamProfile` projection. If Team Summary shares the Shift
-spreadsheet, Summary is included in the same values batch as Entry and Draft;
-otherwise each spreadsheet receives one batch request. Administrator columns after
-the Summary terminal marker may be transported but are not interpreted or imported.
+then locks Entry, Draft, all configured Team worksheets, and Summary. It performs
+one complete-grid values batch per spreadsheet. If the Team and Shift worksheets
+share a spreadsheet, they are all included in the same values batch.
+
+Current Team worksheet rows, current Discord members, and configured Encore role
+IDs enter the same pure Summary derivation used by explicit full Team Summary
+refresh. The derived active rows feed both the Summary reconciliation and the
+purpose-specific `username -> DraftTeamProfile` projection. Draft does not project
+profiles from old Summary values and does not read the refreshed Summary back.
+
+The old Summary grid remains required only for header/row reconciliation. Its
+bot-owned values are not data fallbacks. Administrator columns after the terminal
+`original_message` may be transported but are not interpreted, validated, cleared,
+or written during automatic reconciliation.
+
+Both writes are planned before write I/O. A shared spreadsheet receives one atomic
+`spreadsheets.batchUpdate` with Summary requests before Draft requests. Separate
+spreadsheets receive one Summary update followed by one Draft update; a later Draft
+failure reports the already-completed Summary refresh as partial success.
+
+Live candidate, Notes, and `編成一覧` formulas remain Summary-backed. Refreshing
+Summary before writing those formulas gives their display layer the same Team and
+Discord snapshot used by Python scheduling while preserving subsequent live Sheet
+recalculation.
+
+### Automatic Summary Row Archiving
+
+Automatic full Summary reconciliation must not delete obsolete physical rows.
+It changes only the bot-owned `username` cell from `<username>` to
+`<username> (archived)`. Display name, roles, Team values, `original_message`,
+administrator-owned cells, and row properties remain attached and unchanged.
+
+Single-user upsert and full reconciliation share one resolution order: active row,
+matching archived row, completely blank reusable bot band, then append. Archived
+rows use the reserved ` (archived)` username suffix, are excluded from active Summary
+records, cannot be reused by a different username, and are restored in place when
+the same username returns. The empty value ` (archived)`, nested suffixes, duplicate
+archived identities, and simultaneous active/archived rows for one username fail as
+worksheet contract errors. Discord usernames cannot contain parentheses, so an active
+username cannot collide with the reserved representation.
+
+Explicit confirmed Team deletion remains the only normal path that deletes a
+complete active row, including cells that move with that row. There is no automatic
+archived-row compaction or compatibility path.
 
 ## Affected Files
+
+The lists below describe the implemented Team Source base and Draft refresh flow.
+The Draft flow additionally changes `cogs/shift_register.py`,
+`utils/team_register_structs.py`, `utils/team_register_manager.py`,
+`utils/shift_register_manager.py`, `utils/google_sheets.py`, their focused tests,
+and the manual validation checklist as detailed in
+`docs/shift_register_draft_generation_design.md`.
 
 ### Application Code
 
@@ -295,6 +342,14 @@ formula builder contract and generated formula remain unchanged.
 - Components must not import Team Register cogs to obtain worksheet-selection logic.
 - Guide, auto-guide, help, and delete flows must keep producing the same Sheet URLs.
 - No Discord permissions, command names, or Google Sheets layout may change.
+- Retired identities must be recognized only in the bot-owned `username` cell and
+  must never make later bot-owned or administrator columns part of the retirement
+  mutation or reuse decision.
+- Cross-spreadsheet Summary and Draft writes are not atomic; partial-success
+  reporting must name the completed Summary side effect exactly.
+- Cross-spreadsheet `IMPORTRANGE` may display the refreshed Summary after a normal
+  recalculation delay. Python scheduling and the attached Notes snapshot already
+  use the derived values and must not add a read-back polling path.
 
 ## Automated Validation
 
@@ -347,12 +402,22 @@ env UV_CACHE_DIR=.cache/uv uv run python -m compileall -q \
 11. Confirm a transient unresolved source preserves an existing formula.
 12. Confirm first-time cross-Sheet use still supports the required `IMPORTRANGE`
     access authorization.
+13. Generate Draft after changing a Discord display name or configured Encore role;
+    confirm Summary, the Python schedule, candidates, Notes, and `編成一覧` use the
+    same refreshed data without a Summary read-back.
+14. Remove a username from every Team tab and run full refresh; confirm only the
+    Summary username changes to `<username> (archived)` while display name, roles,
+    Team values, `original_message`, and administrator cells remain unchanged.
+    Restore the username and confirm the same row is revived.
+15. Confirm same-spreadsheet write failure changes neither Summary nor Draft, while
+    an injected external Draft failure after Summary success reports partial success.
 
 ## Out of Scope
 
 - Google Sheets worksheet, column, or formula changes.
 - Final Schedule generation.
 - Listing all Team worksheet links in Shift settings.
-- Discord command, permission, or localized public-template changes.
+- Discord command names, permissions, or public message-template changes. The
+  existing administrator confirmation and success copy may disclose Summary refresh.
 - Compatibility aliases for the old Team Summary Source names.
 - Unrelated refactors.
