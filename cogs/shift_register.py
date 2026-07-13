@@ -3,7 +3,7 @@ from __future__ import annotations
 from io import BytesIO
 from typing import TYPE_CHECKING, override
 
-from discord import File, app_commands
+from discord import File, User, app_commands
 from discord.utils import escape_markdown
 
 from bot import config
@@ -21,12 +21,18 @@ from components.ui_shift_register import (
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.key_async_lock import KeyAsyncLock
-from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     ShiftRegisterManager,
+    TeamSourceStatus,
+    fresh_shift_channel_transaction,
 )
-from utils.shift_register_structs import RecruitmentTimeRanges, Shift, ShiftParser
+from utils.shift_register_structs import (
+    RecruitmentTimeRanges,
+    Shift,
+    ShiftParser,
+)
 from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
     render_shift_timeline_announcement_messages,
@@ -37,7 +43,7 @@ from utils.shift_scheduler import (
     STANDBY_SUPPORTER_SLOT,
     hour_label,
 )
-from utils.storage_errors import partial_success_storage_error
+from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -49,7 +55,6 @@ if TYPE_CHECKING:
     from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
     from utils.shift_scheduler import DraftSchedule
-    from utils.structs_base import UserInfo
 
 
 def _format_display_name(name: str) -> str:
@@ -59,6 +64,8 @@ def _format_display_name(name: str) -> str:
 def _format_generate_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
     draft_sheet_url: str,
+    team_source_status: TeamSourceStatus,
+    team_summary_url: str | None,
 ) -> str:
     ranges = recruitment_ranges.ranges.ranges
     final_row = ranges[-1].end - ranges[0].start + 1
@@ -78,6 +85,17 @@ def _format_generate_draft_confirmation(
             f"- 反查：`J{final_row + 3}:L{final_row + 5}`",  # noqa: RUF001
             (
                 f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"  # noqa: RUF001
+            ),
+            (
+                "Team Source 同步：\n"  # noqa: RUF001
+                "- 確認後會以目前 Discord 成員與 Team 資料更新 "
+                f"[Team Summary]({team_summary_url})"
+                if team_summary_url is not None
+                else (
+                    "Team Source 同步：\n⚠️ 未設定，本次不會同步"  # noqa: RUF001
+                    if team_source_status is TeamSourceStatus.UNSET
+                    else "Team Source 同步：\n⚠️ 設定無效，本次不會同步"  # noqa: RUF001
+                )
             ),
             "",
             (
@@ -226,19 +244,11 @@ class ShiftRegister(
         user_info: UserInfo,
     ) -> Shift | None:
         shift = submission
-        recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(context.feature_config, "recruitment_time_ranges", None)
-        )
-        if not recruitment_ranges.contains_slots(set(shift)):
-            await self._add_invalid_registration_reactions(message)
-            return None
-
         return await self._write_shift_registration(
             message,
             user_info,
             shift,
             context.manager,
-            recruitment_ranges,
         )
 
     async def _write_shift_registration(
@@ -247,52 +257,58 @@ class ShiftRegister(
         user_info: UserInfo,
         shift: Shift,
         manager: ShiftRegisterManager,
-        recruitment_ranges: RecruitmentTimeRanges,
-    ) -> Shift:
-        self.logger.info(
-            "Parsed shift in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%r)",
-            message.guild.id,
-            message.channel.id,
-            self.feature_name,
-            message.author.display_name,
-            shift,
-        )
-
-        if self.bot.user is not None:
-            await add_reaction_if_possible(
-                message,
-                config.PROCESSING_EMOJI,
-                log=self.logger,
+    ) -> Shift | None:
+        invalid = False
+        async with fresh_shift_channel_transaction(
+            manager,
+            self.sheet_write_lock,
+            channel_id=message.channel.id,
+        ) as fresh_config:
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                getattr(fresh_config, "recruitment_time_ranges", None)
             )
-
-        async with self.sheet_write_lock(message.channel.id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            manager.log_missing_worksheet_warnings(metadata)
-
-            try:
-                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                    metadata
+            invalid = not recruitment_ranges.contains_slots(set(shift))
+            if not invalid:
+                self.logger.info(
+                    (
+                        "Parsed Shift Register submission. "
+                        "operation=shift_register_parse feature=%s guild=%s "
+                        "channel=%s message=%s slots=%s"
+                    ),
+                    self.feature_name,
+                    message.guild.id,
+                    message.channel.id,
+                    message.id,
+                    len(set(shift)),
                 )
+                if self.bot.user is not None:
+                    await add_reaction_if_possible(
+                        message,
+                        config.PROCESSING_EMOJI,
+                        log=self.logger,
+                    )
+
+                metadata = await manager.fetch_google_sheets_metadata()
+                manager.log_missing_worksheet_warnings(metadata)
+
                 await manager.upsert_or_delete_user_shift(
                     user_info,
                     shift,
                     metadata=metadata,
                     recruitment_ranges=recruitment_ranges,
                 )
-            except Exception as exc:
-                error = partial_success_storage_error(exc)
-                if error is None:
-                    raise
-                raise error from error.__cause__
 
-        if self.bot.user is not None:
-            await remove_reaction_if_present(
-                message,
-                config.PROCESSING_EMOJI,
-                self.bot.user,
-                log=self.logger,
-            )
-            await add_reaction_if_possible(message, "✅", log=self.logger)
+        if invalid:
+            await self._add_invalid_registration_reactions(message)
+            return None
+
+        await transition_processing_reaction(
+            message,
+            ("✅",),
+            processing_emoji=config.PROCESSING_EMOJI,
+            user=self.bot.user,
+            log=self.logger,
+        )
 
         return shift
 
@@ -402,7 +418,7 @@ class ShiftRegister(
         encore_power_threshold=(
             "Minimum Team Power required for Encore; Power must be greater than it."
         ),
-        runner="Nickname pinned to the runner (ランナー) lane for every hour.",
+        runner="Discord user pinned to the Runner (ランナー) lane for every hour.",
     )
     @app_commands.check(
         FeatureChannelBase.feature_enabled_app_command_predicate(
@@ -414,7 +430,7 @@ class ShiftRegister(
         self,
         interaction: Interaction,
         encore_power_threshold: app_commands.Range[float, 0],
-        runner: str | None = None,
+        runner: User | None = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
@@ -438,9 +454,15 @@ class ShiftRegister(
                 context.feature_config.sheet_url,
                 context.feature_config.draft_worksheet_id,
             )
+            (
+                team_source_status,
+                team_summary_url,
+            ) = await context.manager.get_saved_team_summary_destination()
             confirmation_content = _format_generate_draft_confirmation(
                 recruitment_ranges,
                 draft_sheet_url,
+                team_source_status,
+                team_summary_url,
             )
             view = GenerateDraftConfirmView(
                 requesting_user_id=interaction.user.id,
@@ -468,49 +490,68 @@ class ShiftRegister(
             if context is None:
                 await self._send_missing_config_followup(interaction)
                 return
-            fresh_ranges = RecruitmentTimeRanges.from_json(
-                context.feature_config.recruitment_time_ranges
-            )
-            fresh_draft_sheet_url = google_sheet_url_with_gid(
-                context.feature_config.sheet_url,
-                context.feature_config.draft_worksheet_id,
-            )
-            if (
-                _format_generate_draft_confirmation(
-                    fresh_ranges,
-                    fresh_draft_sheet_url,
+            async with fresh_shift_channel_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ) as fresh_config:
+                fresh_ranges = RecruitmentTimeRanges.from_json(
+                    fresh_config.recruitment_time_ranges
                 )
-                != confirmation_content
-            ):
-                await interaction.edit_original_response(
-                    content=(
-                        "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
-                        "請重新執行 command。"
-                    ),
-                    view=None,
+                fresh_draft_sheet_url = google_sheet_url_with_gid(
+                    fresh_config.sheet_url,
+                    fresh_config.draft_worksheet_id,
                 )
-                return
+                (
+                    fresh_team_source_status,
+                    fresh_team_summary_url,
+                ) = await context.manager.get_saved_team_summary_destination()
+                if (
+                    _format_generate_draft_confirmation(
+                        fresh_ranges,
+                        fresh_draft_sheet_url,
+                        fresh_team_source_status,
+                        fresh_team_summary_url,
+                    )
+                    != confirmation_content
+                ):
+                    await interaction.edit_original_response(
+                        content=(
+                            "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
+                            "請重新執行 command。"
+                        ),
+                        view=None,
+                    )
+                    return
 
-            async with self.sheet_write_lock(source.channel.id):
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
-                metadata = (
-                    await context.manager.ensure_worksheets_and_upsert_sheet_config(
-                        metadata
+                member_by_names = {
+                    member.name: member for member in source.guild.members
+                }
+                runner_info = (
+                    UserInfo(
+                        username=runner.name,
+                        display_name=runner.display_name,
                     )
+                    if runner is not None
+                    else None
                 )
                 result = await context.manager.generate_draft(
                     metadata,
+                    member_by_names=member_by_names,
                     encore_power_threshold=float(encore_power_threshold),
-                    runner=runner,
+                    runner=runner_info,
                 )
                 schedule = result.schedule
+                current_config = await context.manager.get_sheet_config()
                 draft_sheet_url = google_sheet_url_with_gid(
-                    metadata.sheet_url,
-                    metadata.draft_worksheet.id,
+                    current_config.sheet_url,
+                    current_config.draft_worksheet_id,
                 )
                 member_mentions = {
-                    member.name: member.mention for member in source.guild.members
+                    username: member.mention
+                    for username, member in member_by_names.items()
                 }
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -528,6 +569,7 @@ class ShiftRegister(
                 member_mentions,
                 encore_power_threshold=float(encore_power_threshold),
                 recruitment_ranges=result.recruitment_ranges,
+                team_summary_url=result.team_summary_url,
                 team_source_warning=result.team_source_warning,
                 unregistered_usernames=result.unregistered_usernames,
             ),
@@ -546,6 +588,7 @@ class ShiftRegister(
         *,
         encore_power_threshold: float,
         recruitment_ranges: RecruitmentTimeRanges,
+        team_summary_url: str | None,
         team_source_warning: str | None,
         unregistered_usernames: tuple[str, ...] = (),
     ) -> str:
@@ -563,10 +606,12 @@ class ShiftRegister(
             "### ✅ 班表草稿已產生",
             f"- Runner（ランナー）：{schedule.runner or '`Not set`'}",  # noqa: RUF001
             f"- 安可綜合力閾值：{encore_power_threshold:g}",  # noqa: RUF001
-            (
-                f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
-            ),
         ]
+        if team_summary_url is not None:
+            lines.append(f"🔄 已同步 [Team Summary]({team_summary_url})")
+        lines.append(
+            f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
+        )
         if team_source_warning is not None:
             lines.append(team_source_warning)
         if unregistered_usernames:

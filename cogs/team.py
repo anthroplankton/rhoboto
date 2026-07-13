@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, override
 
 from discord import Interaction, app_commands
@@ -8,11 +7,15 @@ from discord.app_commands import locale_str
 
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.team_register import TeamRegister
-from utils.team_register_manager import TeamRegisterManager
+from utils.team_register_manager import (
+    TeamRegisterManager,
+    fresh_team_channel_transaction,
+)
 from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
+    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from utils.structs_base import UserInfo
 
 
@@ -30,6 +33,20 @@ class Team(
     GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
 
     @override
+    async def _delete_user_data_transaction(
+        self,
+        context: ConfiguredFeatureChannelContext[TeamRegisterManager],
+        user_info: UserInfo,
+    ) -> None:
+        manager = context.manager
+        async with fresh_team_channel_transaction(
+            manager,
+            self.FeatureChannelType.sheet_write_lock,
+            channel_id=context.channel_id,
+        ):
+            await manager.delete_user_registration(user_info)
+
+    @override
     async def _delete_user_data(
         self,
         manager: TeamRegisterManager,
@@ -39,10 +56,8 @@ class Team(
         """
         Slash command to delete the user's teams.
         """
-        await asyncio.gather(
-            manager.delete_user_teams(user_info, metadata),
-            manager.delete_user_summary(user_info, metadata),
-        )
+        del metadata
+        await manager.delete_user_registration(user_info)
 
     @app_commands.command(
         name=locale_str("delete"),

@@ -13,7 +13,7 @@ This migration includes:
 - Persisting Shift Register timeline fields in `shift_register`.
 - Persisting `recruitment_time_ranges`, defaulting to `4-28`.
 - Reserving `deadline_automation_enabled`, defaulting to `false`.
-- Moving Shift Entry worksheets to the count row plus fixed `A:AJ` bot layout.
+- Moving Shift Entry worksheets to the count row plus fixed `A:AJ` layout.
 - Showing Team Summary ISV/Encore information in Shift Entry through formulas.
 - Persisting an optional Team Register source for each Shift Register.
 - Repairing Shift Entry Team formulas after Team Summary worksheet renames.
@@ -89,9 +89,15 @@ Row 2: username | display_name | Main ISV | Encore ISV |
 Rows 3+: participant data
 ```
 
-Columns `A:AJ` are bot-owned. Columns `AK` onward are administrator-owned; normal
-registration writes never target them. `C` contains the participant's Team formula,
-while `D:E` are spill results and are not written directly.
+Value ownership is range-specific: the bot owns `A1`, `F1:AI1`, `A2:AJ2`, and
+participant-row `A:C` plus `F:AJ`. The spreadsheet-scoped read may physically
+return the complete Entry grid, including `D:E` and `AK+`, but the Entry contract
+projects the fixed header only through `AJ` and participant values only from `A:C`
+plus `F:AJ`. `C` contains the participant's Team formula; `D:E` are its spill area
+and are not consumed, validated, cleared, or value-written, so a manual blocker and
+its visible `#REF!` are preserved. Row-1 `B:E` and `AJ` values are likewise
+preserved. Columns `AK` onward are administrator-owned and are never consumed or
+written by normal registration.
 
 Existing row-1-header worksheets and old worksheets with `4-5` through `27-28`
 are intentionally rejected instead of being silently reinterpreted.
@@ -118,8 +124,10 @@ formulas, validation, formatting, or notes from their participant row.
 
 ### Shift Entry presentation
 
-The bot owns the presentation of `A:AJ` while leaving administrator columns from
-`AK` onward unchanged. `A1` and `A2:AJ2` use a `#3C78D8` background with bold
+The bot owns the presentation of `A:AJ`, including conditional formatting over the
+`D:E` spill area, while leaving administrator columns from `AK` onward unchanged.
+Presentation ownership does not grant value ownership over the preserved ranges
+described above. `A1` and `A2:AJ2` use a `#3C78D8` background with bold
 white text. Row 2 has black top and bottom borders, with additional right borders
 after `display_name`, `Team Info`, and `29-30`. Columns `A:E` are frozen. Column
 widths are 100 px for `A:B`, 60 px for `C:E`, and 40 px for

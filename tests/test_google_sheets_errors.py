@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import pandas as pd
+from types import SimpleNamespace
+
 import pytest
 from google.auth.exceptions import DefaultCredentialsError, TransportError
 from gspread.exceptions import (
@@ -14,6 +15,7 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from utils.google_sheets import (
     AsyncioGspreadWorksheet,
     GoogleSheet,
+    GridValueUpdate,
     RhobotoGspreadClientManager,
 )
 from utils.google_sheets_errors import (
@@ -48,15 +50,55 @@ class FakeResponse:
 class RaisingWorksheet:
     id = 1
     title = "Worksheet"
+    row_count = 100
+    col_count = 20
 
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
+        self.agcm = RaisingClientManager()
+        self.ws = SimpleNamespace(
+            spreadsheet_id="spreadsheet-id",
+            client=SimpleNamespace(batch_update=self._raise_batch_update),
+        )
 
-    async def get(self, **_: object) -> list[list[object]]:
+    def _raise_batch_update(self, _: str, __: dict[str, object]) -> None:
         raise self.exc
 
-    async def update(self, _: list[list[object]], **__: object) -> None:
+
+class RaisingClientManager:
+    async def _call(
+        self,
+        method: object,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        assert callable(method)
+        return method(*args, **kwargs)
+
+
+class RaisingSpreadsheet:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+
+    async def batch_update(self, _: dict[str, object]) -> None:
         raise self.exc
+
+    async def values_batch_get(
+        self,
+        _: list[str],
+        params: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        del params
+        raise self.exc
+
+
+class RaisingGoogleSheet(GoogleSheet):
+    def __init__(self, exc: Exception) -> None:
+        self.spreadsheet = RaisingSpreadsheet(exc)
+
+    @property
+    async def sheet(self) -> RaisingSpreadsheet:
+        return self.spreadsheet
 
 
 def api_error(
@@ -129,17 +171,40 @@ async def test_gspread_client_manager_does_not_retry_transport_errors_forever() 
 
 
 @pytest.mark.asyncio
-async def test_worksheet_read_write_raise_domain_errors_without_raw_details() -> None:
+async def test_spreadsheet_read_write_raise_domain_errors_without_raw_details() -> None:
     raw_error = api_error(403, "PERMISSION_DENIED", text="secret spreadsheet url")
     worksheet = AsyncioGspreadWorksheet(RaisingWorksheet(raw_error))
+    sheet = RaisingGoogleSheet(raw_error)
 
     with pytest.raises(GoogleSheetsError) as read_error:
-        await worksheet.to_frame()
+        await sheet.batch_get_worksheet_values([worksheet])
 
     with pytest.raises(GoogleSheetsError) as write_error:
-        await worksheet.update_from_dataframe(pd.DataFrame({"name": ["alice"]}))
+        await worksheet.batch_update_typed_values(
+            [{"range": "A1", "values": [["alice"]]}],
+            formula_ranges=set(),
+        )
 
     assert read_error.value.kind is GoogleSheetsErrorKind.PERMISSION
     assert write_error.value.kind is GoogleSheetsErrorKind.PERMISSION
     assert "secret spreadsheet url" not in read_error.value.user_message
     assert "secret spreadsheet url" not in write_error.value.user_message
+
+
+@pytest.mark.asyncio
+async def test_grid_batch_raises_safe_domain_error_without_private_values() -> None:
+    raw_error = api_error(403, "PERMISSION_DENIED", text="secret alice@example.com")
+    sheet = RaisingGoogleSheet(raw_error)
+    mutation = GridValueUpdate.from_values(
+        worksheet_id=1,
+        start_row=1,
+        start_column=1,
+        values=[["alice@example.com"]],
+    )
+
+    with pytest.raises(GoogleSheetsError) as error:
+        await sheet.batch_update_grid([mutation])
+
+    assert error.value.kind is GoogleSheetsErrorKind.PERMISSION
+    assert error.value.operation == "update_worksheet"
+    assert "alice@example.com" not in error.value.user_message

@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from operator import index
 from typing import TYPE_CHECKING, NoReturn
 
 import gspread_asyncio
+import numpy as np
 import pandas as pd
 from async_lru import alru_cache
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import WorksheetNotFound
-from gspread.utils import a1_range_to_grid_range
+from gspread.utils import a1_range_to_grid_range, absolute_range_name, rowcol_to_a1
 
 from utils.google_sheets_errors import (
     GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS,
     GoogleSheetsError,
     classify_google_sheets_exception,
 )
+
+
+class _InvalidValuesBatchResponseError(ValueError):
+    pass
+
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -28,6 +36,160 @@ BORDER_NAMES = (
     "innerHorizontal",
     "innerVertical",
 )
+
+
+@dataclass(slots=True)
+class WorksheetCreationStatus:
+    """Track whether this operation completed a worksheet creation."""
+
+    created: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class GridFormula:
+    """An explicitly intended Google Sheets formula value."""
+
+    value: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.value, str):
+            msg = "A grid formula value must be a string."
+            raise TypeError(msg)
+        if not self.value.startswith("="):
+            msg = "A grid formula value must begin with '='."
+            raise ValueError(msg)
+
+
+@dataclass(frozen=True, slots=True)
+class GridValueUpdate:
+    """One typed rectangular value update in zero-based API coordinates."""
+
+    worksheet_id: int
+    start_row_index: int
+    start_column_index: int
+    rows: tuple[tuple[object, ...], ...]
+
+    @classmethod
+    def from_values(
+        cls,
+        *,
+        worksheet_id: int,
+        start_row: int,
+        start_column: int,
+        values: Sequence[Sequence[object]],
+    ) -> GridValueUpdate:
+        """Create an update from one-based domain row and column coordinates."""
+        start_row = _positive_integer(start_row, "A grid update row")
+        start_column = _positive_integer(start_column, "A grid update column")
+        normalized_values = tuple(
+            tuple(_normalize_grid_value(value) for value in row) for row in values
+        )
+        if (
+            not normalized_values
+            or not normalized_values[0]
+            or any(len(row) != len(normalized_values[0]) for row in normalized_values)
+        ):
+            msg = "A grid update must contain a non-empty rectangular value matrix."
+            raise ValueError(msg)
+        return cls(
+            worksheet_id,
+            start_row - 1,
+            start_column - 1,
+            normalized_values,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DimensionMutation:
+    """One append, insert, or delete mutation for worksheet grid dimensions."""
+
+    worksheet_id: int
+    operation: str
+    dimension: str
+    start_index: int | None = None
+    end_index: int | None = None
+    length: int | None = None
+
+    @classmethod
+    def append_rows(cls, worksheet_id: int, count: int) -> DimensionMutation:
+        return cls._append(worksheet_id, "ROWS", count)
+
+    @classmethod
+    def append_columns(cls, worksheet_id: int, count: int) -> DimensionMutation:
+        return cls._append(worksheet_id, "COLUMNS", count)
+
+    @classmethod
+    def insert_columns(
+        cls,
+        worksheet_id: int,
+        *,
+        start_column: int,
+        count: int = 1,
+    ) -> DimensionMutation:
+        return cls._range(worksheet_id, "insert", "COLUMNS", start_column, count)
+
+    @classmethod
+    def delete_columns(
+        cls,
+        worksheet_id: int,
+        *,
+        start_column: int,
+        count: int = 1,
+    ) -> DimensionMutation:
+        return cls._range(worksheet_id, "delete", "COLUMNS", start_column, count)
+
+    @classmethod
+    def delete_rows(
+        cls,
+        worksheet_id: int,
+        *,
+        start_row: int,
+        count: int = 1,
+    ) -> DimensionMutation:
+        return cls._range(worksheet_id, "delete", "ROWS", start_row, count)
+
+    @classmethod
+    def _append(
+        cls,
+        worksheet_id: int,
+        dimension: str,
+        count: int,
+    ) -> DimensionMutation:
+        count = _positive_integer(count, "A dimension mutation count")
+        return cls(worksheet_id, "append", dimension, length=count)
+
+    @classmethod
+    def _range(
+        cls,
+        worksheet_id: int,
+        operation: str,
+        dimension: str,
+        start: int,
+        count: int,
+    ) -> DimensionMutation:
+        start = _positive_integer(start, "A dimension mutation start")
+        count = _positive_integer(count, "A dimension mutation count")
+        start_index = start - 1
+        return cls(
+            worksheet_id,
+            operation,
+            dimension,
+            start_index,
+            start_index + count,
+        )
+
+
+def _positive_integer(value: object, name: str) -> int:
+    msg = f"{name} must be a positive integer."
+    if isinstance(value, bool):
+        raise ValueError(msg)  # noqa: TRY004 - one domain validation error type
+    try:
+        integer = index(value)
+    except TypeError:
+        raise ValueError(msg) from None
+    if integer < 1:
+        raise ValueError(msg)
+    return integer
 
 
 class RhobotoGspreadClientManager(gspread_asyncio.AsyncioGspreadClientManager):
@@ -51,9 +213,7 @@ class RhobotoGspreadClientManager(gspread_asyncio.AsyncioGspreadClientManager):
 
 
 class AsyncioGspreadWorksheet:
-    """
-    Adapter for AsyncioGspreadWorksheet with DataFrame utilities.
-    """
+    """Adapter for the Google Sheets worksheet operations used by Rhoboto."""
 
     def __init__(self, worksheet: gspread_asyncio.AsyncioGspreadWorksheet) -> None:
         self._worksheet = worksheet
@@ -72,90 +232,6 @@ class AsyncioGspreadWorksheet:
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._worksheet, name)
-
-    async def to_frame(self) -> pd.DataFrame:
-        """
-        Convert worksheet data to a pandas DataFrame.
-
-        Returns:
-            pd.DataFrame:
-                DataFrame containing worksheet data.
-                Empty if worksheet is empty.
-        """
-        try:
-            values = await self._worksheet.get(value_render_option="FORMULA")
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "read_worksheet")
-        if not values:
-            return pd.DataFrame()
-
-        header = values[0]
-        expected_cols = len(header)
-        data = values[1:]
-
-        # Pad rows with empty strings to match the header length
-        # gspread omits trailing empty cells, which causes pandas to fail
-        for row in data:
-            if len(row) < expected_cols:
-                row.extend([""] * (expected_cols - len(row)))
-
-        return pd.DataFrame(data, columns=header)
-
-    async def update_from_dataframe(
-        self,
-        df: pd.DataFrame,
-        *,
-        raw_data: bool = False,
-    ) -> None:
-        """
-        Update worksheet from a pandas DataFrame.
-
-        Args:
-            df (pd.DataFrame): DataFrame to upload to worksheet.
-            raw_data (bool): Whether to store data rows without USER_ENTERED parsing.
-        """
-        df = df.fillna("")
-        rows = df.to_numpy().tolist()
-        try:
-            await self._worksheet.update(
-                [df.columns.tolist()],
-                range_name="A1",
-                raw=True,
-            )
-            if rows:
-                await self._worksheet.update(
-                    rows,
-                    range_name="A2",
-                    raw=raw_data,
-                )
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "update_worksheet")
-
-    async def batch_get_values(self, ranges: list[str]) -> list[list[list[object]]]:
-        """Read disjoint ranges while preserving formula text."""
-        try:
-            values = await self._worksheet.batch_get(
-                ranges,
-                value_render_option="FORMULA",
-            )
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "read_worksheet")
-        return [list(value_range) for value_range in values]
-
-    async def batch_update_values(self, data: list[dict[str, object]]) -> None:
-        """Write disjoint ranges as user-entered values and formulas."""
-        try:
-            await self._worksheet.batch_update(data, raw=False)
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "update_worksheet")
 
     async def get_conditional_format_rules(self) -> list[dict[str, object]]:
         """Return this worksheet's conditional-format rules."""
@@ -179,7 +255,7 @@ class AsyncioGspreadWorksheet:
         )
         return list(sheet.get("conditionalFormats", []))
 
-    async def batch_update_typed_values(  # noqa: PLR0913
+    def typed_update_requests(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
@@ -192,9 +268,17 @@ class AsyncioGspreadWorksheet:
         conditional_format_rule_deletes: Sequence[int] = (),
         conditional_format_rule_adds: Sequence[dict[str, object]] = (),
         frozen_column_count: int | None = None,
-    ) -> None:
-        """Atomically write typed values plus narrow grid formatting."""
-        requests = []
+        min_rows: int | None = None,
+        min_cols: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Build typed value and narrow formatting requests without sending them."""
+        requests = _worksheet_growth_requests(
+            self.id,
+            current_rows=self._worksheet.row_count,
+            current_cols=self._worksheet.col_count,
+            min_rows=min_rows,
+            min_cols=min_cols,
+        )
         for item in data:
             range_name = str(item["range"])
             values = item["values"]
@@ -278,6 +362,41 @@ class AsyncioGspreadWorksheet:
                     }
                 }
             )
+        return requests
+
+    async def batch_update_typed_values(  # noqa: PLR0913
+        self,
+        data: list[dict[str, object]],
+        *,
+        formula_ranges: set[str],
+        background_updates: Sequence[tuple[str, str]] = (),
+        border_updates: Sequence[tuple[str, str | None, str, Sequence[str]]] = (),
+        format_updates: Sequence[tuple[str, dict[str, object], str]] = (),
+        column_width_updates: Sequence[tuple[str, int]] = (),
+        hidden_column_updates: Sequence[tuple[str, bool]] = (),
+        conditional_format_rule_deletes: Sequence[int] = (),
+        conditional_format_rule_adds: Sequence[dict[str, object]] = (),
+        frozen_column_count: int | None = None,
+        min_rows: int | None = None,
+        min_cols: int | None = None,
+    ) -> None:
+        """Atomically write typed values plus narrow grid formatting."""
+        requests = self.typed_update_requests(
+            data,
+            formula_ranges=formula_ranges,
+            background_updates=background_updates,
+            border_updates=border_updates,
+            format_updates=format_updates,
+            column_width_updates=column_width_updates,
+            hidden_column_updates=hidden_column_updates,
+            conditional_format_rule_deletes=conditional_format_rule_deletes,
+            conditional_format_rule_adds=conditional_format_rule_adds,
+            frozen_column_count=frozen_column_count,
+            min_rows=min_rows,
+            min_cols=min_cols,
+        )
+        if not requests:
+            return
         try:
             await self._worksheet.agcm._call(  # noqa: SLF001
                 self._worksheet.ws.client.batch_update,
@@ -288,21 +407,6 @@ class AsyncioGspreadWorksheet:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "update_worksheet")
-
-    async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
-        """Grow the worksheet only when the requested grid exceeds its size."""
-        current_rows = self._worksheet.row_count
-        current_cols = self._worksheet.col_count
-        rows = max(current_rows, min_rows)
-        cols = max(current_cols, min_cols)
-        if (rows, cols) == (current_rows, current_cols):
-            return
-        try:
-            await self._worksheet.resize(rows=rows, cols=cols)
-        except GoogleSheetsError:
-            raise
-        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
-            _raise_google_sheets_error(exc, "resize_worksheet")
 
     async def delete_row(self, index: int) -> None:
         """Delete one physical worksheet row by its one-based index."""
@@ -315,13 +419,69 @@ class AsyncioGspreadWorksheet:
 
 
 def _extended_value(value: object, *, formulas: bool) -> dict[str, object]:
-    if formulas and isinstance(value, str) and value.startswith("="):
+    value = _normalize_grid_value(value)
+    if value is None or value == "":
+        return {}
+    if formulas:
+        if not isinstance(value, str) or not value.startswith("="):
+            msg = "A formula range value must begin with '='."
+            raise ValueError(msg)
         return {"formulaValue": value}
     if isinstance(value, bool):
         return {"boolValue": value}
     if isinstance(value, int | float):
         return {"numberValue": value}
-    return {"stringValue": "" if value is None else str(value)}
+    return {"stringValue": str(value)}
+
+
+def _worksheet_growth_requests(
+    worksheet_id: int,
+    *,
+    current_rows: int,
+    current_cols: int,
+    min_rows: int | None,
+    min_cols: int | None,
+) -> list[dict[str, object]]:
+    requests = []
+    if min_rows is not None:
+        min_rows = _positive_integer(min_rows, "Minimum worksheet row count")
+        if min_rows > current_rows:
+            requests.append(
+                _dimension_request(
+                    DimensionMutation.append_rows(
+                        worksheet_id,
+                        min_rows - current_rows,
+                    )
+                )
+            )
+    if min_cols is not None:
+        min_cols = _positive_integer(min_cols, "Minimum worksheet column count")
+        if min_cols > current_cols:
+            requests.append(
+                _dimension_request(
+                    DimensionMutation.append_columns(
+                        worksheet_id,
+                        min_cols - current_cols,
+                    )
+                )
+            )
+    return requests
+
+
+def _normalize_grid_value(value: object) -> object:
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, GridFormula):
+        return value
+    if isinstance(value, (float, np.floating)) and not np.isfinite(value):
+        msg = "Non-finite grid value is not valid JSON."
+        raise ValueError(msg)
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, str | bool | int | float):
+        return value
+    msg = f"Unsupported grid value type: {type(value).__name__}."
+    raise TypeError(msg)
 
 
 def _hex_rgb(value: str) -> dict[str, float]:
@@ -414,6 +574,66 @@ def _presentation_requests(  # noqa: PLR0913
     return requests
 
 
+def _grid_value_request(update: GridValueUpdate) -> dict[str, object]:
+    return {
+        "updateCells": {
+            "range": {
+                "sheetId": update.worksheet_id,
+                "startRowIndex": update.start_row_index,
+                "endRowIndex": update.start_row_index + len(update.rows),
+                "startColumnIndex": update.start_column_index,
+                "endColumnIndex": update.start_column_index + len(update.rows[0]),
+            },
+            "rows": [
+                {
+                    "values": [
+                        {"userEnteredValue": _grid_extended_value(value)}
+                        for value in row
+                    ]
+                }
+                for row in update.rows
+            ],
+            "fields": "userEnteredValue",
+        }
+    }
+
+
+def _grid_extended_value(value: object) -> dict[str, object]:
+    if isinstance(value, GridFormula):
+        return {"formulaValue": value.value}
+    return _extended_value(value, formulas=False)
+
+
+def _dimension_request(mutation: DimensionMutation) -> dict[str, object]:
+    if mutation.operation == "append":
+        return {
+            "appendDimension": {
+                "sheetId": mutation.worksheet_id,
+                "dimension": mutation.dimension,
+                "length": mutation.length,
+            }
+        }
+    request = {
+        "range": {
+            "sheetId": mutation.worksheet_id,
+            "dimension": mutation.dimension,
+            "startIndex": mutation.start_index,
+            "endIndex": mutation.end_index,
+        }
+    }
+    if mutation.operation == "insert":
+        request["inheritFromBefore"] = False
+    return {f"{mutation.operation}Dimension": request}
+
+
+def _grid_mutation_request(
+    mutation: GridValueUpdate | DimensionMutation,
+) -> dict[str, object]:
+    if isinstance(mutation, GridValueUpdate):
+        return _grid_value_request(mutation)
+    return _dimension_request(mutation)
+
+
 class GoogleSheet:
     def __init__(self, sheet_url: str, service_account_path: str) -> None:
         """
@@ -468,6 +688,74 @@ class GoogleSheet:
             raise
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "open_spreadsheet")
+
+    async def batch_update_grid(
+        self,
+        mutations: Sequence[GridValueUpdate | DimensionMutation],
+        *,
+        worksheet_requests: Sequence[dict[str, object]] = (),
+    ) -> None:
+        """Apply ordered grid mutations and typed worksheet requests atomically."""
+        requests = [
+            *(_grid_mutation_request(mutation) for mutation in mutations),
+            *worksheet_requests,
+        ]
+        if not requests:
+            return
+        try:
+            sh = await self.sheet
+            await sh.batch_update({"requests": requests})
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "update_worksheet")
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: Sequence[AsyncioGspreadWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        """Read complete value grids from this spreadsheet in one request."""
+        if not worksheets:
+            return {}
+        try:
+            sh = await self.sheet
+            ranges = [
+                absolute_range_name(
+                    worksheet.title,
+                    f"A1:{rowcol_to_a1(worksheet.row_count, worksheet.col_count)}",
+                )
+                for worksheet in worksheets
+            ]
+            response = await sh.values_batch_get(
+                ranges,
+                params={"valueRenderOption": "FORMULA"},
+            )
+            if not isinstance(response, dict):
+                raise _InvalidValuesBatchResponseError
+            value_ranges = response.get("valueRanges")
+            if not isinstance(value_ranges, list) or len(value_ranges) != len(
+                worksheets
+            ):
+                raise _InvalidValuesBatchResponseError
+            result: dict[int, list[list[object]]] = {}
+            for worksheet, value_range in zip(
+                worksheets,
+                value_ranges,
+                strict=True,
+            ):
+                if not isinstance(value_range, dict):
+                    raise _InvalidValuesBatchResponseError
+                values = value_range.get("values", [])
+                if not isinstance(values, list) or any(
+                    not isinstance(row, list) for row in values
+                ):
+                    raise _InvalidValuesBatchResponseError
+                result[worksheet.id] = [list(row) for row in values]
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
+        return result
 
     async def get_worksheet(self, worksheet_id: int) -> AsyncioGspreadWorksheet | None:
         """
@@ -560,6 +848,8 @@ class GoogleSheet:
         worksheet_titles: list[str],
         default_rows: int = 100,
         default_cols: int = 20,
+        *,
+        creation_status: WorksheetCreationStatus | None = None,
     ) -> dict[str, AsyncioGspreadWorksheet]:
         """
         Get or create worksheets by their titles, returned as AsyncioGspreadWorksheet.
@@ -570,6 +860,7 @@ class GoogleSheet:
                 Default number of rows for new worksheets. Defaults to 100.
             default_cols (int, optional):
                 Default number of columns for new worksheets. Defaults to 20.
+            creation_status: Tracks whether a worksheet creation completed.
 
         Returns:
             dict[str, AsyncioGspreadWorksheet]:
@@ -591,6 +882,8 @@ class GoogleSheet:
                     ws = await sh.add_worksheet(
                         worksheet_title, rows=default_rows, cols=default_cols
                     )
+                    if creation_status is not None:
+                        creation_status.created = True
                 except GoogleSheetsError:
                     raise
                 except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:

@@ -19,6 +19,12 @@ from models.feature_channel_message_state import (
 from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
 from models.team_register import TeamRegisterConfig
+from tests.test_manager_fakes import (
+    FakeEntryWorksheet,
+    FakeShiftValueSheet,
+    current_entry_rows,
+    make_shift_metadata,
+)
 from utils.db import close_db, get_model_modules, init_db
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import ShiftRegisterManager
@@ -307,17 +313,20 @@ async def test_shift_manager_updates_recruitment_time_ranges() -> None:
         )
         manager = ShiftRegisterManager(feature_channel, "service.json")
         ranges = RecruitmentTimeRanges.from_modal_input("4-8, 8-12")
-        metadata = object()
+        worksheet = FakeEntryWorksheet(current_entry_rows())
+        metadata = make_shift_metadata(worksheet)
         manager.fetch_google_sheets_metadata = AsyncMock(return_value=metadata)
-        manager.sync_entry_presentation = AsyncMock()
+        manager._sync_entry_presentation_locked = AsyncMock()  # noqa: SLF001
+        manager._google_sheet = FakeShiftValueSheet()  # noqa: SLF001
 
         await manager.update_recruitment_time_ranges(ranges)
 
         await config.refresh_from_db()
         assert config.recruitment_time_ranges == [{"start": 4, "end": 12}]
-        manager.sync_entry_presentation.assert_awaited_once_with(
+        manager._sync_entry_presentation_locked.assert_awaited_once_with(  # noqa: SLF001
             metadata,
             ranges,
+            entry_grid=worksheet.rows,
             force=True,
         )
     finally:
@@ -342,8 +351,11 @@ async def test_shift_manager_update_ranges_preserves_fresh_timeline_fields() -> 
             final_schedule_worksheet_id=3,
         )
         manager = ShiftRegisterManager(feature_channel, "service.json")
-        manager.fetch_google_sheets_metadata = AsyncMock(return_value=object())
+        manager.fetch_google_sheets_metadata = AsyncMock(
+            return_value=make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
+        )
         manager.sync_entry_presentation = AsyncMock()
+        manager._google_sheet = FakeShiftValueSheet()  # noqa: SLF001
         await manager.get_sheet_config()
         deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
         fresh_config = await ShiftRegisterConfig.get(id=config.id)
@@ -384,8 +396,11 @@ async def test_shift_manager_range_sheet_failure_is_partial_after_database_save(
             final_schedule_worksheet_id=3,
         )
         manager = ShiftRegisterManager(feature_channel, "service.json")
-        manager.fetch_google_sheets_metadata = AsyncMock(return_value=object())
-        manager.sync_entry_presentation = AsyncMock(
+        manager.fetch_google_sheets_metadata = AsyncMock(
+            return_value=make_shift_metadata(FakeEntryWorksheet(current_entry_rows()))
+        )
+        manager._google_sheet = FakeShiftValueSheet()  # noqa: SLF001
+        manager._sync_entry_presentation_locked = AsyncMock(  # noqa: SLF001
             side_effect=GoogleSheetsError(
                 GoogleSheetsErrorKind.TRANSIENT,
                 "temporary",

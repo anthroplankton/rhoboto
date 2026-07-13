@@ -16,13 +16,16 @@ from components.ui_team_register import (
     get_fresh_team_register_config_or_respond,
 )
 from utils.key_async_lock import KeyAsyncLock
-from utils.reactions import add_reaction_if_possible, remove_reaction_if_present
+from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.storage_errors import (
     StorageOperationContext,
     classify_storage_exception,
-    partial_success_storage_error,
 )
-from utils.team_register_manager import TeamRegisterManager
+from utils.team_register_manager import (
+    TEAM_REGISTER_SHEET_WRITE_LOCK,
+    TeamRegisterManager,
+    fresh_team_channel_transaction,
+)
 from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
 
 if TYPE_CHECKING:
@@ -44,7 +47,7 @@ class TeamRegister(
     feature_display_name = TEAM_REGISTER_DISPLAY_NAME
     guide_template_key = "team.guide"
     auto_guide_template_key = "team.auto_guide"
-    sheet_write_lock = KeyAsyncLock()
+    sheet_write_lock = TEAM_REGISTER_SHEET_WRITE_LOCK
     auto_guide_lock = KeyAsyncLock()
 
     ManagerType = TeamRegisterManager
@@ -117,15 +120,15 @@ class TeamRegister(
     ) -> ClassifiedTeams | None:
         teams = submission
         self.logger.info(
-            "Parsed teams in Guild: `%s` Channel: `%s` (Feature: `%s`): `%s` (%s)",
+            (
+                "Parsed Team Register submission. operation=team_register_parse "
+                "feature=%s guild=%s channel=%s message=%s teams=%s"
+            ),
+            self.feature_name,
             message.guild.id,
             message.channel.id,
-            self.feature_name,
-            message.author.display_name,
-            ", ".join(
-                f"{t.leader_skill_value}/{t.internal_skill_value}/{t.team_power}"
-                for t in teams
-            ),
+            message.id,
+            len(teams),
         )
 
         if self.bot.user is not None:
@@ -139,39 +142,24 @@ class TeamRegister(
         team_tuple = classified_teams.as_tuple()
         manager = context.manager
 
-        async with self.sheet_write_lock(context.channel_id):
-            metadata = await manager.fetch_google_sheets_metadata()
-            manager.log_missing_worksheet_warnings(metadata)
-
-            try:
-                metadata = await manager.ensure_worksheets_and_upsert_sheet_config(
-                    metadata, count=len(team_tuple)
-                )
-                await manager.upsert_user_teams(
-                    user_info,
-                    *team_tuple,
-                    metadata=metadata,
-                )
-                await manager.upsert_user_summary(
-                    user_info,
-                    message.author.roles if isinstance(message.author, Member) else [],
-                    *team_tuple,
-                    metadata=metadata,
-                )
-            except Exception as exc:
-                error = partial_success_storage_error(exc)
-                if error is None:
-                    raise
-                raise error from error.__cause__
-
-        if self.bot.user is not None:
-            await remove_reaction_if_present(
-                message,
-                config.PROCESSING_EMOJI,
-                self.bot.user,
-                log=self.logger,
+        async with fresh_team_channel_transaction(
+            manager,
+            self.sheet_write_lock,
+            channel_id=context.channel_id,
+        ):
+            await manager.upsert_user_registration(
+                user_info,
+                message.author.roles if isinstance(message.author, Member) else [],
+                *team_tuple,
             )
-            await add_reaction_if_possible(message, "✅", log=self.logger)
+
+        await transition_processing_reaction(
+            message,
+            ("✅",),
+            processing_emoji=config.PROCESSING_EMOJI,
+            user=self.bot.user,
+            log=self.logger,
+        )
 
         return classified_teams
 
@@ -225,49 +213,20 @@ class TeamRegister(
             return
 
         try:
-            async with self.sheet_write_lock(context.channel_id):
-                metadata = await context.manager.fetch_google_sheets_metadata()
-                context.manager.log_missing_worksheet_warnings(metadata)
-
-                try:
-                    metadata = (
-                        await context.manager.ensure_worksheets_and_upsert_sheet_config(
-                            metadata,
-                            count=0,  # No teams to process, just refresh summary
-                        )
-                    )
-
-                    summary_df = await context.manager.refresh_summary_worksheet(
-                        metadata,
-                        member_by_names=member_by_names,
-                    )
-                except Exception as exc:
-                    storage_error = partial_success_storage_error(exc)
-                    if storage_error is None:
-                        raise
-                    await send_storage_error(
-                        interaction,
-                        storage_error,
-                        context=operation_context,
-                        log=self.logger,
-                    )
-                    return
-        except Exception as exc:
-            storage_error = classify_storage_exception(exc)
-            if storage_error is None:
-                raise
-            await send_storage_error(
+            async with fresh_team_channel_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=context.channel_id,
+            ):
+                summary_df = await context.manager.refresh_summary_registration(
+                    member_by_names=member_by_names,
+                )
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
                 interaction,
-                storage_error,
-                context=operation_context,
-                log=self.logger,
-            )
-            return
-
-        if summary_df is None:
-            await interaction.followup.send(
-                content="No summary worksheet found or no data to display.",
-                ephemeral=True,
+                exc,
+                source=source,
+                operation="team_register_summary",
             )
             return
 

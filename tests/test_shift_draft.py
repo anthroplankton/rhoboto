@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import copy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock
 
-import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
@@ -32,6 +33,13 @@ from utils.shift_scheduler import (
     ShiftScheduler,
 )
 from utils.storage_errors import StorageError, StorageErrorKind
+from utils.structs_base import UserInfo, WorksheetContractError
+from utils.team_register_structs import (
+    SummaryWorksheetMetadata,
+    TeamRegisterGoogleSheetsMetadata,
+    TeamWorksheetContent,
+    TeamWorksheetMetadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -48,13 +56,29 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         old_axis_rows: list[list[object]] | None = None,
         old_threshold_labels: list[list[object]] | None = None,
         old_lookup_labels: list[list[object]] | None = None,
+        row_count: int = 100,
+        col_count: int = 20,
         **kwargs: object,
     ) -> None:
+        kwargs.setdefault("worksheet_id", 2)
         super().__init__(**kwargs)
+        self.row_count = row_count
+        self.col_count = col_count
         self.old_axis_rows = old_axis_rows or []
         self.old_threshold_labels = old_threshold_labels or []
         self.old_lookup_labels = old_lookup_labels or []
-        self.batch_get_calls: list[list[str]] = []
+        height = max(
+            len(self.old_axis_rows),
+            len(self.old_threshold_labels),
+            len(self.old_lookup_labels),
+        )
+        self.values = [[""] * 10 for _ in range(height)]
+        for row, value in enumerate(self.old_axis_rows):
+            self.values[row][0:1] = value[:1]
+        for row, value in enumerate(self.old_threshold_labels):
+            self.values[row][8:9] = value[:1]
+        for row, value in enumerate(self.old_lookup_labels):
+            self.values[row][9:10] = value[:1]
         self.typed_batches: list[list[dict[str, object]]] = []
         self.formula_ranges: list[set[str]] = []
         self.background_updates: list[list[tuple[str, str]]] = []
@@ -64,21 +88,9 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         self.conditional_format_rules: list[dict[str, object]] = []
         self.conditional_format_rule_deletes: list[list[int]] = []
         self.conditional_format_rule_adds: list[list[dict[str, object]]] = []
-        self.ensure_calls: list[tuple[int, int]] = []
+        self.typed_minimums: list[tuple[int | None, int | None]] = []
 
-    async def batch_get_values(
-        self,
-        ranges: list[str],
-    ) -> list[list[list[object]]]:
-        self.batch_get_calls.append(ranges)
-        assert ranges == ["A1:A33", "I1:I32", "J1:J37"]
-        return [
-            self.old_axis_rows,
-            self.old_threshold_labels,
-            self.old_lookup_labels,
-        ]
-
-    async def batch_update_typed_values(  # noqa: PLR0913
+    def typed_update_requests(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
         *,
@@ -89,7 +101,9 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         conditional_format_rule_deletes: Sequence[int] = (),
         conditional_format_rule_adds: Sequence[dict[str, object]] = (),
         frozen_column_count: int | None = None,
-    ) -> None:
+        min_rows: int | None = None,
+        min_cols: int | None = None,
+    ) -> list[dict[str, object]]:
         self.typed_batches.append(data)
         self.formula_ranges.append(formula_ranges)
         self.background_updates.append(list(background_updates))
@@ -100,50 +114,83 @@ class DraftBatchFakeWorksheet(FakeWorksheet):
         )
         self.conditional_format_rule_adds.append(list(conditional_format_rule_adds))
         self.frozen_column_counts.append(frozen_column_count)
+        self.typed_minimums.append((min_rows, min_cols))
+        return data
+
+    async def batch_update_typed_values(
+        self,
+        data: list[dict[str, object]],
+        **kwargs: object,
+    ) -> None:
+        self.typed_update_requests(data, **kwargs)  # type: ignore[arg-type]
 
     async def get_conditional_format_rules(self) -> list[dict[str, object]]:
         return self.conditional_format_rules
 
-    async def ensure_size(self, *, min_rows: int, min_cols: int) -> None:
-        self.ensure_calls.append((min_rows, min_cols))
-
 
 class EntryRangeFakeWorksheet(FakeWorksheet):
-    def __init__(self, range_values: list[list[list[object]]]) -> None:
-        super().__init__(title="Shift Entry")
-        self.range_values = range_values
-        self.batch_get_calls: list[list[str]] = []
-        self.ignored_values = {
-            "A1": "count formula row",
-            "C3:E3": "Team display formulas",
-            "AK3": "admin-owned value",
-        }
-
-    async def batch_get_values(
+    def __init__(
         self,
-        ranges: list[str],
-    ) -> list[list[list[object]]]:
-        self.batch_get_calls.append(ranges)
-        assert ranges == ["2:2", "A3:B", "F3:AJ"]
-        return self.range_values
+        range_values: list[list[list[object]]],
+        *,
+        row_count: int = 100,
+        col_count: int = 40,
+    ) -> None:
+        super().__init__(title="Shift Entry")
+        self.row_count = row_count
+        self.col_count = col_count
+        self.range_values = range_values
+        header_rows, identity_rows, availability_rows = range_values
+        self.values = [list(row) for row in header_rows]
+        participant_count = max(len(identity_rows), len(availability_rows))
+        for index in range(participant_count):
+            identity = identity_rows[index] if index < len(identity_rows) else []
+            availability = (
+                availability_rows[index] if index < len(availability_rows) else []
+            )
+            self.values.append(
+                [
+                    *identity,
+                    *("" for _ in range(max(0, 5 - len(identity)))),
+                    *availability,
+                ]
+            )
 
-    async def to_frame(self) -> pd.DataFrame:
-        msg = "draft generation must not use the legacy whole-frame read"
-        raise AssertionError(msg)
 
+class DraftValueGoogleSheet:
+    sheet_url = "https://docs.google.com/spreadsheets/d/shift-draft/edit"
 
-def build_entry_frame(rows: list[tuple[str, str, set[int]]]) -> pd.DataFrame:
-    records = []
-    for username, display_name, slots in rows:
-        record: dict[str, object] = {
-            "username": username,
-            "display_name": display_name,
-            "original_message": "",
+    def __init__(self) -> None:
+        self.batch_reads: list[list[int]] = []
+        self.batch_updates: list[tuple[list[object], list[dict[str, object]]]] = []
+        self.batch_update_error: Exception | None = None
+
+    async def batch_get_worksheet_values(
+        self,
+        worksheets: list[FakeWorksheet],
+    ) -> dict[int, list[list[object]]]:
+        self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        return {
+            worksheet.id: copy.deepcopy(worksheet.values) for worksheet in worksheets
         }
-        for index, label in enumerate(ShiftParser.HOUR_LABELS):
-            record[label] = 1 if index in slots else 0
-        records.append(record)
-    return pd.DataFrame(records, columns=EntryWorksheetContent.COLUMNS)
+
+    async def batch_update_grid(
+        self,
+        mutations: list[object],
+        *,
+        worksheet_requests: list[dict[str, object]] = (),
+    ) -> None:
+        self.batch_updates.append((list(mutations), list(worksheet_requests)))
+        if self.batch_update_error is not None:
+            raise self.batch_update_error
+
+
+def configure_draft_value_sheet(
+    manager: ShiftRegisterManager,
+) -> DraftValueGoogleSheet:
+    sheet = DraftValueGoogleSheet()
+    manager._google_sheet = sheet  # type: ignore[assignment]  # noqa: SLF001
+    return sheet
 
 
 def build_entry_ranges(
@@ -152,14 +199,64 @@ def build_entry_ranges(
     identities = []
     availability = []
     for username, display_name, slots in rows:
-        identities.append([username, display_name])
+        identities.append([username, display_name, ""])
         availability.append(
             [
                 *(1 if index in slots else 0 for index in range(30)),
                 "",
             ]
         )
-    return [[EntryWorksheetContent.COLUMNS], identities, availability]
+    return [
+        [EntryWorksheetContent.count_row(), EntryWorksheetContent.COLUMNS],
+        identities,
+        availability,
+    ]
+
+
+def build_entry_grid(
+    rows: list[tuple[str, str, set[int]]],
+) -> list[list[object]]:
+    grid = [EntryWorksheetContent.count_row(), EntryWorksheetContent.COLUMNS]
+    for username, display_name, slots in rows:
+        grid.append(
+            [
+                username,
+                display_name,
+                "",
+                "ignored spill",
+                "ignored spill",
+                *(1 if index in slots else 0 for index in range(30)),
+                "message",
+                "ignored admin",
+            ]
+        )
+    return grid
+
+
+def test_entry_state_projects_owned_columns_from_complete_grid() -> None:
+    layout, identities, participants = shift_register_manager._entry_state_from_grid(  # noqa: SLF001
+        build_entry_grid([("alice", "Alice", {4, 6})])
+    )
+
+    assert layout == []
+    assert identities == [["alice", "Alice"]]
+    assert participants == [(3, "alice", "", False)]
+
+
+def test_draft_control_state_projects_only_signed_control_columns() -> None:
+    grid = [[""] * 10 for _ in range(37)]
+    grid[0][0] = "JST"
+    grid[1][0] = "4-5"
+    grid[31][0] = '=LET(owner, "rhoboto-shift-draft-notes", owner)'
+    grid[3][8] = DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL
+    grid[5][9] = "名前を貼り付け"
+
+    project_controls = shift_register_manager._draft_control_state_from_grid  # noqa: SLF001
+    axis, threshold, lookup = project_controls(grid)
+
+    assert axis[-1] == ['=LET(owner, "rhoboto-shift-draft-notes", owner)']
+    assert threshold == [[], [], [], [DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL]]
+    assert lookup[-1] == ["名前を貼り付け"]
 
 
 def make_shift(username: str, slots: Iterable[int]) -> Shift:
@@ -171,20 +268,8 @@ def make_shift(username: str, slots: Iterable[int]) -> Shift:
     )
 
 
-def test_to_shifts_reads_slots_from_worksheet() -> None:
-    frame = build_entry_frame([("alice", "Alice", {4, 5, 6})])
-    shift_df, plain_df = EntryWorksheetContent.standardize_dataframe(frame)
-    content = EntryWorksheetContent(shift_df, plain_df)
-
-    shifts = content.to_shifts()
-
-    assert len(shifts) == 1
-    shift = shifts[0]
-    assert shift.username == "alice"
-    assert shift.display_name == "Alice"
-    assert 4 in shift
-    assert 6 in shift
-    assert 7 not in shift
+def make_runner() -> UserInfo:
+    return UserInfo(username="runner", display_name="Run")
 
 
 def test_shifts_from_ranges_reads_current_entry_owned_columns() -> None:
@@ -208,6 +293,18 @@ def test_shifts_from_ranges_reads_current_entry_owned_columns() -> None:
     ]
 
 
+def test_shifts_from_ranges_rejects_nonbinary_availability() -> None:
+    availability = [0] * len(ShiftParser.HOUR_LABELS)
+    availability[4] = 2
+
+    with pytest.raises(WorksheetContractError):
+        EntryWorksheetContent.shifts_from_ranges(
+            [EntryWorksheetContent.COLUMNS],
+            [["alice", "Alice"]],
+            [[*availability, "original"]],
+        )
+
+
 def test_from_schedule_renders_lane_columns() -> None:
     shifts = [make_shift("a", {4, 5}), make_shift("b", {4, 5})]
     schedule = ShiftScheduler.assign(
@@ -221,7 +318,7 @@ def test_from_schedule_renders_lane_columns() -> None:
             )
         },
         encore_power_threshold=35,
-        runner="Run",
+        runner=make_runner(),
     )
 
     frame = DraftWorksheetContent.from_schedule(schedule)
@@ -233,6 +330,54 @@ def test_from_schedule_renders_lane_columns() -> None:
     assert {first_row["アンコ"], first_row["本走①"]} == {"A", "B"}
     # Only two people, so the standby seat stays empty.
     assert first_row["待機"] == ""
+
+
+def test_from_schedule_omits_runner_outside_recruitment_slots() -> None:
+    schedule = ShiftScheduler.assign(
+        [],
+        [4, 5, 6],
+        runner=UserInfo(username="runner", display_name="Run"),
+    )
+
+    frame = DraftWorksheetContent.from_schedule(
+        schedule,
+        recruitment_slots={4, 6},
+    )
+
+    assert list(frame["ランナー"]) == ["Run", "", "Run"]
+
+
+def test_candidate_formula_masks_each_row_by_canonical_runner_cell() -> None:
+    runner = UserInfo(username="runner_user", display_name="Alice")
+    schedule = ShiftScheduler.assign(
+        [
+            Shift(
+                username="runner_user",
+                display_name="Alice",
+                original_message="",
+                slots={4},
+            )
+        ],
+        [4],
+        runner=runner,
+    )
+
+    formula = DraftWorksheetContent.candidate_formula(
+        schedule,
+        entry_worksheet_title="Shift Entry",
+        recruitment_slots={4},
+        encore_power_threshold_cell="L2",
+        team_source=None,
+    )
+
+    assert "runnerUsername" not in formula
+    assert "runnerBaseNames" in formula
+    assert "N(runnerBaseNames = name) * N(runnerNames <> runnerBaseNames)" in formula
+    assert "runnerNames, B2:B2" in formula
+    assert "runnerName, INDEX(runnerNames, XMATCH(hour, hourSlots, 0))" in formula
+    assert "N(keys <> runnerName) * N(names <> runnerName)" in formula
+    assert "runnerEligible(hour)" in formula
+    assert "FILTER(HSTACK(keys, scores, entryOrder), mask)" in formula
 
 
 def test_from_schedule_with_no_hours_is_header_only() -> None:
@@ -292,6 +437,9 @@ def test_notes_formula_uses_exact_canonical_keys_and_dynamic_schedule() -> None:
     assert "C2:C2" in formula
     assert "⟨@[a-z0-9._]{2,32}⟩$" in formula
     assert "SUMPRODUCT(N(names = name)) > 1" in formula
+    assert "runnerNames, B2:B2" in formula
+    assert "N(runnerBaseNames = name) * N(runnerNames <> runnerBaseNames)" in formula
+    assert "runnerUsername" not in formula
     assert "SUMPRODUCT(N(shifts = person))" in formula
     assert "SUMPRODUCT(N(row = person))" in formula
     assert "SUMPRODUCT(N(encore = person))" in formula
@@ -399,7 +547,10 @@ def test_candidate_formula_uses_hourly_availability_and_team_rules() -> None:
     assert "> 35" not in formula
     assert "recruitmentSlots, {4;6}" in formula
     assert "'Shift Entry'!F3:AI" in formula
-    assert 'names <> "Run"' in formula
+    assert "runnerNames, B2:B4" in formula
+    assert "runnerName, INDEX(runnerNames, XMATCH(hour, hourSlots, 0))" in formula
+    assert "N(keys <> runnerName) * N(names <> runnerName)" in formula
+    assert "runnerUsername" not in formula
     assert "SORT(" in formula
     assert (
         "HSTACK(honsoBlock, blankColumn, encoreBlock, blankColumn, unregisteredBlock)"
@@ -473,6 +624,8 @@ def test_lookup_updates_build_exact_layout_and_cleanup() -> None:
     assert "⚠️ 参加者を特定できません" in formulas["L6"]
     assert "K6" in formulas["L6"]
     assert "XMATCH(inputName, keys, 0)" in formulas["L6"]
+    assert all("runnerNames, B2:B3" in formula for formula in formulas.values())
+    assert all("runnerUsername" not in formula for formula in formulas.values())
     assert 'TEXTJOIN("・", TRUE' in formulas["K7"]
     assert "AJ3:AJ" in formulas["K8"]
     assert "IMPORTRANGE" in formulas["J10"]
@@ -690,6 +843,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[
             {"start": 4, "end": 7},
@@ -741,7 +895,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         {"booleanRule": {"condition": {"values": []}}},
     ]
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -749,7 +903,52 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    main.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 150, 740, 33.4, "main"],
+        ["bob", "Team Bob", 140, 680, 32.0, "main"],
+        ["carol", "Team Carol", 130, 620, 30.0, "main"],
+    ]
+    main.row_count = 100
+    main.col_count = 20
+    encore = FakeWorksheet(title="Encore Team", worksheet_id=102)
+    encore.values = [TeamWorksheetContent.COLUMNS]
+    encore.row_count = 100
+    encore.col_count = 20
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    summary.values = [
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+        ]
+    ]
+    summary.row_count = 100
+    summary.col_count = 20
+    source_config = SimpleNamespace(
+        sheet_url=metadata.sheet_url,
+        landing_worksheet_id=201,
+        encore_role_ids=[],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        metadata.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+
+    def resolve_profiles(
+        _source: object,
+        _summaries: object,
+    ) -> DraftTeamProfileResolution:
         return DraftTeamProfileResolution(
             TeamSourceStatus.AVAILABLE,
             {
@@ -774,12 +973,28 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             ),
         )
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(
+                TeamSourceStatus.AVAILABLE,
+                source_config,
+                source_metadata,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_draft_profiles_from_summary",
+        resolve_profiles,
+    )
 
     result = await manager.generate_draft(
         metadata,
+        member_by_names={},
         encore_power_threshold=35,
-        runner="Run",
+        runner=make_runner(),
     )
 
     data = draft_worksheet.typed_batches[-1]
@@ -796,11 +1011,11 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         "range": "I20:M20",
         "values": [
             [
+                "仮配置済：緑背景",  # noqa: RUF001
+                "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
                 "アンコ候補閾値",
                 35,
                 "万総合力",
-                "仮配置済：緑背景",  # noqa: RUF001
-                "アンコ配置済：緑背景＋赤字",  # noqa: RUF001
             ]
         ],
     } in data
@@ -816,7 +1031,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     assert "本走候補（実効値：高→低）" in str(  # noqa: RUF001
         candidate_update["values"][0][0]
     )
-    assert "threshold, IF(ISNUMBER(J20), J20, NA())" in str(
+    assert "threshold, IF(ISNUMBER(L20), L20, NA())" in str(
         candidate_update["values"][0][0]
     )
     assert {"A21", "I1", "L22", "K23", "K24", "J26"} <= (
@@ -827,10 +1042,10 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     assert draft_worksheet.background_updates[-1][1:] == [
         *((f"B{row}:G{row}", "#CCCCCC") for row in range(5, 18)),
         ("I24:M24", "#FFFFFF"),
-        ("I20", "#A4C2F4"),
-        ("J20", "#FFF2CC"),
+        ("I20:J20", "#D9EAD3"),
         ("K20", "#A4C2F4"),
-        ("L20:M20", "#D9EAD3"),
+        ("L20", "#FFF2CC"),
+        ("M20", "#A4C2F4"),
         ("J25:L29", "#FFFFFF"),
         ("J22:L24", "#FFFFFF"),
         ("J22:J24", "#A4C2F4"),
@@ -850,7 +1065,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ("J24:M24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("I1:I20", "#000000", "SOLID", ("left",)),
         ("I20:M20", "#000000", "SOLID", ("bottom",)),
-        ("J20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
+        ("L20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
         ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L22", "#000000", "SOLID", ("top",)),
@@ -864,6 +1079,17 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     ]
     assert draft_worksheet.format_updates[-1] == [
         (
+            "J24",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+        (
             "M24",
             {
                 "textFormat": {
@@ -875,11 +1101,22 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             "userEnteredFormat.textFormat.foregroundColorStyle",
         ),
         (
-            "M20",
+            "J20",
             {
                 "textFormat": {
                     "foregroundColorStyle": {
                         "rgbColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                    }
+                }
+            },
+            "userEnteredFormat.textFormat.foregroundColorStyle",
+        ),
+        (
+            "M20",
+            {
+                "textFormat": {
+                    "foregroundColorStyle": {
+                        "rgbColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
                     }
                 }
             },
@@ -945,7 +1182,7 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             }
         }
     }
-    assert draft_worksheet.ensure_calls == []
+    assert draft_worksheet.typed_minimums == [(38, 13)]
     assert result.schedule.hours == list(range(4, 22))
     assert all(
         not assignment.supporter_usernames_by_slot
@@ -960,8 +1197,281 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     )
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
-    assert entry_worksheet.batch_get_calls == [["2:2", "A3:B", "F3:AJ"]]
-    assert draft_worksheet.batch_get_calls == [["A1:A33", "I1:I32", "J1:J37"]]
+    assert value_sheet.batch_reads == [[1, 2, 101, 102, 201]]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_uses_shared_live_summary_without_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    entry_worksheet = EntryRangeFakeWorksheet(
+        build_entry_ranges([("alice", "Shift Alice", {4})])
+    )
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        value_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    main.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 150, 740, 33.4, "main"],
+    ]
+    main.row_count = 100
+    main.col_count = 20
+    encore = FakeWorksheet(title="Encore Team", worksheet_id=102)
+    encore.values = [
+        TeamWorksheetContent.COLUMNS,
+        ["alice", "Team Alice", 140, 680, 35.3, "encore"],
+    ]
+    encore.row_count = 100
+    encore.col_count = 20
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    summary.values = [
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+        ],
+        ["alice", "Stale Alice", "Stale Role", 1, 2, 3, 4, "stale"],
+    ]
+    summary.row_count = 100
+    summary.col_count = 20
+    source_config = SimpleNamespace(
+        sheet_url=value_sheet.sheet_url,
+        landing_worksheet_id=201,
+        encore_role_ids=[10],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        value_sheet.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            TeamWorksheetMetadata(102, "Encore Team", encore),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(
+                TeamSourceStatus.AVAILABLE,
+                source_config,
+                source_metadata,
+            )
+        ),
+    )
+
+    result = await manager.generate_draft(
+        metadata,
+        member_by_names={
+            "alice": SimpleNamespace(
+                display_name="Discord Alice",
+                roles=[SimpleNamespace(id=10, name="Encore")],
+            )
+        },
+        encore_power_threshold=35,
+    )
+
+    assert value_sheet.batch_reads == [[1, 2, 101, 102, 201]]
+    assert len(value_sheet.batch_updates) == 1
+    summary_mutations, draft_requests = value_sheet.batch_updates[0]
+    assert summary_mutations
+    assert draft_requests == draft_worksheet.typed_batches[-1]
+    assert any(
+        "Discord Alice" in mutation.rows[0]
+        for mutation in summary_mutations
+        if hasattr(mutation, "rows")
+    )
+    assert result.team_source_status is TeamSourceStatus.AVAILABLE
+    assert (
+        result.team_summary_url
+        == "https://docs.google.com/spreadsheets/d/shift-draft/edit?gid=201#gid=201"
+    )
+    assert result.unregistered_usernames == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_stage", "structure_changed"),
+    [
+        (None, False),
+        ("planning", False),
+        ("contract", False),
+        ("repair", False),
+        ("summary", False),
+        ("draft", False),
+        ("draft", True),
+    ],
+)
+async def test_generate_draft_writes_once_per_separate_spreadsheet(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failure_stage: str | None,
+    structure_changed: bool,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet([[], [], []])
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    source_config = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/team-source/edit",
+        encore_role_ids=[],
+    )
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        source_config.sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    source = shift_register_manager.TeamSource(
+        source_config,
+        source_metadata,
+        shift_register_manager.TeamSummaryColumns(1, 3, 4, 5, None, None, "F"),
+    )
+    resolution = shift_register_manager.TeamSourceResolution(
+        TeamSourceStatus.AVAILABLE,
+        source,
+    )
+    read_resolution = (
+        shift_register_manager.TeamSourceResolution(TeamSourceStatus.INVALID)
+        if failure_stage in {"contract", "repair"}
+        else resolution
+    )
+    source_sheet = DraftValueGoogleSheet()
+    source_sheet.sheet_url = source_config.sheet_url
+    if failure_stage == "summary":
+        source_sheet.batch_update_error = StorageError(
+            StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        )
+    if failure_stage == "draft":
+        shift_sheet.batch_update_error = StorageError(
+            StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        )
+    planned_result = SimpleNamespace()
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(TeamSourceStatus.AVAILABLE, source_config, source_metadata)
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_shift_and_team_source_locked",
+        AsyncMock(
+            return_value=(
+                {entry.id: entry.values, draft.id: draft.values},
+                read_resolution,
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_summary_grid_plan",
+        Mock(
+            side_effect=(
+                WorksheetContractError if failure_stage == "contract" else None
+            ),
+            return_value=SimpleNamespace(
+                summary_headers=(),
+                summaries=(),
+                mutations=("summary",),
+            ),
+        ),
+    )
+    monkeypatch.setattr(manager, "_build_team_source", Mock(return_value=resolution))
+    monkeypatch.setattr(
+        manager,
+        "_draft_profiles_from_summary",
+        Mock(return_value=DraftTeamProfileResolution(TeamSourceStatus.AVAILABLE, {})),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_plan_draft_locked",
+        AsyncMock(
+            side_effect=(
+                WorksheetContractError if failure_stage == "planning" else None
+            ),
+            return_value=(planned_result, [{"draft": True}]),
+        ),
+    )
+    if structure_changed:
+        monkeypatch.setattr(
+            manager,
+            "_ensure_current_worksheets",
+            AsyncMock(return_value=(metadata, True)),
+        )
+    monkeypatch.setattr(
+        shift_register_manager,
+        "GoogleSheet",
+        lambda _url, _path: source_sheet,
+    )
+
+    if failure_stage in {"planning", "contract"}:
+        with pytest.raises(WorksheetContractError):
+            await manager.generate_draft(
+                metadata,
+                member_by_names={},
+                encore_power_threshold=35,
+            )
+    elif failure_stage in {"summary", "draft"}:
+        with pytest.raises(StorageError) as exc_info:
+            await manager.generate_draft(
+                metadata,
+                member_by_names={},
+                encore_power_threshold=35,
+            )
+        if failure_stage == "summary":
+            assert exc_info.value.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+        else:
+            assert exc_info.value.kind is StorageErrorKind.PARTIAL_SUCCESS
+            assert exc_info.value.log_hint == "team_summary_refreshed_draft_incomplete"
+            assert isinstance(exc_info.value.__cause__, StorageError)
+            assert (
+                exc_info.value.__cause__.kind
+                is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+            )
+    else:
+        result = await manager.generate_draft(
+            metadata,
+            member_by_names={},
+            encore_power_threshold=35,
+        )
+        assert result is planned_result
+
+    assert source_sheet.batch_updates == (
+        [] if failure_stage in {"planning", "contract"} else [(["summary"], [])]
+    )
+    assert shift_sheet.batch_updates == (
+        [([], [{"draft": True}])] if failure_stage in {None, "repair", "draft"} else []
+    )
 
 
 @pytest.mark.asyncio
@@ -969,13 +1479,18 @@ async def test_generate_draft_accepts_completely_empty_entry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
     entry_worksheet = EntryRangeFakeWorksheet([[], [], []])
-    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    draft_worksheet = DraftBatchFakeWorksheet(
+        title="Shift Draft",
+        row_count=1,
+        col_count=1,
+    )
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -983,16 +1498,25 @@ async def test_generate_draft_accepts_completely_empty_entry(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
-
-    result = await manager.generate_draft(metadata, encore_power_threshold=35)
+    result = await manager.generate_draft(
+        metadata,
+        member_by_names={},
+        encore_power_threshold=35,
+    )
 
     assert result.schedule.display_names == {}
+    assert result.team_summary_url is None
     assert result.schedule.hours == [4]
     assert {"A4", "I1"} <= draft_worksheet.formula_ranges[-1]
+    assert value_sheet.batch_reads == [[1, 2]]
+    assert len(value_sheet.batch_updates) == 1
+    assert draft_worksheet.typed_minimums == [(38, 13)]
 
 
 @pytest.mark.asyncio
@@ -1013,6 +1537,7 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
     clears_old_anchor: bool,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
@@ -1028,7 +1553,7 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         old_axis_rows=old_axis_rows,
     )
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1036,12 +1561,17 @@ async def test_generate_draft_clears_only_signed_old_notes_anchor(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(TeamSourceStatus.UNSET, {})
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
 
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
-
-    await manager.generate_draft(metadata, encore_power_threshold=35)
+    await manager.generate_draft(
+        metadata,
+        member_by_names={},
+        encore_power_threshold=35,
+    )
 
     cleared_ranges = {
         str(item["range"])
@@ -1067,6 +1597,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
     status: TeamSourceStatus,
 ) -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 5}]
     )
@@ -1075,7 +1606,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
     )
     draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1083,19 +1614,22 @@ async def test_generate_draft_falls_back_without_team_profiles(
         ],
     )
 
-    async def resolve_profiles() -> DraftTeamProfileResolution:
-        return DraftTeamProfileResolution(status, {})
-
-    monkeypatch.setattr(manager, "resolve_draft_team_profiles", resolve_profiles)
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(status, None, None)),
+    )
 
     result = await manager.generate_draft(
         metadata,
+        member_by_names={},
         encore_power_threshold=35,
     )
 
     assignment = result.schedule.assignments[0]
     assert "encore" not in assignment.supporter_usernames_by_slot
     assert result.team_source_warning is not None
+    assert result.team_summary_url is None
     assert result.unregistered_usernames == ()
     expected_marker = "⚠️ " if status is TeamSourceStatus.UNSET else "⚠️🛠️ "
     assert result.team_source_warning.startswith(expected_marker)
@@ -1105,10 +1639,10 @@ async def test_generate_draft_falls_back_without_team_profiles(
     formula = str(notes_update["values"][0][0])
     assert result.team_source_warning in formula
     assert draft_worksheet.background_updates[-1][-7:] == [
-        ("I3", "#A4C2F4"),
-        ("J3", "#FFF2CC"),
+        ("I3:J3", "#D9EAD3"),
         ("K3", "#A4C2F4"),
-        ("L3:M3", "#D9EAD3"),
+        ("L3", "#FFF2CC"),
+        ("M3", "#A4C2F4"),
         ("J5:L7", "#FFFFFF"),
         ("J5:J7", "#A4C2F4"),
         ("K5", "#FFF2CC"),
@@ -1131,6 +1665,7 @@ async def test_generate_draft_falls_back_without_team_profiles(
 @pytest.mark.asyncio
 async def test_generate_draft_rejects_old_entry_header() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )
@@ -1140,12 +1675,10 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
         *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
         "original_message",
     ]
-    entry_worksheet = EntryRangeFakeWorksheet(
-        [[old_columns], [], []],
-    )
-    draft_worksheet = FakeWorksheet(title="Shift Draft")
+    entry_worksheet = EntryRangeFakeWorksheet([[[], old_columns], [], []])
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
@@ -1153,29 +1686,58 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
         ],
     )
 
-    with pytest.raises(StorageError) as exc_info:
+    with pytest.raises(WorksheetContractError):
         await manager.generate_draft(
             metadata,
+            member_by_names={},
             encore_power_threshold=35,
-            runner="Run",
+            runner=make_runner(),
         )
 
-    assert exc_info.value.kind is StorageErrorKind.MALFORMED_SHEET
-    assert draft_worksheet.updated_frames == []
+    assert draft_worksheet.typed_batches == []
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_rejects_nonbinary_entry_before_draft_write() -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    value_sheet = configure_draft_value_sheet(manager)
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 7}]
+    )
+    entry_ranges = build_entry_ranges([("bob", "Bob", {4, 5})])
+    entry_ranges[2][0][4] = "not binary"
+    entry_worksheet = EntryRangeFakeWorksheet(entry_ranges)
+    draft_worksheet = DraftBatchFakeWorksheet(title="Shift Draft")
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
+            DraftWorksheetMetadata(2, "Shift Draft", draft_worksheet),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+
+    with pytest.raises(WorksheetContractError):
+        await manager.generate_draft(
+            metadata,
+            member_by_names={},
+            encore_power_threshold=35,
+        )
+
+    assert value_sheet.batch_reads == [[1, 2]]
+    assert draft_worksheet.typed_batches == []
 
 
 @pytest.mark.asyncio
 async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
         recruitment_time_ranges=[{"start": 4, "end": 7}]
     )
-    entry_worksheet = FakeWorksheet(
-        title="Shift Entry",
-        frame=build_entry_frame([("alice", "Alice", {4, 5})]),
-    )
+    entry_worksheet = FakeWorksheet(title="Shift Entry")
     metadata = ShiftRegisterGoogleSheetsMetadata(
-        "https://sheet.example",
+        "https://docs.google.com/spreadsheets/d/shift-draft/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", entry_worksheet),
             DraftWorksheetMetadata(2, "Shift Draft", None),
@@ -1183,11 +1745,22 @@ async def test_generate_draft_raises_when_draft_worksheet_missing() -> None:
         ],
     )
 
+    async def keep_missing_metadata(
+        _metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        required_worksheets: object,
+    ) -> tuple[ShiftRegisterGoogleSheetsMetadata, bool]:
+        del required_worksheets
+        return metadata, False
+
+    manager._ensure_current_worksheets = keep_missing_metadata  # type: ignore[method-assign]  # noqa: SLF001
+
     with pytest.raises(StorageError) as exc_info:
         await manager.generate_draft(
             metadata,
+            member_by_names={},
             encore_power_threshold=35,
-            runner="Run",
+            runner=make_runner(),
         )
 
     assert exc_info.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET

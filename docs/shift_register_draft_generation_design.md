@@ -13,13 +13,21 @@ threshold are also implemented and covered by automated validation.
 The pre-generation overwrite confirmation and bounded Draft cleanup are also
 implemented and covered by automated validation.
 
+The live Team Summary refresh follow-up is implemented in the working tree. It
+replaces the existing Summary-grid profile read with one shared
+derivation from current Team worksheets and Discord members, refreshes Team
+Summary without reading it back, and then generates Draft from the same in-memory
+result. It also replaces automatic obsolete-Summary row deletion with the archived
+row contract below.
+
 ## Goal
 
 Improve `/shift_register generate_draft` so the generated Shift Draft uses the
-configured Team Source for Encore eligibility and ISV-first scheduling, remains
-usable when Team data is unavailable, preserves visually continuous assignments,
-records dynamic workload notes below the draft, and provides live candidate and
-participant lookup references beside it.
+configured Team Source and current Discord member state for Encore eligibility and
+ISV-first scheduling, refreshes the derived Team Summary before writing formulas
+that depend on it, remains usable when Team data is unavailable, preserves visually
+continuous assignments, records dynamic workload notes below the draft, and
+provides live candidate and participant lookup references beside it.
 
 The design also establishes the canonical participant-name contract that a future
 Draft-to-Final workflow can reuse before posting hourly Discord mention updates.
@@ -29,7 +37,10 @@ Draft-to-Final workflow can reuse before posting hourly Discord mention updates.
 This change includes:
 
 - A required non-negative Encore Power threshold slash-command option.
-- Purpose-specific Team Summary reads through the existing Team Source resolver.
+- One shared Team Summary derivation from all configured Team worksheets, current
+  Discord members, and configured Encore role IDs.
+- One complete Team Summary refresh followed by direct Draft generation from the
+  same in-memory result, with no Summary value read-back.
 - Encore eligibility based on configured Encore roles and the selected team's Power.
 - ISV-first Encore, Honso, and standby scheduling.
 - Cross-role continuity and same-column Honso placement.
@@ -41,6 +52,8 @@ This change includes:
 - Draft-body borders and visible non-recruitment gap-row formatting.
 - One atomic Google Sheets batch update for the bot-owned Draft area.
 - An administrator confirmation before Draft generation touches Google Sheets.
+- Archived Summary rows that preserve administrator-owned cells during automatic
+  full reconciliation.
 
 This change does not include:
 
@@ -53,20 +66,30 @@ This change does not include:
 
 ## Command Contract
 
-The command accepts a required Discord-validated, non-negative float and retains
-the optional runner:
+The command accepts a required Discord-validated, non-negative float and an
+optional Discord user for the runner:
 
 ```python
 async def generate_draft(
     interaction: Interaction,
     encore_power_threshold: app_commands.Range[float, 0],
-    runner: str | None = None,
+    runner: User | None = None,
 ) -> None:
 ```
 
 Discord validates that the threshold is present, numeric, and non-negative before
-invoking the command. The success response shows the threshold and configured
-recruitment time immediately after the Runner line. Recruitment time reuses
+invoking the command and resolves the runner through the native user picker. The
+runner is not a Shift Entry participant: the selected Discord identity supplies
+the username used for internal exclusion and the display name used to build the
+human-readable canonical Draft name. Although the runner is not a candidate, its
+identity participates in the same duplicate-name and reserved-suffix checks as
+Shift Entry identities. The canonical name is written to the Runner column for
+every configured recruitment slot and shown in the success response;
+non-recruitment rows keep the Runner column blank. The command and generation
+path do not accept a free-form runner string or retain a legacy fallback.
+
+The success response shows the threshold after the Runner line. Recruitment time
+reuses
 `RecruitmentTimeRanges.announcement_display()` and the established announcement
 copy:
 
@@ -74,8 +97,10 @@ copy:
 ### ✅ 班表草稿已產生
 - Runner（ランナー）：Run
 - 安可綜合力閾值：35
-- 募集時間【4-7・20-22】
+🔄 🔄 已同步 [Team Summary](summary worksheet URL)
 ‼️ 已將班表寫入 Shift Draft，並覆蓋原有內容。
+- 募集時間【4-7・20-22】
+- 已排入（安可｜本走；待機）：
 ```
 
 Discord may display required slash options before optional options in the command
@@ -98,9 +123,12 @@ lists only the new write destinations:
 請先備份需要保留的內容。確認後將覆蓋 [Shift Draft](draft worksheet URL) 的以下位置：
 班表：A1:G31
 Notes：A{R+2}
-候補：I1、閾値 I{R+1}:K{R+1}
+候補：I1、閾値 I{R+1}:M{R+1}
 反查：J{R+3}:L{R+5}
 編成一覧：Team Source が利用可能な場合は J{R+6} から書き込みます。
+
+Team Source 同步：
+- 確認後會以目前 Discord 成員與 Team 資料更新 [Team Summary](saved summary worksheet URL)。
 ```
 
 It also warns that existing cells in a Notes or candidate spill path are
@@ -115,33 +143,124 @@ Both the confirmation heading and confirmed-processing message link the visible
 Cancellation, timeout, an unauthorized interaction, or lost permissions makes no
 Google Sheets request and reports that Shift Draft was not changed.
 
-The confirmation wait does not hold the channel's Sheet write lock, so normal
+The Summary destination link is composed from saved database configuration without
+Google Sheets access. An unset source says it will not synchronize; a selected but
+missing Team configuration says the setting is invalid. The confirmation wait does
+not hold the channel's Sheet write lock, so normal
 Shift message registration continues. On confirmation, the command reloads the
 database settings before Sheets access. If the calculated destinations changed
 while the prompt was open, generation stops and asks the administrator to rerun
-the command. Otherwise the existing lock covers worksheet resolution, source
-reads, scheduling, and the atomic Draft write. The generated schedule therefore
-uses the latest Shift Entry values available after confirmation.
+the command. Otherwise the existing Shift channel lock plus the
+worksheet-resource locks cover worksheet resolution, source reads, Summary
+reconciliation, scheduling, and the Draft write. The generated schedule therefore
+uses the latest Shift Entry, Team worksheet, and Discord member values available
+after confirmation.
 
 ## Team Source Data Flow
 
-Draft generation must call the existing
-`ShiftRegisterManager.resolve_team_source()` helper. It must not use Shift Entry's
-`Main ISV`, `Encore ISV`, or `Team Info` cells as scheduling authority.
+Draft generation resolves Team Source metadata without a preliminary value read.
+After acquiring the Entry, Draft, every configured Team worksheet, and Summary
+resource lock, it issues one values batch per spreadsheet. If the Shift and Team
+worksheets share a spreadsheet, one spreadsheet-scoped batch contains all of them.
+It must not use Shift Entry's `Main ISV`, `Encore ISV`, or `Team Info` cells as
+scheduling authority.
 
-When Team Source is available, a purpose-specific manager operation reads the Team
-Summary and builds a mapping from Shift Entry username to a small immutable Draft
-team profile. The profile contains only the values the scheduler needs:
+When Team Source is available, one shared pure derivation consumes the current
+bot-owned Team worksheet rows, the current Discord members keyed by username, and
+the configured Encore role IDs. It produces the complete active Summary values
+once. Full Team Summary refresh and Draft generation both call this derivation;
+neither reimplements display-name, role, Team-title, ISV, Power, or
+`original_message` composition.
+
+The old Summary grid is used only to validate and migrate its bot-owned header,
+resolve active, archived, and reusable physical rows, and plan writes while
+preserving administrator-owned cells. Old Summary display names, roles, and Team
+values are not derivation inputs. Administrator columns after the unique terminal
+`original_message` may be transported by the API but are not interpreted,
+validated, cleared, or written during automatic reconciliation.
+
+For each username present in at least one configured Team worksheet, a matching
+current Discord member supplies `display_name` and configured Encore roles. Without
+a current member match, the first Team row supplies `display_name` and Encore roles
+are empty; old Summary values never fill either field. The first configured Team
+worksheet supplies Main ISV/Power, the second supplies optional Encore ISV/Power,
+and later worksheets remain Backup data for complete Summary presentation only.
+
+The Summary and Draft writes are both planned before write I/O and grouped by
+spreadsheet. When Team Summary and Shift Draft share one spreadsheet, one
+underlying `spreadsheets.batchUpdate` contains ordered Summary subrequests followed
+by Draft subrequests, so either both apply or neither applies. When they are in
+different spreadsheets, the complete Summary batch is sent first and the Draft
+batch second. Draft profiles are projected directly from the same derived rows;
+Draft never reads the newly written Summary values back. The profile contains only
+the values the scheduler needs:
 
 - Main ISV.
 - Main Power.
 - Encore Team ISV, when present.
 - Encore Team Power, when present.
-- Whether Team Summary contains one or more configured Encore roles.
+- Whether the current Discord member has one or more configured Encore roles.
 
 Shift availability remains represented by `Shift`. Team data stays in a separate
 `username -> DraftTeamProfile` mapping passed to `ShiftScheduler`; Google Sheets,
 database, and Discord objects do not enter the pure scheduler.
+
+The generated Sheet formulas remain Summary-backed because they must stay live
+after generation. Candidate and dynamic Notes formulas consume username, roles,
+Main ISV/Power, and optional Encore ISV/Power from the refreshed Summary. The
+reverse lookup consumes Shift Entry identity, availability, and original message;
+its `編成一覧` spill imports the refreshed complete Summary row, including Backup
+Team pairs. Backup Teams do not affect Python scheduling or candidate ranking.
+
+| Data | Python authority | Live Draft formula authority |
+| --- | --- | --- |
+| Username, Draft name, availability, Shift message | Shift Entry | Shift Entry |
+| Main ISV/Power | First Team worksheet through the shared derivation | Refreshed Summary Main pair |
+| Encore ISV/Power | Second Team worksheet through the shared derivation, otherwise Main | Refreshed Summary Encore pair, otherwise Main |
+| Encore roles | Current Discord member and configured role IDs | Refreshed Summary `encore_roles` |
+| Backup Team pairs | Shared derivation, excluded from scheduling | Refreshed complete Summary row in `編成一覧` |
+| Recruitment ranges | Shift database config | Generation-time formula constants |
+| Runner | Discord user command option; username for identity deduplication and canonical display name for output | Live Draft Runner column for canonical-name collision checks and per-row candidate exclusion |
+| Encore threshold | Command option for Python scheduling | Editable Draft threshold cell for live candidates |
+
+### Archived Summary Rows
+
+Automatic full reconciliation must not delete an obsolete Summary row because a
+physical row deletion would also delete administrator-owned cells after
+`original_message`. Instead, it changes only that row's `username` cell:
+
+```text
+<username> (archived)
+```
+
+Display name, roles, every Team value, `original_message`, administrator-owned
+cells, and row properties remain unchanged. Discord usernames cannot contain `:`,
+so the reserved prefix cannot collide with an active username. Summary indexing
+classifies rows before planning mutations:
+
+- An active row has a nonblank username without the reserved suffix.
+- An archived row has one valid identity encoded as `<username> (archived)`.
+- A reusable row has a completely blank bot-owned band.
+- A blank-username row with other bot-owned content is occupied manual content and
+  is preserved but not reused.
+- The empty value ` (archived)`, a nested suffix, duplicate active username,
+  duplicate archived username, or simultaneous active and archived row for one username is a
+  worksheet contract error.
+
+Both single-user upsert and full reconciliation resolve a desired username in the
+same order: active row, matching archived row, reusable row, then appended row. A
+returning username therefore restores its archived physical row and overwrites the
+bot-owned band, including `original_message`, with current derived values; its
+administrator-owned cells remain attached. Archived rows are excluded from active
+Summary records. Draft formulas look up exact active usernames, so the reserved
+username cannot match an active Shift participant. Archived rows are never
+reassigned to another username.
+
+Explicit confirmed Team deletion retains its existing complete-row deletion
+contract. Archiving applies only to automatic full Summary reconciliation. A
+permanently archived row remains as a tombstone unless an administrator explicitly
+removes it; automatic compaction is forbidden because it would again move or delete
+administrator-owned cells.
 
 ### Team Source Fallback
 
@@ -149,22 +268,27 @@ Team Source status controls fallback as follows:
 
 | Status | Scheduling behavior | User-visible marker |
 | --- | --- | --- |
-| `AVAILABLE` | Use Team profiles and ISV scheduling. | None. |
+| `AVAILABLE` | Refresh Summary, then use the same derived profiles for ISV scheduling. | None. |
 | `UNSET` | Use the no-ISV fallback and leave Encore empty. | `⚠️` |
 | `MISSING` | Use the no-ISV fallback and leave Encore empty. | `⚠️🛠️` |
 | `AMBIGUOUS` | Use the no-ISV fallback and leave Encore empty. | `⚠️🛠️` |
 | `INVALID` | Use the no-ISV fallback and leave Encore empty. | `⚠️🛠️` |
 | `UNRESOLVED` | Use the no-ISV fallback and leave Encore empty. | `⚠️🛠️` |
 
-A Team Source that lacks the headers required for Draft profiles is unavailable for
-this operation even if it remains usable for narrower existing Team-reference
-flows. A transient auxiliary Team Summary read failure also falls back rather than
-blocking Draft generation. Shift Entry and Shift Draft failures retain the existing
-storage-error path and do not report success.
+A source that cannot be resolved or read remains non-blocking under the status
+table, and no Summary write is attempted. Once the source grids are read
+successfully, malformed Team or Summary contracts are blocking
+`WorksheetContractError` failures; the operation must not silently downgrade after
+partially interpreting a configured source.
 
-An individual Shift participant without a usable Team Summary row or Main ISV is
-treated as `No team yet`. They remain eligible for Honso or standby after every
-candidate with a known Main ISV, but they cannot be Encore.
+A Summary write failure blocks the Draft write. If Summary refresh succeeds but the
+later Draft write fails, the storage response must report partial success: Team
+Summary was refreshed and Shift Draft was not completed. Shift Entry and Shift
+Draft read failures remain blocking and do not report success.
+
+An individual Shift participant without a derived row or usable Main ISV is treated
+as `No team yet`. They remain eligible for Honso or standby after every candidate
+with a known Main ISV, but they cannot be Encore.
 
 ## Encore Eligibility And Effective Values
 
@@ -183,8 +307,11 @@ Honso and standby selection.
 
 ## Hourly Scheduling
 
-The runner is excluded from supporter positions. Each username can occupy at most
-one supporter position per hour. Encore, Honso, and standby all count toward the
+The runner is separate from Shift Entry participation and is excluded from
+supporter positions by Discord username. The Runner, Encore, Honso, and standby
+columns all contain human-readable canonical Draft names; usernames remain
+internal identity keys. Each participant username can occupy at most one
+supporter position per hour. Encore, Honso, and standby all count toward the
 participant's accumulated scheduled hours.
 
 ### Encore Selection
@@ -319,9 +446,17 @@ count present in one of its JST rows. Every row lists only participants availabl
 in that configured recruitment hour; continuous-axis gap rows stay empty even if
 Shift Entry contains a stale or manual value outside the configured slots.
 Participants already assigned in `C:G` remain listed, and one participant may
-appear in both Honso and Encore. Runner is excluded from all three blocks.
-Candidate cells contain only the complete canonical Draft name so a human can copy
-the cell directly into `C:G`.
+appear in both Honso and Encore. Python deduplicates Runner and Shift Entry
+identities by username before generating canonical names. Draft formulas contain
+no Runner username or display-name constant: they read the live Runner column for
+canonical-name collision checks. Each candidate row excludes both an exact
+canonical-name match and a display-name match with that row's Runner cell.
+Copying a candidate's complete canonical name into one Runner cell therefore
+removes that identity only from the corresponding JST candidate row; entering a
+shared display name excludes every candidate with that display name from that
+row. Candidate cells still contain only the complete canonical Draft name so a
+human can copy the cell directly into `C:G`; no bare username is rendered in
+place of that name.
 
 With an available Team Source, Honso candidates require Main ISV and sort by Main
 ISV descending. Encore candidates require nonblank `encore_roles`, strict effective
@@ -338,10 +473,11 @@ source-level failure must not label every participant unregistered. Later
 `IMPORTRANGE` or formula failures remain visible instead of silently changing the
 formula to fallback behavior; regeneration re-resolves Team Source status.
 
-If `R` is the final schedule row, `I{R+1}:K{R+1}` contains
-`アンコ候補閾値 | [editable numeric input] | 万総合力`. Generation seeds the
-input with the slash command's required threshold, and the live candidate formula
-references that cell rather than embedding the command value. Editing a number
+If `R` is the final schedule row, `I{R+1}:M{R+1}` contains
+`仮配置済：緑背景 | アンコ配置済：緑背景＋赤字 | アンコ候補閾値 | [editable numeric input] | 万総合力`.
+Generation seeds the input with the slash command's required threshold, and the
+live candidate formula references that cell rather than embedding the command
+value. Editing a number
 recalculates Encore candidates immediately. Blank or nonnumeric input intentionally
 produces a visible candidate-formula error instead of being treated as zero or
 silently falling back to the command value. Regeneration replaces the input with
@@ -384,21 +520,21 @@ Summary spill when Team Source is unavailable.
 
 Candidate and lookup formulas import the exact Team Summary width resolved at
 generation. Existing values remain live; Team Summary schema-width changes require
-regeneration. The implementation relies on Google Sheets' native array spill to
-expand into empty cells and add columns as needed; it does not pre-size the grid or
-reserve speculative participant capacity. Writing an anchor formula does not clear
-other cells. User-entered blockers in a spill path are intentionally preserved so
-Sheets displays `#REF!` rather than silently deleting them. Regeneration replaces
+regeneration. The atomic Draft request grows only the explicit bot footprint through
+row 38 and column `M`; it does not reserve speculative participant capacity for the
+unbounded-right candidate spill. Writing an anchor formula does not clear other
+cells. User-entered blockers in a spill path are intentionally preserved so Sheets
+displays `#REF!` rather than silently deleting them. Regeneration replaces
 `I1`, clears only a signed old threshold control and the exact old lookup
 labels/input/formula anchors and their bot-owned formatting, and writes the new
 controls. Cleanup covers both the
 legacy Team Summary anchor directly below `シフト元メッセージ` and the new
 `編成一覧` plus shifted Team Summary anchor. Removing an old array anchor lets
 Sheets remove its calculated spill output while preserving unrelated user values.
-A live API-generated spill beyond the current last column is part of manual
-validation. Add `ensure_size()` only if that validation demonstrates that
-API-written formulas do not receive the same native expansion as formulas entered
-in the web UI.
+A live API-generated spill beyond column `M` remains part of manual validation. If
+the API-written formula cannot expand as the web UI does, any later fallback must
+preserve unknown spill cells and join the same atomic request rather than resizing
+or clearing speculative capacity separately.
 
 The old lookup cells are treated as bot-owned only when the three expected labels
 `名前を貼り付け`, `シフト時間`, and `シフト元メッセージ` appear at either the
@@ -422,8 +558,9 @@ The left Draft body has a `#000000` thin solid outer border over dynamic range
 body grid. Active recruitment rows use background `#FFFFFF`; visible min-max-axis
 rows outside the configured recruitment slots use `#CCCCCC` only in `B:G`, leaving
 the JST label in column `A` white. Rows are not hidden. Before overwriting,
-generation reads `A1:A31` and defines the old body
-as the consecutive valid JST labels beginning at `A2`. It clears only border and
+generation reads the complete physical Draft grid in the spreadsheet batch, then
+projects column `A` through the bounded old-control rows and defines the old body as
+the consecutive valid JST labels beginning at `A2`. It clears only border and
 background fields over the union of old and new body extents, then reapplies the
 new body formatting. This prevents stale gray rows and borders after a shorter
 regeneration without changing font, bold, alignment, column width, validation, or
@@ -436,11 +573,12 @@ existing frozen-row setting is preserved.
 
 The candidate spill keeps no background fill. A thin black left border runs from
 `I1` through the threshold-control row. One thin black bottom border is applied
-across `I{R+1}:M{R+1}`. The label and `万総合力` suffix cells use `#A4C2F4`;
-the middle input uses `#FFF2CC` plus the same medium solid four-sided `#FF0000`
-border as the lookup input, applied after the black bottom border so red wins at
-the shared edge. `仮配置済：緑背景` and `アンコ配置済：緑背景＋赤字` follow in
-`#D9EAD3`; the latter also uses `#FF0000` text. No border follows the candidate
+across `I{R+1}:M{R+1}`. `仮配置済：緑背景` and
+`アンコ配置済：緑背景＋赤字` come first in `#D9EAD3`; the latter also uses
+`#FF0000` text. The `アンコ候補閾値` and `万総合力` suffix cells use `#A4C2F4`;
+the input between them uses `#FFF2CC` plus the same medium solid four-sided
+`#FF0000` border as the lookup input, applied after the black bottom border so
+red wins at the shared edge. No border follows the candidate
 spill's dynamic right edge. The formula's
 blank separator columns and explicit Japanese headings provide the remaining
 grouping. Dynamic Notes keep no generated borders or fills because warning rows
@@ -607,43 +745,45 @@ storage-error response.
 
 ## Affected Files
 
-Expected application changes:
+The implemented flow remains in `utils/shift_scheduler.py` and
+`utils/shift_register_structs.py`. The Draft refresh changes are:
 
 - `cogs/shift_register.py`
-  - Add and describe the required range-validated threshold.
-  - Pass the threshold into Draft generation.
-  - Report the threshold and Team Source fallback status.
+  - Pass current Discord members into confirmed Draft generation.
+  - Disclose Summary refresh in the confirmation and report successful refresh.
+  - Preserve distinct unavailable-source and partial-success responses.
+- `utils/team_register_structs.py`
+  - Derive active Summary values once from validated Team rows and current Discord
+    users.
+  - Index archived rows and resolve active, archived, reusable, and appended rows for
+    both single and full plans.
+  - Replace automatic obsolete-row deletion with a one-cell
+    `<username> (archived)` username update.
+- `utils/team_register_manager.py`
+  - Make full Summary refresh consume the shared derivation and row plan.
+  - Stop using old Summary display names and roles as derivation fallbacks.
 - `utils/shift_register_manager.py`
-  - Reuse `resolve_team_source()`.
-  - Read purpose-specific Team Summary profiles.
-  - Fall back safely for unavailable auxiliary Team data.
-  - Read the old Draft extent and write schedule, formulas, clears, and formats
-    through one typed batch.
-- `utils/shift_scheduler.py`
-  - Add the Draft team profile boundary.
-  - Implement eligibility, ISV ordering, cross-role continuity, standby selection,
-    and canonical Draft names.
-- `utils/shift_register_structs.py`
-  - Render canonical Draft names.
-  - Build the dynamic Notes formula and combined Draft write rows.
-  - Build candidate and reverse-lookup formulas from shared canonical-name and Team
-    Source metadata.
+  - Read every configured Team worksheet plus Summary in the spreadsheet-scoped
+    batch instead of projecting profiles from old Summary values.
+  - Reuse the shared active Summary derivation for the Summary write and Draft
+    profiles without read-back.
+  - Preserve the existing unavailable-source scheduling behavior.
 - `utils/google_sheets.py`
-  - Support the narrow border-side selection required for outer borders and header
-    separators in the existing typed batch request.
+  - Reuse the existing low-level request builders so Summary and Draft subrequests
+    can share one spreadsheet batch when their spreadsheet is the same.
 
 Expected automated-test changes:
 
-- `tests/test_shift_scheduler.py`
 - `tests/test_shift_draft.py`
 - `tests/test_feature_channel_interactions.py`
 - `tests/test_manager_fakes.py`
 - `tests/test_google_sheets_adapter.py`
-- Any shared fake requiring the new Team Summary Power columns or typed Draft batch.
+- `tests/test_worksheet_structs.py`
 
 Documentation changes:
 
 - This design document.
+- `docs/shift_register_team_source_design.md`.
 - `docs/manual_integration_validation.md` during implementation.
 
 No database migration or Shift Entry worksheet migration is required.
@@ -652,6 +792,19 @@ No database migration or Shift Entry worksheet migration is required.
 
 Focused tests must cover:
 
+- Identical derived Summary values for explicit full refresh and Draft generation.
+- Current Discord display names and Encore roles override no data from the old
+  Summary; unmatched active Team users use Team display names and empty roles.
+- One values batch per spreadsheet for Entry, Draft, all Team worksheets, and
+  Summary, followed by zero Summary read-back requests.
+- Same-spreadsheet Summary and Draft subrequests share one atomic write; external
+  Summary success followed by Draft failure reports partial success.
+- Active, archived, reusable, occupied-manual, and appended Summary row resolution
+  with the same precedence in single upsert and full reconciliation.
+- Archived-row restoration, duplicate/corrupt marker rejection, exclusion from
+  active Summary records and exact-active formula matches, and preservation of
+  every administrator-owned cell and row property.
+- Explicit confirmed Team deletion continues deleting the complete active row.
 - Every Encore role/Encore Team combination.
 - Strict Power threshold comparison, including equality.
 - Main fallback for Encore ISV and Power.
@@ -661,6 +814,8 @@ Focused tests must cover:
 - `No team yet` scheduling order and Japanese `未登録` Notes output.
 - Every Team Source fallback status and marker.
 - Unique, duplicate, and reserved-suffix canonical names.
+- Runner/Entry username deduplication and live per-row Runner-column candidate
+  exclusion without Runner identity constants in formulas.
 - Exact canonical-name resolution and unknown manual values.
 - Total, longest-consecutive, Encore-hour, compact Main/Encore `ISV/Power`, and
   original-message Notes values.
@@ -696,6 +851,13 @@ Focused tests must cover:
 Implementation must add corresponding cases to
 `docs/manual_integration_validation.md`, including:
 
+- Confirming Draft generation refreshes Team Summary from current Discord display
+  names/roles and current Team tabs before the Summary-backed Draft formulas run.
+- Removing a username from all Team tabs, confirming full refresh archives only the
+  Summary bot band, then restoring the same username and confirming the same row
+  and administrator cells are restored without reassignment.
+- Injecting Summary and Draft write failures separately, including external
+  Summary success followed by Draft failure and same-spreadsheet atomic failure.
 - Discord-native threshold validation, recruitment-time display, attachment, and
   report placement.
 - Team Source available, unset, invalid, and temporarily unreadable behavior.

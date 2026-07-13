@@ -73,16 +73,6 @@ def test_other_orm_exception_is_not_storage_error() -> None:
     assert classify_storage_exception(raw_error) is None
 
 
-def test_explicit_malformed_sheet_error_uses_safe_copy() -> None:
-    error = StorageError(StorageErrorKind.MALFORMED_SHEET)
-
-    content = storage_error_content(error, reference_id="STG-12345678")
-
-    assert "could not be processed" in content
-    assert "Reopen settings" in content
-    assert "STG-12345678" in content
-
-
 def test_partial_success_storage_error_wraps_classified_cause() -> None:
     raw_error = DBConnectionError("private database host")
 
@@ -92,6 +82,18 @@ def test_partial_success_storage_error_wraps_classified_cause() -> None:
     assert error.kind is StorageErrorKind.PARTIAL_SUCCESS
     assert isinstance(error.__cause__, StorageError)
     assert error.__cause__.kind is StorageErrorKind.DATABASE_UNAVAILABLE
+
+
+def test_team_summary_draft_partial_error_discloses_completed_summary() -> None:
+    error = StorageError(
+        StorageErrorKind.PARTIAL_SUCCESS,
+        log_hint="team_summary_refreshed_draft_incomplete",
+    )
+
+    content = storage_error_content(error, reference_id="STG-12345678")
+
+    assert "Team Summary was refreshed" in content
+    assert "Shift Draft was not completed" in content
 
 
 def test_storage_operation_context_has_safe_defaults() -> None:

@@ -16,6 +16,7 @@ from utils.shift_scheduler import (
     ShiftScheduler,
     build_draft_display_names,
 )
+from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -78,12 +79,38 @@ def test_runner_is_excluded_from_seats_and_recorded() -> None:
         make_shift("a", {4}),
     ]
 
-    schedule = ShiftScheduler.assign(shifts, [4], runner="Runner")
+    schedule = ShiftScheduler.assign(
+        shifts,
+        [4],
+        runner=UserInfo(username="runnerguy", display_name="Runner"),
+    )
 
     assert schedule.runner == "Runner"
     seats = schedule.assignments[0].supporter_usernames_by_slot
     assert "runnerguy" not in seats.values()
     assert seats[HONSO_SUPPORTER_SLOTS[0]] == "a"
+
+
+def test_runner_user_is_excluded_by_username_and_rendered_canonically() -> None:
+    runner = UserInfo(username="runner_user", display_name="Alice")
+    shifts = [make_shift("runner_user", {4}, display_name="Alice")]
+
+    schedule = ShiftScheduler.assign(shifts, [4], runner=runner)
+
+    assert schedule.runner == "Alice"
+    assert schedule.assignments[0].supporter_usernames_by_slot == {}
+
+
+def test_external_runner_shares_canonical_name_scope_with_entry_users() -> None:
+    runner = UserInfo(username="runner_user", display_name="Alice")
+    schedule = ShiftScheduler.assign(
+        [make_shift("alice_user", {4}, display_name="Alice")],
+        [4],
+        runner=runner,
+    )
+
+    assert schedule.runner == "Alice ⟨@runner_user⟩"
+    assert schedule.display_names == {"alice_user": "Alice ⟨@alice_user⟩"}
 
 
 def test_without_encore_profiles_fills_four_main_seats_and_benches_surplus() -> None:

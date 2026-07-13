@@ -7,7 +7,10 @@ from discord.app_commands import locale_str
 
 from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
 from cogs.shift_register import ShiftRegister
-from utils.shift_register_manager import ShiftRegisterManager
+from utils.shift_register_manager import (
+    ShiftRegisterManager,
+    fresh_shift_channel_transaction,
+)
 from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
@@ -28,6 +31,21 @@ class Shift(
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
     GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
+
+    @override
+    async def _delete_user_data_transaction(
+        self,
+        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        user_info: UserInfo,
+    ) -> None:
+        manager = context.manager
+        async with fresh_shift_channel_transaction(
+            manager,
+            self.FeatureChannelType.sheet_write_lock,
+            channel_id=context.channel_id,
+        ):
+            metadata = await manager.fetch_google_sheets_metadata()
+            await self._delete_user_data(manager, user_info, metadata)
 
     @override
     async def _guide_template_values(

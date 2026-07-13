@@ -19,7 +19,7 @@ from utils.structs_base import (
     OriginalMessage,
     SubmissionParseResult,
     UserInfo,
-    WorksheetContentBase,
+    WorksheetContractError,
     WorksheetMetadata,
 )
 
@@ -618,7 +618,7 @@ class ShiftRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
         return cls(sheet_url, found)
 
 
-class EntryWorksheetContent(WorksheetContentBase[Shift]):
+class EntryWorksheetContent:
     TEAM_COLUMNS: ClassVar[list[str]] = [
         "Main ISV",
         "Encore ISV",
@@ -679,39 +679,6 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
         ]
 
     @classmethod
-    def validate_core_header(cls, df: object) -> None:
-        columns = list(getattr(df, "columns", []))
-        if not columns:
-            return
-        expected = cls.COLUMNS
-        actual_core = columns[: len(expected)]
-        if actual_core != expected:
-            msg = (
-                "Shift Entry worksheet header must start with "
-                f"{expected!r}, got {actual_core!r}."
-            )
-            raise ValueError(msg)
-
-    def to_shifts(self) -> list[Shift]:
-        """Rebuild Shift entries from the standardized worksheet rows."""
-        shifts: list[Shift] = []
-        for username, row in self.main.iterrows():
-            slots = {
-                index
-                for index, label in enumerate(ShiftParser.HOUR_LABELS)
-                if int(row[label]) == 1
-            }
-            shifts.append(
-                Shift(
-                    username=str(username),
-                    display_name=str(row["display_name"]),
-                    original_message=str(row["original_message"]),
-                    slots=slots,
-                )
-            )
-        return shifts
-
-    @classmethod
     def shifts_from_ranges(
         cls,
         header_rows: list[list[object]],
@@ -722,13 +689,17 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
         if not header_rows and not identity_rows and not availability_rows:
             return []
         if header_rows != [cls.COLUMNS]:
-            msg = "Shift Entry worksheet header does not match the current layout."
-            raise ValueError(msg)
-        if len(identity_rows) != len(availability_rows):
-            msg = "Shift Entry participant ranges have different row counts."
-            raise ValueError(msg)
+            raise WorksheetContractError
+
+        row_count = max(len(identity_rows), len(availability_rows))
+        identity_rows = [*identity_rows, *([[]] * (row_count - len(identity_rows)))]
+        availability_rows = [
+            *availability_rows,
+            *([[]] * (row_count - len(availability_rows))),
+        ]
 
         shifts = []
+        seen_usernames: set[str] = set()
         availability_width = len(cls.HOUR_COLUMNS) + 1
         for identity, availability in zip(
             identity_rows,
@@ -738,13 +709,22 @@ class EntryWorksheetContent(WorksheetContentBase[Shift]):
             username, display_name = [*identity[:2], "", ""][:2]
             if username in ("", None):
                 continue
+            username = str(username)
+            if username in seen_usernames:
+                raise WorksheetContractError
+            seen_usernames.add(username)
             values = [
                 *availability[:availability_width],
                 *([""] * max(0, availability_width - len(availability))),
             ]
+            if any(
+                value.__class__ is not int or value not in (0, 1)
+                for value in values[:-1]
+            ):
+                raise WorksheetContractError
             shifts.append(
                 Shift(
-                    username=str(username),
+                    username=username,
                     display_name=str(display_name),
                     original_message=str(values[-1]),
                     slots={
@@ -850,16 +830,26 @@ def _draft_team_value(isv: float | None, power: float | None) -> str:
     return "/".join("—" if value is None else f"{value:g}" for value in (isv, power))
 
 
-def _draft_identity_bindings(entry_worksheet_title: str) -> str:
+def _draft_identity_bindings(
+    entry_worksheet_title: str,
+    *,
+    runner_range: str,
+) -> str:
     title = entry_worksheet_title.replace("'", "''")
     return (
         f"usernames, IFERROR(FILTER('{title}'!A3:A, "
         f'\'{title}\'!A3:A <> ""), ""), '
         f"names, IFERROR(FILTER('{title}'!B3:B, "
         f'\'{title}\'!A3:A <> ""), ""), '
+        f"runnerNames, {runner_range}, "
         'pattern, "⟨@[a-z0-9._]{2,32}⟩$", '
+        "runnerBaseNames, MAP(runnerNames, LAMBDA(runnerName, "
+        'REGEXREPLACE(runnerName, " " & pattern, ""))), '
         "keys, MAP(names, usernames, LAMBDA(name, username, "
-        "IF(OR(SUMPRODUCT(N(names = name)) > 1, REGEXMATCH(name, pattern)), "
+        "IF(OR(SUMPRODUCT(N(names = name)) > 1, "
+        "SUMPRODUCT(N(runnerBaseNames = name) * "
+        "N(runnerNames <> runnerBaseNames)) > 0, "
+        "REGEXMATCH(name, pattern)), "
         'name & " ⟨@" & username & "⟩", name))), '
     )
 
@@ -873,6 +863,8 @@ class DraftWorksheetContent:
 
     JST_COLUMN: ClassVar[str] = "JST"
     DRAFT_VALUE_LAST_ROW: ClassVar[int] = 31
+    EXPLICIT_FOOTPRINT_LAST_ROW: ClassVar[int] = 38
+    EXPLICIT_FOOTPRINT_COLUMN_COUNT: ClassVar[int] = 13
     RUNNER_COLUMN: ClassVar[str] = "ランナー"
     ENCORE_COLUMN: ClassVar[str] = "アンコ"
     HONSO_COLUMNS: ClassVar[tuple[str, str, str]] = ("本走①", "本走②", "本走③")
@@ -918,21 +910,32 @@ class DraftWorksheetContent:
     }
 
     @classmethod
-    def from_schedule(cls, schedule: DraftSchedule) -> pd.DataFrame:
+    def from_schedule(
+        cls,
+        schedule: DraftSchedule,
+        *,
+        recruitment_slots: set[int] | None = None,
+    ) -> pd.DataFrame:
         """Render the draft schedule into a worksheet-shaped DataFrame.
 
         Args:
             schedule (DraftSchedule): The assignments to render.
+            recruitment_slots (set[int] | None): Hours where the runner is shown.
+                Defaults to all scheduled hours.
 
         Returns:
-            pd.DataFrame: Columns match ``COLUMNS``; one row per recruitment hour.
+            pd.DataFrame: Columns match ``COLUMNS``; one row per scheduled hour.
         """
         runner = schedule.runner or ""
+        if recruitment_slots is None:
+            recruitment_slots = set(schedule.hours)
         rows: list[dict[str, str]] = []
         for assignment in schedule.assignments:
             row = {
                 cls.JST_COLUMN: ShiftParser.HOUR_LABELS[assignment.hour],
-                cls.RUNNER_COLUMN: runner,
+                cls.RUNNER_COLUMN: (
+                    runner if assignment.hour in recruitment_slots else ""
+                ),
             }
             for supporter_slot, column in cls.SUPPORTER_SLOT_COLUMNS.items():
                 row[column] = schedule.display_for(assignment, supporter_slot)
@@ -951,9 +954,13 @@ class DraftWorksheetContent:
     ) -> str:
         """Build the live per-hour candidate block spill formula."""
         title = entry_worksheet_title.replace("'", "''")
+        last_row = max(2, len(schedule.assignments) + 1)
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         hour_slots = "{" + ";".join(map(str, schedule.hours or [0])) + "}"
         active_slots = "{" + ";".join(map(str, sorted(recruitment_slots))) + "}"
-        runner = _formula_string(schedule.runner or "")
         if team_source is None:
             team_bindings = (
                 "mainIsvs, MAP(usernames, LAMBDA(username, 0)), "
@@ -1033,17 +1040,20 @@ class DraftWorksheetContent:
             "=LET("
             f"threshold, IF(ISNUMBER({encore_power_threshold_cell}), "
             f"{encore_power_threshold_cell}, NA()), "
-            f"{_draft_identity_bindings(entry_worksheet_title)}"
+            f"{identity_bindings}"
             f"availability, IFERROR(FILTER('{title}'!F3:AI, "
             f"'{title}'!A3:A <> \"\"), MAKEARRAY(1, 30, "
             "LAMBDA(row, column, 0))), "
             "entryOrder, SEQUENCE(ROWS(usernames)), "
             f"hourSlots, {hour_slots}, "
             f"recruitmentSlots, {active_slots}, "
-            f'runnerEligible, N(usernames <> "") * N(names <> {runner}), '
+            "runnerEligible, LAMBDA(hour, LET(runnerName, "
+            "INDEX(runnerNames, XMATCH(hour, hourSlots, 0)), "
+            'N(usernames <> "") * N(keys <> runnerName) * '
+            "N(names <> runnerName))), "
             f"{team_bindings}"
             "activeHour, LAMBDA(hour, ISNUMBER(XMATCH(hour, recruitmentSlots, 0))), "
-            "availableMask, LAMBDA(hour, N(activeHour(hour)) * runnerEligible * "
+            "availableMask, LAMBDA(hour, N(activeHour(hour)) * runnerEligible(hour) * "
             "N(CHOOSECOLS(availability, hour + 1) = 1)), "
             "honsoMask, LAMBDA(hour, availableMask(hour) * N(honsoEligible)), "
             "encoreMask, LAMBDA(hour, availableMask(hour) * N(encoreEligible)), "
@@ -1108,7 +1118,11 @@ class DraftWorksheetContent:
                     "values": [],
                 }
             )
-        identity_bindings = _draft_identity_bindings(entry_worksheet_title)
+        last_row = max(2, len(schedule.assignments) + 1)
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         title = entry_worksheet_title.replace("'", "''")
         status_formula = (
             "=LET("
@@ -1220,6 +1234,10 @@ class DraftWorksheetContent:
         legend = _formula_string(cls.CANONICAL_NAME_LEGEND)
         team_legend = _formula_string(cls.TEAM_VALUE_LEGEND)
         headers = "{" + ",".join(map(_formula_string, cls.NOTES_COLUMNS)) + "}"
+        identity_bindings = _draft_identity_bindings(
+            entry_worksheet_title,
+            runner_range=f"B2:B{last_row}",
+        )
         if team_source is None:
             team_bindings = (
                 'mainTeamIsvs, MAP(matchedUsernames, LAMBDA(username, "")), '
@@ -1284,7 +1302,7 @@ class DraftWorksheetContent:
             f"shifts, C2:G{last_row}, "
             f"encore, C2:C{last_row}, "
             f"hourSlots, {hour_slots}, "
-            f"{_draft_identity_bindings(entry_worksheet_title)}"
+            f"{identity_bindings}"
             f"messages, IFERROR(FILTER('{title}'!AJ3:AJ, "
             f'\'{title}\'!A3:A <> ""), ""), '
             'people, IFERROR(UNIQUE(TOCOL(shifts, 1)), ""), '

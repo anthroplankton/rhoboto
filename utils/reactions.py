@@ -44,6 +44,41 @@ async def add_reactions_if_possible(
         await add_reaction_if_possible(message, emoji, log=log)
 
 
+async def transition_processing_reaction(
+    message: Message,
+    terminal_emojis: Iterable[str],
+    *,
+    processing_emoji: str,
+    user: Snowflake | None,
+    log: logging.Logger | None = None,
+) -> None:
+    """Add terminal reactions before removing the processing reaction."""
+    active_logger = log or logger
+    for emoji in terminal_emojis:
+        try:
+            await add_reaction_if_possible(message, emoji, log=active_logger)
+        except Exception:
+            active_logger.exception(
+                "Failed to deliver terminal reaction %r to message %s.",
+                emoji,
+                getattr(message, "id", "<unknown>"),
+            )
+    if user is None:
+        return
+    try:
+        await remove_reaction_if_present(
+            message,
+            processing_emoji,
+            user,
+            log=active_logger,
+        )
+    except Exception:
+        active_logger.exception(
+            "Failed to remove processing reaction from message %s.",
+            getattr(message, "id", "<unknown>"),
+        )
+
+
 async def remove_reaction_if_present(
     message: Message,
     emoji: str,

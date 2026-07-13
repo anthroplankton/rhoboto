@@ -28,12 +28,23 @@ from components.ui_settings_flow import (
     disable_view_items,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_contract_error,
     send_settings_partial_success,
     send_settings_refresh_failure,
     send_settings_storage_error,
     send_stale_setup_panel_if_configured,
     settings_description,
     settings_title,
+)
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.google_sheets_urls import extract_google_sheet_id, normalize_google_sheet_url
+from utils.manager_base import SheetConfigNotFoundError
+from utils.storage_errors import StorageError, StorageErrorKind
+from utils.structs_base import WorksheetContractError
+from utils.team_register_manager import (
+    TEAM_REGISTER_SHEET_WRITE_LOCK,
+    TeamRegisterManager,
+    fresh_team_channel_transaction,
 )
 from utils.team_register_structs import (
     SummaryWorksheetMetadata,
@@ -43,9 +54,6 @@ from utils.team_register_structs import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
-
-    from utils.team_register_manager import TeamRegisterManager
-
 
 ENCORE_ROLE_SELECT_MAX_VALUES = 25
 TEAM_REGISTER_DISPLAY_NAME = "Team Register"
@@ -348,7 +356,7 @@ class TeamRegisterSheetModal(Modal):
         self.latest_guide_state_resolver = latest_guide_state_resolver
         self.latest_guide_refresh_callback = latest_guide_refresh_callback
 
-    async def on_submit(self, interaction: Interaction) -> None:
+    async def on_submit(self, interaction: Interaction) -> None:  # noqa: PLR0911
         """
         Handle modal submission for Team Register setup.
 
@@ -368,22 +376,53 @@ class TeamRegisterSheetModal(Modal):
 
         await interaction.response.defer(ephemeral=True)
 
-        sheet_url = self.sheet_url.value
         team_worksheet_titles = [
             w for w in self.worksheet_titles.value.splitlines() if w
         ]
         summary_worksheet_title = self.summary_worksheet_title.value
 
         try:
-            metadata = (
-                await self.team_register_manager.upsert_sheet_config_and_worksheets(
-                    sheet_url=sheet_url,
-                    team_worksheet_titles=team_worksheet_titles,
-                    summary_worksheet_title=summary_worksheet_title,
+            sheet_url = normalize_google_sheet_url(self.sheet_url.value)
+            extract_google_sheet_id(sheet_url)
+            async with TEAM_REGISTER_SHEET_WRITE_LOCK(
+                self.team_register_manager.feature_channel.channel_id
+            ):
+                metadata = (
+                    await self.team_register_manager.upsert_sheet_config_and_worksheets(
+                        sheet_url=sheet_url,
+                        team_worksheet_titles=team_worksheet_titles,
+                        summary_worksheet_title=summary_worksheet_title,
+                        member_by_names={
+                            member.name: member
+                            for member in getattr(interaction.guild, "members", [])
+                        },
+                    )
                 )
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="team_register_setup",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
             )
+            return
+        except ValueError as exc:
+            error = GoogleSheetsError(
+                GoogleSheetsErrorKind.INVALID_URL,
+                "Check the Google Sheet link and save the settings again.",
+            )
+            error.__cause__ = exc
+            await send_settings_storage_error(
+                interaction,
+                error,
+                operation="team_register_setup",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
-            await send_settings_partial_success(
+            await send_settings_storage_error(
                 interaction,
                 exc,
                 operation="team_register_setup",
@@ -834,26 +873,61 @@ class ConfirmEncoreRolesButton(Button):
     def __init__(self) -> None:
         super().__init__(label="Confirm Save", style=ButtonStyle.success)
 
-    async def callback(self, interaction: Interaction) -> None:
+    async def callback(self, interaction: Interaction) -> None:  # noqa: PLR0911
         view = self.view
         if not isinstance(view, EncoreRolePreviewView):
             return
         if not await require_settings_permissions(interaction):
             return
 
+        await interaction.response.defer(ephemeral=True)
         role_ids = unique_role_ids(
             [role.id for role in view.selected_roles]
             + list(view.retained_missing_role_ids)
         )
-        team_register = await get_fresh_team_register_config_or_respond(
-            view.team_register_manager,
-            interaction,
-        )
-        if team_register is None:
-            return
+        roles = list(interaction.guild.roles) if interaction.guild else []
         try:
-            await view.team_register_manager.update_encore_role_ids_record(role_ids)
+            async with fresh_team_channel_transaction(
+                view.team_register_manager,
+                TEAM_REGISTER_SHEET_WRITE_LOCK,
+                channel_id=view.team_register_manager.feature_channel.channel_id,
+            ) as team_register:
+                metadata = (
+                    await view.team_register_manager.update_encore_role_ids_and_summary(
+                        role_ids,
+                        {
+                            member.name: member
+                            for member in getattr(interaction.guild, "members", [])
+                        },
+                    )
+                )
+        except SheetConfigNotFoundError:
+            await send_settings_missing(interaction)
+            return
+        except WorksheetContractError as error:
+            await send_settings_contract_error(
+                interaction,
+                error,
+                operation="team_register_encore_roles_save",
+                feature_name=TEAM_REGISTER_FEATURE_NAME,
+                log=logger,
+            )
+            return
         except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            if (
+                isinstance(exc, StorageError)
+                and exc.kind is StorageErrorKind.PARTIAL_SUCCESS
+            ):
+                view.stop()
+                await send_settings_refresh_failure(
+                    interaction,
+                    exc.__cause__ if isinstance(exc.__cause__, Exception) else exc,
+                    operation="team_register_encore_roles_refresh",
+                    feature_name=TEAM_REGISTER_FEATURE_NAME,
+                    log=logger,
+                    clear_current_message=True,
+                )
+                return
             await send_settings_storage_error(
                 interaction,
                 exc,
@@ -863,20 +937,6 @@ class ConfirmEncoreRolesButton(Button):
             )
             return
 
-        roles = list(interaction.guild.roles) if interaction.guild else []
-        try:
-            metadata = await view.team_register_manager.fetch_google_sheets_metadata()
-        except SETTINGS_STORAGE_EXCEPTIONS as exc:
-            view.stop()
-            await send_settings_refresh_failure(
-                interaction,
-                exc,
-                operation="team_register_encore_roles_refresh",
-                feature_name=TEAM_REGISTER_FEATURE_NAME,
-                log=logger,
-                clear_current_message=True,
-            )
-            return
         try:
             latest_guide_enabled = await resolve_latest_guide_enabled(
                 enabled=view.latest_guide_enabled,
@@ -894,7 +954,7 @@ class ConfirmEncoreRolesButton(Button):
             )
             return
 
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             content=None,
             embed=build_current_settings_embed(
                 sheet_url=team_register.sheet_url,

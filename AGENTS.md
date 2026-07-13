@@ -70,6 +70,8 @@ At framework and integration boundaries, prefer small helpers that make boundary
 
 Route Google Sheets work through `GoogleSheet` and the relevant manager APIs; cogs and UI callbacks should not call third-party worksheet APIs directly. Store worksheet IDs in the database, not worksheet objects or worksheet titles as durable identifiers. Worksheet titles are setup input and display metadata; user-facing settings embeds should show worksheet titles together with worksheet IDs when available.
 
+Route worksheet value reads through the spreadsheet-scoped batch API on `GoogleSheet`. Within one locked read-plan-write phase, collect the required worksheets by spreadsheet and issue one spreadsheet-scoped values batch read. The adapter returns complete physical value grids with formula rendering; managers must project only the columns and rows owned or consumed by their worksheet contracts. A physically returned administrator-owned cell is not bot-owned: do not interpret, validate, clear, or write it unless an approved contract explicitly says otherwise. Do not reintroduce worksheet-local value-read helpers or compatibility fallbacks.
+
 Settings changes should go through Discord Modal/View flows. All settings/edit commands and settings-changing callbacks must require both `administrator` and `manage_channels` permissions. Re-check permissions inside callbacks because permissions may change while a view is open. Do not broaden settings UI visibility, persistence, or callback reach without a permission review.
 
 User-facing public announcement and help content should use `resources/messages/` templates where that template system applies. Slash command names and descriptions are localized through `bot/translator.py` and Discord locale handling; guild-level announcement language settings must not change individual users' command localization.
@@ -82,9 +84,12 @@ Use emoji and custom reaction markers consistently by intent, not by feature, in
 | `🗑️` | Delete or remove action. | A button or compact UI affordance starts a delete/remove flow. Use `‼️` in confirmation or guidance copy when the action may overwrite, delete, or replace data. |
 | `config.PROCESSING_EMOJI` | Operation in progress. | The bot has accepted an action and is still processing it. |
 | `✅` | Success. | The requested operation completed successfully. |
+| `🔄` | Synchronization or refresh completed. | A user-visible report confirms that synchronized or refreshed data is up to date. Do not use it for pending or confirmation states. |
 | `✖️` | Cancelled with no changes applied. | A user-visible flow ends before applying changes. |
 | `⚠️` | Blocked, failed, abnormal, or needs correction. | A flow cannot continue, may not have completed, or needs user/admin action. |
-| `🛠️` | External service or repair-needed failure. | A failure likely needs external-service, configuration, or maintainer repair. |
+| `📏` | Structure or format needs correction. | Pair after `⚠️` when configured structure does not match the expected contract. |
+| `🛠️` | Storage or external service failure. | Pair after `⚠️` when storage or an external service fails and may need repair. |
+| `🚧` | Unexpected program error. | Pair after `⚠️` when an unexpected internal error occurs. |
 | `⤴️` | Replied-message reference. | Text points users to the message this bot message replies to. |
 | `👀` | View or verify existing results. | Opening existing content or recorded results so users can review or confirm them without changing data. |
 | `🟢` / `⚫` | Enabled or disabled status. | Showing enabled or disabled state. |

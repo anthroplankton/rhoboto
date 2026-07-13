@@ -2,25 +2,26 @@ from __future__ import annotations
 
 import dataclasses
 import itertools as it
+import math
 import re
 import unicodedata
 from dataclasses import InitVar, dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Self, override
+from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
-import pandas as pd
-
+from utils.google_sheets import DimensionMutation, GridValueUpdate
 from utils.structs_base import (
     ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
     OriginalMessage,
     SubmissionParseResult,
     UserInfo,
-    WorksheetContentBase,
+    WorksheetContractError,
     WorksheetMetadata,
+    required_unique_header_index,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterable
+    from collections.abc import Generator, Iterable, Mapping, Sequence
 
 
 @dataclass
@@ -538,29 +539,674 @@ class TeamRegisterGoogleSheetsMetadata(GoogleSheetsMetadata):
         return cls(sheet_url, [*team_worksheets, summary_worksheet])
 
 
-class TeamWorksheetContent(WorksheetContentBase[Team]):
-    COLUMNS: ClassVar[list[str]] = [f.name for f in dataclasses.fields(Team)]
-    DTYPES: ClassVar[dict[str, str]] = {
-        f.name: str(f.type) for f in dataclasses.fields(Team)
+@dataclass(frozen=True, slots=True)
+class WorksheetPhysicalIndex:
+    """Exact worksheet columns and one-based rows keyed by username."""
+
+    bot_headers: tuple[str, ...]
+    column_by_header: dict[str, int]
+    row_by_username: dict[object, int]
+    reusable_rows: tuple[int, ...]
+
+    @property
+    def first_reusable_row(self) -> int | None:
+        return self.reusable_rows[0] if self.reusable_rows else None
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryPhysicalIndex:
+    """Exact Summary rows, including bot-owned archived-row markers."""
+
+    bot_headers: tuple[str, ...]
+    column_by_header: dict[str, int]
+    row_by_username: dict[object, int]
+    archived_row_by_username: dict[str, int]
+    reusable_rows: tuple[int, ...]
+
+    @property
+    def first_reusable_row(self) -> int | None:
+        return self.reusable_rows[0] if self.reusable_rows else None
+
+
+def _build_physical_index(
+    bot_headers: tuple[str, ...],
+    rows: Sequence[Sequence[object]],
+    *,
+    index_name: str,
+) -> WorksheetPhysicalIndex:
+    column_by_header = {
+        header: column for column, header in enumerate(bot_headers, start=1)
     }
+    username_index = column_by_header[index_name] - 1
+    row_by_username: dict[object, int] = {}
+    reusable_rows = []
+    for row_number, row in enumerate(rows, start=2):
+        if all(
+            len(row) <= index or row[index] in (None, "")
+            for index in range(len(bot_headers))
+        ):
+            reusable_rows.append(row_number)
+        if len(row) <= username_index or row[username_index] in (None, ""):
+            continue
+        username = row[username_index]
+        if username in row_by_username:
+            raise WorksheetContractError
+        row_by_username[username] = row_number
+    return WorksheetPhysicalIndex(
+        bot_headers=bot_headers,
+        column_by_header=column_by_header,
+        row_by_username=row_by_username,
+        reusable_rows=tuple(reusable_rows),
+    )
+
+
+def _worksheet_nonnegative_integer(value: object) -> int:
+    if isinstance(value, bool):
+        raise TypeError
+    integer = int(value)
+    if integer < 0 or (
+        isinstance(value, float)
+        and (not math.isfinite(value) or not value.is_integer())
+    ):
+        raise ValueError
+    return integer
+
+
+def _worksheet_nonnegative_float(value: object) -> float:
+    if isinstance(value, bool):
+        raise TypeError
+    number = float(value)
+    if number < 0 or not math.isfinite(number):
+        raise ValueError
+    return number
+
+
+def _summary_pair_titles(headers: Sequence[object]) -> list[str]:
+    if len(headers) % 2:
+        raise WorksheetContractError
+    titles = []
+    for index in range(0, len(headers), 2):
+        isv_header, power_header = headers[index : index + 2]
+        if not isinstance(isv_header, str) or not isv_header.endswith(" ISV"):
+            raise WorksheetContractError
+        title = isv_header.removesuffix(" ISV")
+        if not title or power_header != Summary.power_title(title) or title in titles:
+            raise WorksheetContractError
+        titles.append(title)
+    return titles
+
+
+def _validate_summary_admin_headers(headers: Sequence[object]) -> None:
+    reserved = {
+        *SummaryWorksheetContent.COLUMNS,
+        Summary.original_message_title(),
+    }
+    if any(
+        header in reserved
+        or (isinstance(header, str) and header.endswith((" ISV", " Power")))
+        for header in headers
+    ):
+        raise WorksheetContractError
+
+
+def _summary_title_header_positions(
+    headers: Sequence[object],
+) -> dict[str, tuple[int, int]]:
+    positions: dict[str, dict[str, int]] = {}
+    for index, header in enumerate(headers):
+        if header in SummaryWorksheetContent.COLUMNS:
+            continue
+        if not isinstance(header, str):
+            raise WorksheetContractError
+        if header.endswith(" ISV"):
+            title = header.removesuffix(" ISV")
+            kind = "isv"
+        elif header.endswith(" Power"):
+            title = header.removesuffix(" Power")
+            kind = "power"
+        else:
+            raise WorksheetContractError
+        if not title or kind in positions.setdefault(title, {}):
+            raise WorksheetContractError
+        positions[title][kind] = index
+    if any(set(pair) != {"isv", "power"} for pair in positions.values()):
+        raise WorksheetContractError
+    return {title: (pair["isv"], pair["power"]) for title, pair in positions.items()}
+
+
+def _plan_duplicate_terminal_repair(
+    worksheet_id: int,
+    headers: Sequence[object],
+    titles: Sequence[str],
+    marker_positions: Sequence[int],
+) -> tuple[DimensionMutation, ...]:
+    try:
+        first_terminal, former_terminal = marker_positions
+    except ValueError:
+        raise WorksheetContractError from None
+    base_count = len(SummaryWorksheetContent.COLUMNS)
+    if list(headers[:base_count]) != SummaryWorksheetContent.COLUMNS:
+        raise WorksheetContractError
+    current_titles = _summary_pair_titles(headers[base_count:first_terminal])
+    current_shared = [title for title in current_titles if title in titles]
+    desired_shared = [title for title in titles if title in current_titles]
+    if current_shared != desired_shared:
+        raise WorksheetContractError
+    stale_titles = _summary_pair_titles(headers[first_terminal + 1 : former_terminal])
+    if not stale_titles or set(stale_titles) & {*current_titles, *titles}:
+        raise WorksheetContractError
+    _validate_summary_admin_headers(headers[former_terminal + 1 :])
+    return (
+        DimensionMutation.delete_columns(
+            worksheet_id,
+            start_column=first_terminal + 2,
+            count=former_terminal - first_terminal,
+        ),
+    )
+
+
+class TeamWorksheetContent:
+    COLUMNS: ClassVar[list[str]] = [f.name for f in dataclasses.fields(Team)]
 
     INDEX_NAME: ClassVar[str] = COLUMNS[0]
 
+    @classmethod
+    def plan_header_migration(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        proposed_bot_rows: Sequence[Sequence[object]],
+        *,
+        column_count: int | None = None,
+    ) -> tuple[GridValueUpdate | DimensionMutation, ...]:
+        """Plan only recognized Team header initialization or repair."""
+        if not headers:
+            if any(
+                value not in (None, "") for row in proposed_bot_rows for value in row
+            ):
+                raise WorksheetContractError
+            return (
+                GridValueUpdate.from_values(
+                    worksheet_id=worksheet_id,
+                    start_row=1,
+                    start_column=1,
+                    values=[cls.COLUMNS],
+                ),
+            )
+        if len(headers) == len(cls.COLUMNS) - 1 and all(
+            header in headers for header in cls.COLUMNS[:-1]
+        ):
+            column = len(headers) + 1
+            dimension_mutation = (
+                DimensionMutation.append_columns(worksheet_id, count=1)
+                if column_count is not None and column > column_count
+                else DimensionMutation.insert_columns(
+                    worksheet_id,
+                    start_column=column,
+                )
+            )
+            return (
+                dimension_mutation,
+                GridValueUpdate.from_values(
+                    worksheet_id=worksheet_id,
+                    start_row=1,
+                    start_column=column,
+                    values=[[Summary.original_message_title()]],
+                ),
+            )
+        cls.index_physical_rows(headers, [])
+        return ()
 
-class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
+    @classmethod
+    def index_physical_rows(
+        cls,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+    ) -> WorksheetPhysicalIndex:
+        """Index a structurally valid Team worksheet without parsing row values."""
+        for required_header in cls.COLUMNS:
+            required_unique_header_index(headers, required_header)
+        terminal = required_unique_header_index(
+            headers, Summary.original_message_title()
+        )
+        bot_headers = tuple(headers[: terminal + 1])
+        if (
+            not bot_headers
+            or len(bot_headers) != len(cls.COLUMNS)
+            or any(header not in cls.COLUMNS for header in bot_headers)
+        ):
+            raise WorksheetContractError
+        bot_headers = cast("tuple[str, ...]", bot_headers)
+        return _build_physical_index(
+            bot_headers,
+            rows,
+            index_name=cls.INDEX_NAME,
+        )
+
+    @classmethod
+    def plan_upsert(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        team: Team,
+    ) -> tuple[GridValueUpdate, ...]:
+        """Plan one Team bot-band update in the worksheet's current header order."""
+        index = cls.index_physical_rows(headers, rows)
+        row = index.row_by_username.get(team.username)
+        if row is None:
+            row = index.first_reusable_row
+        if row is None:
+            row = len(rows) + 2
+        values_by_header = {
+            "username": team.username,
+            "display_name": team.display_name,
+            "leader_skill_value": team.leader_skill_value,
+            "internal_skill_value": team.internal_skill_value,
+            "team_power": team.team_power,
+            "original_message": team.original_message,
+        }
+        return (
+            GridValueUpdate.from_values(
+                worksheet_id=worksheet_id,
+                start_row=row,
+                start_column=1,
+                values=[[values_by_header[header] for header in index.bot_headers]],
+            ),
+        )
+
+    @classmethod
+    def plan_delete(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        username: str,
+    ) -> tuple[DimensionMutation, ...]:
+        """Plan deletion of the complete physical row for one Team username."""
+        row = cls.index_physical_rows(headers, rows).row_by_username.get(username)
+        if row is None:
+            return ()
+        return (DimensionMutation.delete_rows(worksheet_id, start_row=row),)
+
+    @classmethod
+    def validated_teams(
+        cls,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+    ) -> tuple[Team, ...]:
+        """Parse every keyed Team row after structural indexing succeeds."""
+        index = cls.index_physical_rows(headers, rows)
+        teams = []
+        for row in rows:
+            values = {
+                header: row[column - 1] if len(row) >= column else ""
+                for header, column in index.column_by_header.items()
+            }
+            if values[cls.INDEX_NAME] in (None, ""):
+                continue
+            try:
+                teams.append(
+                    Team(
+                        username=cast("str", values["username"]),
+                        display_name=cast("str", values["display_name"]),
+                        leader_skill_value=_worksheet_nonnegative_integer(
+                            values["leader_skill_value"]
+                        ),
+                        internal_skill_value=_worksheet_nonnegative_integer(
+                            values["internal_skill_value"]
+                        ),
+                        team_power=_worksheet_nonnegative_float(values["team_power"]),
+                        original_message=cast("str", values["original_message"]),
+                    )
+                )
+            except (OverflowError, TypeError, ValueError):
+                raise WorksheetContractError from None
+        return tuple(teams)
+
+
+class SummaryWorksheetContent:
     COLUMNS: ClassVar[list[str]] = [
         f.name for f in dataclasses.fields(UserInfoWithEncoreRoles)
     ]
-    DTYPES: ClassVar[dict[str, str]] = {
-        f.name: str(f.type) for f in dataclasses.fields(UserInfoWithEncoreRoles)
-    }
     INDEX_NAME: ClassVar[str] = COLUMNS[0]
+    ARCHIVED_USERNAME_SUFFIX: ClassVar[str] = " (archived)"
 
-    def update_display_names(self, display_names: pd.Series[str]) -> None:
-        self.main.update(display_names)
+    @classmethod
+    def archived_username(cls, username: str) -> str:
+        """Return the reserved Summary username for one archived identity."""
+        if not username or username.endswith(cls.ARCHIVED_USERNAME_SUFFIX):
+            raise WorksheetContractError
+        return f"{username}{cls.ARCHIVED_USERNAME_SUFFIX}"
 
-    def update_encore_roles(self, encore_roles: pd.Series[str]) -> None:
-        self.main.update(encore_roles)
+    @classmethod
+    def _active_username_from_archived(cls, value: object) -> str | None:
+        if not isinstance(value, str) or not value.endswith(
+            cls.ARCHIVED_USERNAME_SUFFIX
+        ):
+            return None
+        username = value.removesuffix(cls.ARCHIVED_USERNAME_SUFFIX)
+        if not username or username.endswith(cls.ARCHIVED_USERNAME_SUFFIX):
+            raise WorksheetContractError
+        return username
+
+    @classmethod
+    def plan_header_migration(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        proposed_bot_rows: Sequence[Sequence[object]],
+        titles: Sequence[str],
+        *,
+        column_count: int | None = None,
+    ) -> tuple[GridValueUpdate | DimensionMutation, ...]:
+        """Plan only deterministic Summary header initialization or migration."""
+        if any(not title for title in titles) or len(set(titles)) != len(titles):
+            raise WorksheetContractError
+        dynamic_headers, _ = cls.extended_columns_dtypes_from_titles(list(titles))
+        canonical_headers = [*cls.COLUMNS, *dynamic_headers]
+        if not headers:
+            if any(
+                value not in (None, "") for row in proposed_bot_rows for value in row
+            ):
+                raise WorksheetContractError
+            return (
+                GridValueUpdate.from_values(
+                    worksheet_id=worksheet_id,
+                    start_row=1,
+                    start_column=1,
+                    values=[canonical_headers],
+                ),
+            )
+        if list(headers) == canonical_headers[:-1]:
+            column = len(headers) + 1
+            dimension_mutation = (
+                DimensionMutation.append_columns(worksheet_id, count=1)
+                if column_count is not None and column > column_count
+                else DimensionMutation.insert_columns(
+                    worksheet_id,
+                    start_column=column,
+                )
+            )
+            return (
+                dimension_mutation,
+                GridValueUpdate.from_values(
+                    worksheet_id=worksheet_id,
+                    start_row=1,
+                    start_column=column,
+                    values=[[Summary.original_message_title()]],
+                ),
+            )
+        for required_header in cls.COLUMNS:
+            required_unique_header_index(headers, required_header)
+        marker_positions = [
+            index
+            for index, header in enumerate(headers)
+            if header == Summary.original_message_title()
+        ]
+        if len(marker_positions) != 1:
+            repair = _plan_duplicate_terminal_repair(
+                worksheet_id,
+                headers,
+                titles,
+                marker_positions,
+            )
+            first_terminal, former_terminal = marker_positions
+            repaired_headers = list(headers)
+            del repaired_headers[first_terminal + 1 : former_terminal + 1]
+            return (
+                *repair,
+                *cls.plan_header_migration(
+                    worksheet_id,
+                    repaired_headers,
+                    proposed_bot_rows,
+                    titles,
+                    column_count=(
+                        None
+                        if column_count is None
+                        else column_count - (former_terminal - first_terminal)
+                    ),
+                ),
+            )
+        terminal = required_unique_header_index(
+            headers, Summary.original_message_title()
+        )
+        _validate_summary_admin_headers(headers[terminal + 1 :])
+        title_positions = _summary_title_header_positions(headers[:terminal])
+        obsolete_titles = [title for title in title_positions if title not in titles]
+        missing_titles = [title for title in titles if title not in title_positions]
+        deletion_ranges = []
+        for title in obsolete_titles:
+            indexes = sorted(title_positions[title])
+            if indexes[1] == indexes[0] + 1:
+                deletion_ranges.append((indexes[0], 2))
+            else:
+                deletion_ranges.extend((index, 1) for index in indexes)
+        deletion_ranges.sort(reverse=True)
+        deletions = tuple(
+            DimensionMutation.delete_columns(
+                worksheet_id,
+                start_column=index + 1,
+                count=count,
+            )
+            for index, count in deletion_ranges
+        )
+        if not missing_titles:
+            return deletions
+        new_headers = [
+            header
+            for title in missing_titles
+            for header in (Summary.isv_title(title), Summary.power_title(title))
+        ]
+        column = terminal - sum(count for _, count in deletion_ranges) + 1
+        return (
+            *deletions,
+            DimensionMutation.insert_columns(
+                worksheet_id,
+                start_column=column,
+                count=len(new_headers),
+            ),
+            GridValueUpdate.from_values(
+                worksheet_id=worksheet_id,
+                start_row=1,
+                start_column=column,
+                values=[new_headers],
+            ),
+        )
+
+    @classmethod
+    def index_physical_rows(
+        cls,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        titles: Sequence[str],
+    ) -> SummaryPhysicalIndex:
+        """Index a Summary worksheet using exact title-derived bot headers."""
+        dynamic_headers, _ = cls.extended_columns_dtypes_from_titles(list(titles))
+        expected_headers = [*cls.COLUMNS, *dynamic_headers]
+        for required_header in expected_headers:
+            required_unique_header_index(headers, required_header)
+        terminal = required_unique_header_index(
+            headers, Summary.original_message_title()
+        )
+        _validate_summary_admin_headers(headers[terminal + 1 :])
+        bot_headers = tuple(headers[: terminal + 1])
+        if len(bot_headers) != len(expected_headers) or any(
+            header not in expected_headers for header in bot_headers
+        ):
+            raise WorksheetContractError
+        bot_headers = cast("tuple[str, ...]", bot_headers)
+        column_by_header = {
+            header: column for column, header in enumerate(bot_headers, start=1)
+        }
+        username_index = column_by_header[cls.INDEX_NAME] - 1
+        row_by_username: dict[object, int] = {}
+        archived_row_by_username: dict[str, int] = {}
+        reusable_rows = []
+        for row_number, row in enumerate(rows, start=2):
+            username = row[username_index] if len(row) > username_index else ""
+            archived_username = cls._active_username_from_archived(username)
+            bot_values = [
+                row[index] if len(row) > index else ""
+                for index in range(len(bot_headers))
+            ]
+            if archived_username is not None:
+                if (
+                    archived_username in row_by_username
+                    or archived_username in archived_row_by_username
+                ):
+                    raise WorksheetContractError
+                archived_row_by_username[archived_username] = row_number
+                continue
+            if username not in (None, ""):
+                if username in row_by_username or username in archived_row_by_username:
+                    raise WorksheetContractError
+                row_by_username[username] = row_number
+                continue
+            if all(value in (None, "") for value in bot_values):
+                reusable_rows.append(row_number)
+        return SummaryPhysicalIndex(
+            bot_headers=bot_headers,
+            column_by_header=column_by_header,
+            row_by_username=row_by_username,
+            archived_row_by_username=archived_row_by_username,
+            reusable_rows=tuple(reusable_rows),
+        )
+
+    @classmethod
+    def plan_upsert(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        summary: Summary,
+        titles: Sequence[str],
+    ) -> tuple[GridValueUpdate, ...]:
+        """Plan one Summary upsert from one derived Summary row."""
+        index = cls.index_physical_rows(headers, rows, titles)
+        row = (
+            index.row_by_username.get(summary.username)
+            or index.archived_row_by_username.get(summary.username)
+            or index.first_reusable_row
+            or len(rows) + 2
+        )
+        return (
+            GridValueUpdate.from_values(
+                worksheet_id=worksheet_id,
+                start_row=row,
+                start_column=1,
+                values=[[getattr(summary, header) for header in index.bot_headers]],
+            ),
+        )
+
+    @classmethod
+    def plan_delete(
+        cls,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        titles: Sequence[str],
+        username: str,
+    ) -> tuple[DimensionMutation, ...]:
+        """Plan deletion of one complete physical Summary row."""
+        row = cls.index_physical_rows(headers, rows, titles).row_by_username.get(
+            username
+        )
+        if row is None:
+            return ()
+        return (DimensionMutation.delete_rows(worksheet_id, start_row=row),)
+
+    @classmethod
+    def derive_summaries(
+        cls,
+        team_worksheets: Mapping[
+            str,
+            tuple[Sequence[object], Sequence[Sequence[object]]],
+        ],
+        users: Mapping[str, UserInfoWithEncoreRoles],
+    ) -> tuple[Summary, ...]:
+        """Derive active Summary rows from validated Team worksheet rows."""
+        titles = list(team_worksheets)
+        teams_by_title: dict[str, dict[str, Team]] = {}
+        usernames: list[str] = []
+        first_team_by_username: dict[str, Team] = {}
+        for title, (team_headers, team_rows) in team_worksheets.items():
+            teams = TeamWorksheetContent.validated_teams(team_headers, team_rows)
+            teams_by_title[title] = {team.username: team for team in teams}
+            for team in teams:
+                first_team_by_username.setdefault(team.username, team)
+                if team.username not in usernames:
+                    usernames.append(team.username)
+        summaries = []
+        for username in usernames:
+            user = users.get(
+                username,
+                UserInfoWithEncoreRoles(
+                    username,
+                    first_team_by_username[username].display_name,
+                    "",
+                ),
+            )
+            summaries.append(
+                Summary(
+                    username=username,
+                    display_name=user.display_name,
+                    encore_roles=user.encore_roles,
+                    titles=titles,
+                    teams=[teams_by_title[title].get(username) for title in titles],
+                )
+            )
+        return tuple(summaries)
+
+    @classmethod
+    def plan_reconciliation(
+        cls,
+        *,
+        worksheet_id: int,
+        headers: Sequence[object],
+        rows: Sequence[Sequence[object]],
+        titles: Sequence[str],
+        summaries: Sequence[Summary],
+    ) -> tuple[GridValueUpdate | DimensionMutation, ...]:
+        """Plan a full Summary reconciliation from derived Summary rows."""
+        index = cls.index_physical_rows(headers, rows, titles)
+        updates: list[GridValueUpdate | DimensionMutation] = []
+        reusable_rows = iter(index.reusable_rows)
+        appended_rows = 0
+        for summary in summaries:
+            username = summary.username
+            row = index.row_by_username.get(username)
+            if row is None:
+                row = index.archived_row_by_username.get(username)
+            if row is None:
+                row = next(reusable_rows, None)
+            if row is None:
+                row = len(rows) + 2 + appended_rows
+                appended_rows += 1
+            updates.append(
+                GridValueUpdate.from_values(
+                    worksheet_id=worksheet_id,
+                    start_row=row,
+                    start_column=1,
+                    values=[[getattr(summary, header) for header in index.bot_headers]],
+                )
+            )
+
+        desired = {summary.username for summary in summaries}
+        updates.extend(
+            GridValueUpdate.from_values(
+                worksheet_id=worksheet_id,
+                start_row=row,
+                start_column=index.column_by_header[cls.INDEX_NAME],
+                values=[[cls.archived_username(str(username))]],
+            )
+            for username, row in sorted(
+                index.row_by_username.items(),
+                key=lambda item: item[1],
+            )
+            if username not in desired
+        )
+        return tuple(updates)
 
     @classmethod
     def extended_columns_dtypes_from_titles(
@@ -577,111 +1223,3 @@ class SummaryWorksheetContent(WorksheetContentBase[UserInfoWithEncoreRoles]):
             Summary.original_message_title(),
         ]
         return columns, dict.fromkeys(columns, "object")
-
-    @classmethod
-    @override
-    def standardize_dataframe(
-        cls,
-        df: pd.DataFrame,
-        *,
-        extended_columns: list[str] | None = None,
-        extended_dtypes: dict[str, str] | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        columns, _ = cls._merge_columns_dtypes(
-            cls.COLUMNS, cls.DTYPES, extended_columns, extended_dtypes
-        )
-        if Summary.original_message_title() in df.columns:
-            message_column_position = df.columns.get_loc(
-                Summary.original_message_title()
-            )
-            if isinstance(message_column_position, int) and (
-                message_column_position >= len(columns)
-            ):
-                df = pd.concat(
-                    [
-                        df.iloc[:, : len(columns) - 1],
-                        df[[Summary.original_message_title()]],
-                    ],
-                    axis=1,
-                )
-        return super().standardize_dataframe(
-            df,
-            extended_columns=extended_columns,
-            extended_dtypes=extended_dtypes,
-        )
-
-    @classmethod
-    def generate_from_team_dataframes(
-        cls, team_df_by_titles: dict[str, pd.DataFrame]
-    ) -> Self:
-        """
-        Generate a summary worksheet content from team DataFrames.
-
-        Args:
-            team_df_by_titles (dict[str, pd.DataFrame]):
-                Dictionary mapping team titles to their DataFrames.
-            roles (pd.Series): Series containing encore roles for each user.
-
-        Returns:
-            Self: The generated summary worksheet content.
-        """
-        if not team_df_by_titles:
-            return cls(
-                extended_columns=[Summary.original_message_title()],
-                extended_dtypes={Summary.original_message_title(): "object"},
-            )
-
-        all_users = pd.concat(
-            [
-                df.reset_index()[[f.name for f in dataclasses.fields(UserInfo)]]
-                for df in team_df_by_titles.values()
-            ]
-        ).drop_duplicates(subset=cls.INDEX_NAME)
-
-        summary_df = all_users.set_index(cls.INDEX_NAME)
-
-        summary_df["encore_roles"] = ""
-
-        extra_columns = []
-        extra_dtypes = {}
-
-        for title, df in team_df_by_titles.items():
-            isv_col = Summary.isv_title(title)
-            power_col = Summary.power_title(title)
-            effective_skill_value = Team.compute_effective_skill_value(
-                df["leader_skill_value"], df["internal_skill_value"]
-            )
-            summary_df[isv_col] = effective_skill_value
-            summary_df[power_col] = df["team_power"]
-            extra_columns.extend([isv_col, power_col])
-            extra_dtypes[isv_col] = "object"
-            extra_dtypes[power_col] = "object"
-
-        message_series = pd.Series("", index=summary_df.index, dtype="object")
-        for df in team_df_by_titles.values():
-            if Summary.original_message_title() not in df.columns:
-                continue
-            messages = (
-                df[Summary.original_message_title()]
-                .reindex(summary_df.index)
-                .fillna("")
-            )
-            message_series = pd.Series(
-                (
-                    Summary.join_original_messages([current, message])
-                    for current, message in zip(
-                        message_series,
-                        messages,
-                        strict=True,
-                    )
-                ),
-                index=summary_df.index,
-                dtype="object",
-            )
-        summary_df[Summary.original_message_title()] = message_series
-        extra_columns.append(Summary.original_message_title())
-        extra_dtypes[Summary.original_message_title()] = "object"
-
-        return cls(
-            summary_df, extended_columns=extra_columns, extended_dtypes=extra_dtypes
-        )

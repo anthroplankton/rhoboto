@@ -2,21 +2,48 @@ from __future__ import annotations
 
 import itertools as it
 import re
-from abc import ABC
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import pandas as pd
-
 if TYPE_CHECKING:
-    from collections.abc import Generator, Iterator
-    from typing import ClassVar, Self
+    from collections.abc import Generator, Iterator, Sequence
+    from typing import Self
 
     from utils.google_sheets import AsyncioGspreadWorksheet
 
 
 CELL_PATTERN = re.compile(r"^[A-Z]+[1-9][0-9]*$")
+_SAFE_WORKSHEET_CONTRACT_LOG_HINTS = {
+    "invalid_worksheet_contract",
+    "required_header_missing",
+    "required_header_duplicate",
+}
+
+
+class WorksheetContractError(Exception):
+    """Raised when a worksheet does not match the required bot-owned layout."""
+
+    def __init__(self, *, log_hint: str = "invalid_worksheet_contract") -> None:
+        super().__init__("Worksheet contract validation failed.")
+        self.log_hint = (
+            log_hint
+            if log_hint in _SAFE_WORKSHEET_CONTRACT_LOG_HINTS
+            else "invalid_worksheet_contract"
+        )
+
+
+def required_unique_header_index(
+    headers: Sequence[object],
+    required_header: object,
+) -> int:
+    """Return a required header's zero-based index without exposing header values."""
+    matches = [index for index, value in enumerate(headers) if value == required_header]
+    if not matches:
+        raise WorksheetContractError(log_hint="required_header_missing")
+    if len(matches) > 1:
+        raise WorksheetContractError(log_hint="required_header_duplicate")
+    return matches[0]
 
 
 def validate_anchor_cell(cell: str) -> str:
@@ -359,133 +386,3 @@ class GoogleSheetsMetadata:
                 curr_counts[ws_type] += 1
 
         return cls.from_subtyped_worksheets(metadata.sheet_url, new_worksheets)
-
-
-class WorksheetContentBase[TEntry](ABC):
-    INDEX_NAME: ClassVar[str]
-    COLUMNS: ClassVar[list[str]]
-    DTYPES: ClassVar[dict[str, str]]
-
-    def __init__(
-        self,
-        main: pd.DataFrame | None = None,
-        extra: pd.DataFrame | None = None,
-        *,
-        extended_columns: list[str] | None = None,
-        extended_dtypes: dict[str, str] | None = None,
-    ) -> None:
-        columns, dtypes = self._merge_columns_dtypes(
-            self.COLUMNS, self.DTYPES, extended_columns, extended_dtypes
-        )
-        self.main = (
-            main.copy()
-            if isinstance(main, pd.DataFrame)
-            else pd.DataFrame(columns=columns).astype(dtypes).set_index(self.INDEX_NAME)
-        )
-        self.extra = (
-            extra.copy()
-            if isinstance(extra, pd.DataFrame)
-            else pd.DataFrame(columns=columns)
-        )
-        self.original_row_size = len(self.main) + len(self.extra)
-
-    def __repr__(self) -> str:
-        return (
-            f"{self.__class__.__name__}\nmain=\n{self.main!r}\nextra=\n{self.extra!r}"
-        )
-
-    def upsert(self, entry: TEntry) -> None:
-        index = getattr(entry, self.INDEX_NAME)
-        # Remove the existing row
-        if index in self.main.index:
-            self.main = self.main.drop(index)
-        # Add new row at the bottom
-        self.main.loc[index] = [getattr(entry, col) for col in self.main.columns]
-
-    def delete(self, index: str) -> None:
-        if index not in self.main.index:
-            return
-        self.main = self.main.drop(index)
-
-    def to_frame(self) -> pd.DataFrame:
-        padding_row_size = max(
-            0, self.original_row_size - len(self.main) - len(self.extra)
-        )
-        padding = pd.DataFrame(
-            "", index=range(padding_row_size), columns=self.main.columns
-        )
-        return pd.concat(
-            [self.main.reset_index(), padding, self.extra], ignore_index=True
-        )
-
-    @staticmethod
-    def _merge_columns_dtypes(
-        base_columns: list[str],
-        base_dtypes: dict[str, str],
-        extended_columns: list[str] | None = None,
-        extended_dtypes: dict[str, str] | None = None,
-    ) -> tuple[list[str], dict[str, str]]:
-        """
-        Merge base columns/dtypes with extensions, avoiding duplicates.
-        """
-        columns = [
-            *base_columns,
-            *filter(lambda c: c not in base_columns, extended_columns or []),
-        ]
-        dtypes = base_dtypes | (extended_dtypes or {})
-        return columns, dtypes
-
-    @classmethod
-    def standardize_dataframe(
-        cls,
-        df: pd.DataFrame,
-        *,
-        extended_columns: list[str] | None = None,
-        extended_dtypes: dict[str, str] | None = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Standardize the input DataFrame by ensuring it has the correct columns
-        and data types. Supports dynamic extension of columns/dtypes.
-
-        Args:
-            df (pd.DataFrame): The input DataFrame to standardize.
-            extended_columns (list[str] | None): Extra columns to append.
-            extended_dtypes (dict[str, str] | None): Extra dtypes to merge.
-
-        Returns:
-            tuple[pd.DataFrame, pd.DataFrame]: A tuple containing the valid and
-            invalid DataFrames.
-        """
-        columns, dtypes = cls._merge_columns_dtypes(
-            cls.COLUMNS, cls.DTYPES, extended_columns, extended_dtypes
-        )
-        temp = pd.DataFrame(columns=columns).astype(dtypes)
-
-        if df.index.name == cls.INDEX_NAME:
-            df = df.reset_index()
-
-        df = df.rename(columns=dict(zip(df.columns, columns, strict=False)))
-        df = df[columns[: len(df.columns)]]
-
-        temp = pd.concat([temp, df])
-
-        def row_can_astype(row: pd.Series) -> bool:
-            row_df = row.to_frame().T
-            try:
-                row_df.astype(dtypes)
-            except (ValueError, TypeError):
-                return False
-            else:
-                return True
-
-        row_can_astype_mask = temp.apply(row_can_astype, axis=1)
-        is_duplicate_mask = temp.duplicated(subset=cls.INDEX_NAME, keep="first")
-
-        valid = (
-            temp[row_can_astype_mask & ~is_duplicate_mask]
-            .astype(dtypes)
-            .set_index(cls.INDEX_NAME)
-        )
-        invalid = temp[~row_can_astype_mask | is_duplicate_mask]
-
-        return valid, invalid

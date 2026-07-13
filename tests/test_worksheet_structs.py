@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import pandas as pd
 import pytest
 
 from tests.fakes import FakeWorksheet
 from utils import shift_register_structs
+from utils.google_sheets import DimensionMutation, GridValueUpdate
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
     EntryWorksheetContent,
@@ -14,17 +14,21 @@ from utils.shift_register_structs import (
     ShiftRegisterGoogleSheetsMetadata,
 )
 from utils.structs_base import (
+    ORIGINAL_MESSAGE_LINE_SEPARATOR,
     GoogleSheetsMetadata,
     UserInfo,
+    WorksheetContractError,
     WorksheetMetadata,
     validate_anchor_cell,
 )
 from utils.team_register_structs import (
+    SummaryWorksheetContent,
     SummaryWorksheetMetadata,
     TeamParser,
     TeamRegisterGoogleSheetsMetadata,
     TeamWorksheetContent,
     TeamWorksheetMetadata,
+    UserInfoWithEncoreRoles,
 )
 
 
@@ -103,37 +107,1588 @@ def test_shift_metadata_assigns_default_titles() -> None:
     ]
 
 
-def test_team_worksheet_content_standardizes_valid_invalid_and_duplicate_rows() -> None:
-    rows = [
-        ["alice", "Alice", "150", "740", "33.4", "150/740/33.4"],
-        ["alice", "Alice Duplicate", "140", "680", "35.3", "140/680/35.3"],
-        ["bad", "Bad", "not-int", "680", "35.3", "bad"],
+def test_team_worksheet_index_accepts_reordered_middle_headers() -> None:
+    headers = [
+        "username",
+        "team_power",
+        "display_name",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+        "manager_note",
     ]
-    dataframe = pd.DataFrame(rows, columns=TeamWorksheetContent.COLUMNS)
+    rows = [["alice", 33.4, "Alice", 740, 150, "150/740/33.4", "ready"]]
 
-    valid, invalid = TeamWorksheetContent.standardize_dataframe(dataframe)
+    index = TeamWorksheetContent.index_physical_rows(headers, rows)
 
-    assert list(valid.index) == ["alice"]
-    assert valid.loc["alice", "leader_skill_value"] == 150
-    assert valid.loc["alice", "team_power"] == 33.4
-    assert len(invalid) == 2
+    assert index.bot_headers == tuple(headers[:6])
+    assert index.column_by_header == {
+        header: column for column, header in enumerate(headers[:6], start=1)
+    }
+    assert index.row_by_username == {"alice": 2}
 
 
-def test_team_worksheet_content_upsert_delete_and_padding() -> None:
-    user = UserInfo(username="alice", display_name="Alice")
-    team = TeamParser.parse_line(user, "150/740/33.4 main")
-    content = TeamWorksheetContent()
+def test_team_worksheet_index_accepts_moved_username() -> None:
+    headers = [
+        "display_name",
+        "team_power",
+        "username",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [["Alice", 33.4, "alice", 740, 150, "same", "private"]]
 
-    content.upsert(team)
-    inserted = content.to_frame()
+    index = TeamWorksheetContent.index_physical_rows(headers, rows)
 
-    assert inserted.loc[0, "username"] == "alice"
-    assert inserted.loc[0, "leader_skill_value"] == 150
+    assert index.column_by_header["username"] == 3
+    assert index.row_by_username == {"alice": 2}
 
-    content.delete("alice")
-    deleted = content.to_frame()
 
-    assert deleted.empty
+def test_team_worksheet_index_rejects_duplicate_nonblank_usernames() -> None:
+    rows = [
+        ["alice", "Alice", 150, 740, 33.4, "main"],
+        ["alice", "Alice Again", "not parsed", 0, 0, "other"],
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.index_physical_rows(TeamWorksheetContent.COLUMNS, rows)
+
+
+def test_team_worksheet_index_reuses_first_completely_blank_bot_band() -> None:
+    headers = [*TeamWorksheetContent.COLUMNS, "manager_note"]
+    rows = [
+        ["", "occupied", "", "", "", "", "preserve"],
+        ["", "", "", "", "", "", "prepared"],
+        ["", "", "", "", "", "", "later"],
+    ]
+
+    index = TeamWorksheetContent.index_physical_rows(headers, rows)
+
+    assert index.first_reusable_row == 3
+
+
+def test_team_upsert_preserves_row_and_serializes_current_header_order() -> None:
+    headers = [
+        "username",
+        "team_power",
+        "display_name",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [["alice", 1, "Old", 2, 3, "old", "preserve"]]
+    team = TeamParser.parse_line(
+        UserInfo(username="alice", display_name="Alice"),
+        "150/740/33.4 main",
+    )
+
+    mutations = TeamWorksheetContent.plan_upsert(42, headers, rows, team)
+
+    assert mutations == (
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=2,
+            start_column=1,
+            values=[["alice", 33.4, "Alice", 740, 150, "150/740/33.4 main"]],
+        ),
+    )
+
+
+def test_team_upsert_follows_moved_username_and_repeated_message_cells() -> None:
+    headers = [
+        "display_name",
+        "team_power",
+        "username",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+    ]
+    rows = [
+        ["Old Alice", 1, "alice", 2, 3, "same"],
+        ["Bob", 2, "bob", 3, 4, "same"],
+    ]
+    team = TeamParser.parse_line(
+        UserInfo(username="alice", display_name="Alice"),
+        "150/740/33.4 same",
+    )
+
+    (update,) = TeamWorksheetContent.plan_upsert(42, headers, rows, team)
+
+    assert update.start_row_index == 1
+    assert update.rows[0] == (
+        "Alice",
+        33.4,
+        "alice",
+        740,
+        150,
+        "150/740/33.4 same",
+    )
+
+
+def test_team_upsert_skips_occupied_blank_key_row() -> None:
+    headers = [*TeamWorksheetContent.COLUMNS, "manager_note"]
+    rows = [
+        ["", "orphan", "", "", "", "", "preserve"],
+        ["", "", "", "", "", "", "prepared"],
+    ]
+    team = TeamParser.parse_line(
+        UserInfo(username="alice", display_name="Alice"),
+        "150/740/33.4 main",
+    )
+
+    (update,) = TeamWorksheetContent.plan_upsert(42, headers, rows, team)
+
+    assert update.start_row_index == 2
+    assert update.rows[0][0] == "alice"
+    assert len(update.rows[0]) == len(TeamWorksheetContent.COLUMNS)
+
+
+def test_team_upsert_appends_after_last_physical_row() -> None:
+    rows = [["alice", "Alice", 150, 740, 33.4, "main"]]
+    team = TeamParser.parse_line(
+        UserInfo(username="bob", display_name="Bob"),
+        "140/680/35.3 encore",
+    )
+
+    (update,) = TeamWorksheetContent.plan_upsert(
+        42,
+        TeamWorksheetContent.COLUMNS,
+        rows,
+        team,
+    )
+
+    assert update.start_row_index == 2
+
+
+def test_team_delete_removes_complete_physical_row() -> None:
+    headers = [*TeamWorksheetContent.COLUMNS, "manager_note"]
+    rows = [["alice", "Alice", 150, 740, 33.4, "main", "remove too"]]
+
+    mutations = TeamWorksheetContent.plan_delete(42, headers, rows, "alice")
+
+    assert mutations == (DimensionMutation.delete_rows(42, start_row=2),)
+
+
+def test_team_delete_follows_moved_username() -> None:
+    headers = [
+        "display_name",
+        "username",
+        "leader_skill_value",
+        "internal_skill_value",
+        "team_power",
+        "original_message",
+    ]
+    rows = [["Alice", "alice", 150, 740, 33.4, "same"]]
+
+    mutations = TeamWorksheetContent.plan_delete(42, headers, rows, "alice")
+
+    assert mutations == (DimensionMutation.delete_rows(42, start_row=2),)
+
+
+def test_team_full_consumption_rejects_malformed_keyed_numeric_row() -> None:
+    rows = [["alice", "Alice", "not-int", 740, 33.4, "main"]]
+
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.validated_teams(TeamWorksheetContent.COLUMNS, rows)
+
+
+@pytest.mark.parametrize(
+    ("leader_skill", "internal_skill", "team_power"),
+    [
+        (True, 740, 33.4),
+        (150, False, 33.4),
+        (150, 740, True),
+        (150.5, 740, 33.4),
+        (150, 740.5, 33.4),
+        (150, 740, "NaN"),
+        (150, 740, "inf"),
+        (150, 740, float("nan")),
+        (150, 740, float("inf")),
+        (-1, 740, 33.4),
+        (150, -1, 33.4),
+        (150, 740, -0.1),
+    ],
+)
+def test_team_full_consumption_rejects_noncanonical_numeric_values(
+    leader_skill: object,
+    internal_skill: object,
+    team_power: object,
+) -> None:
+    rows = [
+        [
+            "alice",
+            "Alice",
+            leader_skill,
+            internal_skill,
+            team_power,
+            "main",
+        ]
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.validated_teams(TeamWorksheetContent.COLUMNS, rows)
+
+
+def test_team_header_migration_initializes_empty_sheet() -> None:
+    mutations = TeamWorksheetContent.plan_header_migration(42, [], [])
+
+    assert mutations == (
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=1,
+            values=[TeamWorksheetContent.COLUMNS],
+        ),
+    )
+
+
+def test_team_header_migration_accepts_multiple_blank_bot_rows() -> None:
+    mutations = TeamWorksheetContent.plan_header_migration(42, [], [[], ["", None]])
+
+    assert len(mutations) == 1
+
+
+def test_team_header_migration_rejects_populated_headerless_bot_band() -> None:
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.plan_header_migration(
+            42,
+            [],
+            [[], ["alice", "", "", "", "", ""]],
+        )
+
+
+def test_team_header_migration_adds_missing_canonical_terminal() -> None:
+    headers = TeamWorksheetContent.COLUMNS[:-1]
+
+    mutations = TeamWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        column_count=len(headers) + 1,
+    )
+
+    assert mutations == (
+        DimensionMutation.insert_columns(42, start_column=6),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["original_message"]],
+        ),
+    )
+
+
+def test_team_header_migration_appends_terminal_at_exact_grid_boundary() -> None:
+    headers = TeamWorksheetContent.COLUMNS[:-1]
+
+    mutations = TeamWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        column_count=len(headers),
+    )
+
+    assert mutations == (
+        DimensionMutation.append_columns(42, count=1),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["original_message"]],
+        ),
+    )
+
+
+def test_team_header_migration_adds_terminal_to_moved_exact_prefix() -> None:
+    headers = [
+        "display_name",
+        "username",
+        "leader_skill_value",
+        "internal_skill_value",
+        "team_power",
+    ]
+
+    mutations = TeamWorksheetContent.plan_header_migration(42, headers, [])
+
+    assert mutations == (
+        DimensionMutation.insert_columns(42, start_column=6),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["original_message"]],
+        ),
+    )
+
+
+def test_team_header_migration_preserves_valid_reordered_header() -> None:
+    headers = [
+        "username",
+        "team_power",
+        "display_name",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+        "manager_note",
+    ]
+
+    assert TeamWorksheetContent.plan_header_migration(42, headers, []) == ()
+
+
+def test_team_header_migration_preserves_moved_username() -> None:
+    headers = [
+        "display_name",
+        "team_power",
+        "username",
+        "internal_skill_value",
+        "leader_skill_value",
+        "original_message",
+        "manager_note",
+    ]
+
+    assert TeamWorksheetContent.plan_header_migration(42, headers, []) == ()
+
+
+def test_summary_worksheet_index_uses_title_derived_headers() -> None:
+    titles = ["Main Team", "Encore Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [["alice", "Alice", "", 268, 33.4, 248, 35.3, "main", "ready"]]
+
+    index = SummaryWorksheetContent.index_physical_rows(headers, rows, titles)
+
+    assert index.bot_headers == tuple(headers[:-1])
+    assert index.row_by_username == {"alice": 2}
+
+
+def test_summary_index_classifies_retired_reusable_and_occupied_rows() -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [
+        ["alice", "Alice", "", 268, 33.4, "main", "active admin"],
+        [
+            "bob (archived)",
+            "Bob",
+            "",
+            248,
+            35.3,
+            "old message",
+            "retired admin",
+        ],
+        ["", "", "", "", "", "", "reusable admin"],
+        ["", "manual", "", "", "", "", "occupied admin"],
+    ]
+
+    index = SummaryWorksheetContent.index_physical_rows(headers, rows, titles)
+
+    assert index.row_by_username == {"alice": 2}
+    assert index.archived_row_by_username == {"bob": 3}
+    assert index.reusable_rows == (4,)
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[" (archived)", "Alice", "", 268, 33.4, "main"]],
+        [["alice (archived) (archived)", "Alice", "", 268, 33.4, "main"]],
+        [["alice (archived)"], ["alice (archived)"]],
+        [
+            ["alice", "Alice", "", 268, 33.4, "main"],
+            ["alice (archived)", "Alice", "", 268, 33.4, "main"],
+        ],
+    ],
+)
+def test_summary_index_rejects_invalid_archived_username_contract(
+    rows: list[list[object]],
+) -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.index_physical_rows(headers, rows, titles)
+
+
+def test_summary_worksheet_index_preserves_reordered_title_pairs() -> None:
+    titles = ["Main Team", "Encore Team"]
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Encore Team ISV",
+        "Encore Team Power",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+
+    index = SummaryWorksheetContent.index_physical_rows(headers, [], titles)
+
+    assert index.bot_headers == tuple(headers)
+
+
+def test_summary_worksheet_index_accepts_moved_base_headers() -> None:
+    headers = [
+        "encore_roles",
+        "username",
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [["Encore", "alice", "Alice", 268, 33.4, "same", "private"]]
+
+    index = SummaryWorksheetContent.index_physical_rows(
+        headers,
+        rows,
+        ["Main Team"],
+    )
+
+    assert index.column_by_header["username"] == 2
+    assert index.row_by_username == {"alice": 2}
+
+
+def test_summary_worksheet_index_accepts_username_after_title_pair() -> None:
+    headers = [
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "encore_roles",
+        "username",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [["Alice", 268, 33.4, "Encore", "alice", "same", "private"]]
+
+    index = SummaryWorksheetContent.index_physical_rows(
+        headers,
+        rows,
+        ["Main Team"],
+    )
+
+    assert index.bot_headers == tuple(headers[:-1])
+    assert index.column_by_header["username"] == 5
+    assert index.row_by_username == {"alice": 2}
+
+
+def test_summary_upsert_serializes_explicit_title_values_in_header_order() -> None:
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Encore Team ISV",
+        "Encore Team Power",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [["alice", "Old", "", 0, 0, 0, 0, "old", "preserve"]]
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 140, 680, 35.3, "140/680/35.3 encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
+
+    mutations = SummaryWorksheetContent.plan_upsert(
+        42,
+        headers,
+        rows,
+        summary,
+        ["Main Team", "Encore Team"],
+    )
+
+    assert mutations == (
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=2,
+            start_column=1,
+            values=[
+                [
+                    "alice",
+                    "Alice",
+                    "Encore",
+                    248,
+                    35.3,
+                    268,
+                    33.4,
+                    f"150/740/33.4 main{ORIGINAL_MESSAGE_LINE_SEPARATOR}"
+                    "140/680/35.3 encore",
+                ]
+            ],
+        ),
+    )
+
+
+def test_summary_upsert_revives_matching_archived_row() -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [
+        [
+            "alice (archived)",
+            "Old Alice",
+            "",
+            1,
+            1,
+            "old message",
+            "preserve",
+        ]
+    ]
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "")},
+    )[0]
+
+    (update,) = SummaryWorksheetContent.plan_upsert(
+        42,
+        headers,
+        rows,
+        summary,
+        titles,
+    )
+
+    assert update.start_row_index == 1
+    assert update.rows[0][-1] == "150/740/33.4 main"
+
+
+def test_summary_upsert_follows_moved_base_headers_and_repeated_messages() -> None:
+    headers = [
+        "encore_roles",
+        "username",
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+    rows = [
+        ["Old", "alice", "Old Alice", 1, 1, "same"],
+        ["", "bob", "Bob", 2, 2, "same"],
+    ]
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 same"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
+
+    (update,) = SummaryWorksheetContent.plan_upsert(
+        42,
+        headers,
+        rows,
+        summary,
+        ["Main Team"],
+    )
+
+    assert update.start_row_index == 1
+    assert update.rows[0] == (
+        "Encore",
+        "alice",
+        "Alice",
+        268,
+        33.4,
+        "150/740/33.4 same",
+    )
+
+
+def test_summary_upsert_follows_interleaved_required_headers() -> None:
+    headers = [
+        "Main Team ISV",
+        "display_name",
+        "Encore Team Power",
+        "username",
+        "Main Team Power",
+        "encore_roles",
+        "Encore Team ISV",
+        "original_message",
+    ]
+    rows = [[1, "Old Alice", 1, "alice", 1, "Old", 1, "old"]]
+    summary = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "150/740/33.4 main"]],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 140, 680, 35.3, "140/680/35.3 encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+    )[0]
+
+    (update,) = SummaryWorksheetContent.plan_upsert(
+        42,
+        headers,
+        rows,
+        summary,
+        ["Main Team", "Encore Team"],
+    )
+
+    assert update.rows[0] == (
+        268,
+        "Alice",
+        35.3,
+        "alice",
+        33.4,
+        "Encore",
+        248,
+        f"150/740/33.4 main{ORIGINAL_MESSAGE_LINE_SEPARATOR}140/680/35.3 encore",
+    )
+
+
+def test_summary_delete_removes_complete_physical_row() -> None:
+    titles = ["Main Team"]
+    dynamic_headers, _ = SummaryWorksheetContent.extended_columns_dtypes_from_titles(
+        titles
+    )
+    headers = [*SummaryWorksheetContent.COLUMNS, *dynamic_headers, "manager_note"]
+    rows = [["alice", "Alice", "", 268, 33.4, "main", "remove too"]]
+
+    mutations = SummaryWorksheetContent.plan_delete(
+        42,
+        headers,
+        rows,
+        titles,
+        "alice",
+    )
+
+    assert mutations == (DimensionMutation.delete_rows(42, start_row=2),)
+
+
+def test_summary_delete_follows_moved_username() -> None:
+    headers = [
+        "encore_roles",
+        "username",
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+    rows = [["Encore", "alice", "Alice", 268, 33.4, "same"]]
+
+    mutations = SummaryWorksheetContent.plan_delete(
+        42,
+        headers,
+        rows,
+        ["Main Team"],
+        "alice",
+    )
+
+    assert mutations == (DimensionMutation.delete_rows(42, start_row=2),)
+
+
+def test_summary_delete_follows_username_after_title_pair() -> None:
+    headers = [
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "encore_roles",
+        "username",
+        "original_message",
+    ]
+    rows = [["Alice", 268, 33.4, "Encore", "alice", "same"]]
+
+    mutations = SummaryWorksheetContent.plan_delete(
+        42,
+        headers,
+        rows,
+        ["Main Team"],
+        "alice",
+    )
+
+    assert mutations == (DimensionMutation.delete_rows(42, start_row=2),)
+
+
+def test_summary_header_migration_initializes_canonical_empty_sheet() -> None:
+    titles = ["Main Team", "Encore Team"]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(42, [], [], titles)
+
+    assert mutations == (
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=1,
+            values=[
+                [
+                    "username",
+                    "display_name",
+                    "encore_roles",
+                    "Main Team ISV",
+                    "Main Team Power",
+                    "Encore Team ISV",
+                    "Encore Team Power",
+                    "original_message",
+                ]
+            ],
+        ),
+    )
+
+
+def test_summary_header_migration_accepts_multiple_blank_bot_rows() -> None:
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        [],
+        [[], ["", None]],
+        ["Main Team"],
+    )
+
+    assert len(mutations) == 1
+
+
+def test_summary_header_migration_rejects_populated_headerless_bot_band() -> None:
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.plan_header_migration(
+            42,
+            [],
+            [[], ["alice", "", "", "", "", ""]],
+            ["Main Team"],
+        )
+
+
+@pytest.mark.parametrize("titles", [["Main Team", "Main Team"], [""]])
+def test_summary_header_migration_rejects_invalid_configured_titles(
+    titles: list[str],
+) -> None:
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.plan_header_migration(42, [], [], titles)
+
+
+def test_summary_header_migration_adds_missing_canonical_terminal() -> None:
+    titles = ["Main Team"]
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        titles,
+        column_count=len(headers) + 1,
+    )
+
+    assert mutations == (
+        DimensionMutation.insert_columns(42, start_column=6),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["original_message"]],
+        ),
+    )
+
+
+def test_summary_header_migration_appends_terminal_at_exact_grid_boundary() -> None:
+    titles = ["Main Team"]
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        titles,
+        column_count=len(headers),
+    )
+
+    assert mutations == (
+        DimensionMutation.append_columns(42, count=1),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["original_message"]],
+        ),
+    )
+
+
+def test_summary_header_migration_preserves_moved_base_headers() -> None:
+    headers = [
+        "encore_roles",
+        "username",
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+
+    assert (
+        SummaryWorksheetContent.plan_header_migration(
+            42,
+            headers,
+            [],
+            ["Main Team"],
+        )
+        == ()
+    )
+
+
+def test_summary_header_migration_preserves_interleaved_required_headers() -> None:
+    headers = [
+        "Main Team ISV",
+        "display_name",
+        "Encore Team Power",
+        "username",
+        "Main Team Power",
+        "encore_roles",
+        "Encore Team ISV",
+        "original_message",
+        "manager_note",
+    ]
+
+    assert (
+        SummaryWorksheetContent.plan_header_migration(
+            42,
+            headers,
+            [],
+            ["Main Team", "Encore Team"],
+        )
+        == ()
+    )
+
+
+def test_summary_header_migration_inserts_new_pair_before_admin_band() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Encore Team"],
+    )
+
+    assert mutations == (
+        DimensionMutation.insert_columns(42, start_column=6, count=2),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["Encore Team ISV", "Encore Team Power"]],
+        ),
+    )
+
+
+def test_summary_header_migration_deletes_obsolete_pair_structurally() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Backup Team ISV",
+        "Backup Team Power",
+        "Main Team ISV",
+        "Main Team Power",
+        "Encore Team ISV",
+        "Encore Team Power",
+        "original_message",
+        "manager_note",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Backup Team"],
+    )
+
+    assert mutations == (DimensionMutation.delete_columns(42, start_column=8, count=2),)
+
+
+def test_summary_header_migration_replaces_changed_title_pair() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Old Encore ISV",
+        "Old Encore Power",
+        "original_message",
+        "manager_note",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Encore Team"],
+    )
+
+    assert mutations == (
+        DimensionMutation.delete_columns(42, start_column=6, count=2),
+        DimensionMutation.insert_columns(42, start_column=6, count=2),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["Encore Team ISV", "Encore Team Power"]],
+        ),
+    )
+
+
+def test_summary_header_migration_replaces_nonadjacent_obsolete_headers() -> None:
+    headers = [
+        "Old Team ISV",
+        "Main Team Power",
+        "username",
+        "Old Team Power",
+        "display_name",
+        "Main Team ISV",
+        "encore_roles",
+        "original_message",
+        "manager_note",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Encore Team"],
+    )
+
+    assert mutations == (
+        DimensionMutation.delete_columns(42, start_column=4),
+        DimensionMutation.delete_columns(42, start_column=1),
+        DimensionMutation.insert_columns(42, start_column=6, count=2),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[["Encore Team ISV", "Encore Team Power"]],
+        ),
+    )
+
+
+def test_summary_header_migration_repairs_exact_duplicate_terminal_incident() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Encore Team ISV",
+        "Encore Team Power",
+        "original_message",
+        "Backup Team ISV",
+        "Backup Team Power",
+        "original_message",
+        "manager_note",
+    ]
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Encore Team"],
+    )
+
+    assert mutations == (DimensionMutation.delete_columns(42, start_column=9, count=3),)
+
+
+def test_summary_header_migration_composes_duplicate_repair_with_pair_changes() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Old Encore ISV",
+        "Old Encore Power",
+        "original_message",
+        "Retired Team ISV",
+        "Retired Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    before = headers.copy()
+
+    mutations = SummaryWorksheetContent.plan_header_migration(
+        42,
+        headers,
+        [],
+        ["Main Team", "Encore Team", "Backup Team"],
+    )
+
+    assert mutations == (
+        DimensionMutation.delete_columns(42, start_column=9, count=3),
+        DimensionMutation.delete_columns(42, start_column=6, count=2),
+        DimensionMutation.insert_columns(42, start_column=6, count=4),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=1,
+            start_column=6,
+            values=[
+                [
+                    "Encore Team ISV",
+                    "Encore Team Power",
+                    "Backup Team ISV",
+                    "Backup Team Power",
+                ]
+            ],
+        ),
+    )
+    assert headers == before
+
+
+def test_summary_duplicate_terminal_composition_rejects_stale_desired_title() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "Old Encore ISV",
+        "Old Encore Power",
+        "original_message",
+        "Backup Team ISV",
+        "Backup Team Power",
+        "original_message",
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.plan_header_migration(
+            42,
+            headers,
+            [],
+            ["Main Team", "Encore Team", "Backup Team"],
+        )
+
+
+def test_summary_header_migration_rejects_reserved_admin_header() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "Main Team ISV",
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.plan_header_migration(42, headers, [], ["Main Team"])
+
+
+def test_summary_worksheet_index_rejects_reserved_admin_header() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "encore_roles",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "Old Team Power",
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.index_physical_rows(headers, [], ["Main Team"])
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "Main Team ISV",
+            "Main Team Power",
+            "original_message",
+            "Backup Team ISV",
+            "Backup Team Power",
+            "original_message",
+        ],
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+            "Backup Team ISV",
+            "Backup Team Power",
+            "original_message",
+            "original_message",
+        ],
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+            "Backup Team ISV",
+            "original_message",
+        ],
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+            "Backup Team ISV",
+            "Backup Team Power",
+            "original_message",
+            "Main Team Power",
+        ],
+        [
+            "username",
+            "display_name",
+            "encore_roles",
+            "Main Team ISV",
+            "Main Team Power",
+            "Encore Team ISV",
+            "Encore Team Power",
+            "original_message",
+            "legacy",
+            "custom",
+            "original_message",
+        ],
+    ],
+    ids=[
+        "reordered-prefix",
+        "third-marker",
+        "incomplete-pair",
+        "reserved-admin-collision",
+        "unrecognized-columns",
+    ],
+)
+def test_summary_duplicate_terminal_near_misses_fail_closed(
+    headers: list[str],
+) -> None:
+    before = headers.copy()
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.plan_header_migration(
+            42,
+            headers,
+            [],
+            ["Main Team", "Encore Team"],
+        )
+
+    assert headers == before
+
+
+def test_summary_reconciliation_validates_every_consumed_team_row() -> None:
+    team_rows = [
+        ["alice", "Alice", 150, 740, 33.4, "main"],
+        ["bob", "Bob", "not-int", 680, 35.3, "bad"],
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        SummaryWorksheetContent.derive_summaries(
+            {"Main Team": (TeamWorksheetContent.COLUMNS, team_rows)},
+            {},
+        )
+
+
+def test_summary_derivation_uses_discord_users_and_first_team_fallback() -> None:
+    summaries = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [
+                    ["alice", "Team Alice", 150, 740, 33.4, "alice main"],
+                    ["bob", "Team Bob", 130, 600, 30.0, "bob main"],
+                ],
+            ),
+            "Encore Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Team Alice", 140, 680, 35.3, "alice encore"]],
+            ),
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Discord Alice", "Encore")},
+    )
+
+    assert [summary.username for summary in summaries] == ["alice", "bob"]
+    assert [(summary.display_name, summary.encore_roles) for summary in summaries] == [
+        ("Discord Alice", "Encore"),
+        ("Team Bob", ""),
+    ]
+    assert getattr(summaries[0], "Main Team ISV") == 268
+    assert getattr(summaries[0], "Encore Team Power") == 35.3
+    assert getattr(summaries[1], "Encore Team ISV") == ""
+
+
+def test_summary_reconciliation_serializes_prederived_summaries() -> None:
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+    summaries = SummaryWorksheetContent.derive_summaries(
+        {
+            "Main Team": (
+                TeamWorksheetContent.COLUMNS,
+                [["alice", "Alice", 150, 740, 33.4, "main"]],
+            )
+        },
+        {"alice": UserInfoWithEncoreRoles("alice", "Discord Alice", "Encore")},
+    )
+
+    (update,) = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=headers,
+        rows=[],
+        titles=["Main Team"],
+        summaries=summaries,
+    )
+
+    assert update.rows[0] == (
+        "alice",
+        "Discord Alice",
+        "Encore",
+        268,
+        33.4,
+        "main",
+    )
+
+
+def test_summary_reconciliation_updates_reuses_and_retires_physical_rows() -> None:
+    summary_headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Encore Team ISV",
+        "Encore Team Power",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    summary_rows = [
+        ["carol", "Carol", "", 0, 0, 0, 0, "old", "delete too"],
+        ["alice", "Old", "", 0, 0, 0, 0, "old", "preserve"],
+        ["", "occupied", "", "", "", "", "", "", "preserve"],
+        ["", "", "", "", "", "", "", "", "prepared"],
+    ]
+    main_rows = [
+        ["alice", "Alice", 150, 740, 33.4, "same"],
+        ["bob", "Bob", 130, 600, 30.0, "bob main"],
+    ]
+    encore_rows = [["alice", "Alice", 140, 680, 35.3, "same"]]
+
+    team_worksheets = {
+        "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
+        "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
+    }
+    mutations = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=summary_headers,
+        rows=summary_rows,
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {
+                "alice": UserInfoWithEncoreRoles("alice", "Alice New", "Lead"),
+                "bob": UserInfoWithEncoreRoles("bob", "Bob", ""),
+            },
+        ),
+    )
+
+    assert mutations == (
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=3,
+            start_column=1,
+            values=[
+                [
+                    "alice",
+                    "Alice New",
+                    "Lead",
+                    248,
+                    35.3,
+                    268,
+                    33.4,
+                    f"same{ORIGINAL_MESSAGE_LINE_SEPARATOR}same",
+                ]
+            ],
+        ),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=5,
+            start_column=1,
+            values=[["bob", "Bob", "", "", "", 224, 30.0, "bob main"]],
+        ),
+        GridValueUpdate.from_values(
+            worksheet_id=42,
+            start_row=2,
+            start_column=1,
+            values=[["carol (archived)"]],
+        ),
+    )
+
+
+def test_summary_reconciliation_revives_matching_archived_row() -> None:
+    headers = [
+        *SummaryWorksheetContent.COLUMNS,
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+        "manager_note",
+    ]
+    rows = [
+        [
+            "alice (archived)",
+            "Old Alice",
+            "",
+            1,
+            1,
+            "old message",
+            "preserve",
+        ]
+    ]
+    team_rows = [["alice", "Alice", 150, 740, 33.4, "main"]]
+
+    team_worksheets = {"Main Team": (TeamWorksheetContent.COLUMNS, team_rows)}
+    (update,) = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=headers,
+        rows=rows,
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "")},
+        ),
+    )
+
+    assert update.start_row_index == 1
+    assert update.rows[0][-1] == "main"
+
+
+def test_summary_reconciliation_follows_moved_team_and_summary_usernames() -> None:
+    summary_headers = [
+        "encore_roles",
+        "username",
+        "display_name",
+        "Main Team ISV",
+        "Main Team Power",
+        "original_message",
+    ]
+    team_headers = [
+        "display_name",
+        "username",
+        "leader_skill_value",
+        "internal_skill_value",
+        "team_power",
+        "original_message",
+    ]
+    summary_rows = [["Old", "alice", "Old Alice", 1, 1, "same"]]
+    team_rows = [
+        ["Alice", "alice", 150, 740, 33.4, "same"],
+        ["Bob", "bob", 140, 680, 35.3, "same"],
+    ]
+
+    team_worksheets = {"Main Team": (team_headers, team_rows)}
+    mutations = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=summary_headers,
+        rows=summary_rows,
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        ),
+    )
+
+    assert [mutation.rows[0] for mutation in mutations] == [
+        ("Encore", "alice", "Alice", 268, 33.4, "same"),
+        ("", "bob", "Bob", 248, 35.3, "same"),
+    ]
+
+
+def test_summary_reconciliation_follows_interleaved_required_headers() -> None:
+    summary_headers = [
+        "Main Team ISV",
+        "display_name",
+        "Encore Team Power",
+        "username",
+        "Main Team Power",
+        "encore_roles",
+        "Encore Team ISV",
+        "original_message",
+    ]
+    summary_rows = [[1, "Old Alice", 1, "alice", 1, "Old", 1, "old"]]
+    main_rows = [
+        ["alice", "Alice", 150, 740, 33.4, "same"],
+        ["bob", "Bob", 130, 600, 30.0, "bob main"],
+    ]
+    encore_rows = [["alice", "Alice", 140, 680, 35.3, "same"]]
+
+    team_worksheets = {
+        "Main Team": (TeamWorksheetContent.COLUMNS, main_rows),
+        "Encore Team": (TeamWorksheetContent.COLUMNS, encore_rows),
+    }
+    mutations = SummaryWorksheetContent.plan_reconciliation(
+        worksheet_id=42,
+        headers=summary_headers,
+        rows=summary_rows,
+        titles=list(team_worksheets),
+        summaries=SummaryWorksheetContent.derive_summaries(
+            team_worksheets,
+            {"alice": UserInfoWithEncoreRoles("alice", "Alice", "Encore")},
+        ),
+    )
+
+    assert [mutation.rows[0] for mutation in mutations] == [
+        (
+            268,
+            "Alice",
+            35.3,
+            "alice",
+            33.4,
+            "Encore",
+            248,
+            f"same{ORIGINAL_MESSAGE_LINE_SEPARATOR}same",
+        ),
+        (224, "Bob", "", "bob", 30.0, "", "", "bob main"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        [
+            "username",
+            "display_name",
+            "leader_skill_value",
+            "internal_skill_value",
+            "original_message",
+        ],
+        [*TeamWorksheetContent.COLUMNS, "team_power"],
+        [
+            "username",
+            "display_name",
+            "manager_note",
+            "leader_skill_value",
+            "internal_skill_value",
+            "team_power",
+            "original_message",
+        ],
+    ],
+    ids=[
+        "missing-header",
+        "reserved-admin-collision",
+        "admin-inside-bot-band",
+    ],
+)
+def test_team_worksheet_index_rejects_ambiguous_bot_ownership(
+    headers: list[str],
+) -> None:
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.index_physical_rows(headers, [])
+
+
+def test_team_header_migration_rejects_positional_legacy_names() -> None:
+    headers = [
+        "username",
+        "display_name",
+        "Old Leader",
+        "Old Internal",
+        "Old Power",
+        "original_message",
+    ]
+
+    with pytest.raises(WorksheetContractError):
+        TeamWorksheetContent.plan_header_migration(42, headers, [])
+
+
+def test_team_upsert_does_not_parse_unrelated_keyed_rows() -> None:
+    rows = [
+        ["alice", "Old Alice", 0, 0, 0, "same"],
+        ["bob", "Bob", "not-int", "bad", "bad", "same"],
+    ]
+    team = TeamParser.parse_line(
+        UserInfo(username="alice", display_name="Alice"),
+        "150/740/33.4 main",
+    )
+
+    (update,) = TeamWorksheetContent.plan_upsert(
+        42,
+        TeamWorksheetContent.COLUMNS,
+        rows,
+        team,
+    )
+
+    assert update.start_row_index == 1
+
+
+def test_team_full_consumption_skips_occupied_blank_key_row() -> None:
+    rows = [["", "orphan", "not-int", "bad", "bad", "preserve"]]
+
+    assert (
+        TeamWorksheetContent.validated_teams(
+            TeamWorksheetContent.COLUMNS,
+            rows,
+        )
+        == ()
+    )
+
+
+def test_repeated_original_message_cells_do_not_create_duplicate_records() -> None:
+    rows = [
+        ["alice", "Alice", 150, 740, 33.4, "same"],
+        ["bob", "Bob", 140, 680, 35.3, "same"],
+    ]
+
+    index = TeamWorksheetContent.index_physical_rows(
+        TeamWorksheetContent.COLUMNS,
+        rows,
+    )
+
+    assert index.row_by_username == {"alice": 2, "bob": 3}
 
 
 def test_shift_entry_layout_places_team_before_0_30_hour_axis() -> None:
@@ -238,54 +1793,3 @@ def test_shift_entry_dtypes_use_0_30_hour_axis() -> None:
     assert {
         column: EntryWorksheetContent.DTYPES[column] for column in expected_hour_columns
     } == dict.fromkeys(expected_hour_columns, "int")
-
-
-def test_shift_entry_header_guard_accepts_new_core_header_with_trailing_extra() -> None:
-    columns = [*EntryWorksheetContent.COLUMNS, "manager_note"]
-    dataframe = pd.DataFrame(columns=columns)
-
-    EntryWorksheetContent.validate_core_header(dataframe)
-
-
-def test_shift_entry_header_guard_accepts_empty_fresh_worksheet() -> None:
-    EntryWorksheetContent.validate_core_header(pd.DataFrame())
-
-
-def test_shift_entry_header_guard_rejects_old_4_28_header() -> None:
-    old_columns = [
-        "username",
-        "display_name",
-        *[f"{hour}-{hour + 1}" for hour in range(4, 28)],
-        "original_message",
-    ]
-    dataframe = pd.DataFrame(columns=old_columns)
-
-    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
-        EntryWorksheetContent.validate_core_header(dataframe)
-
-
-def test_shift_entry_header_guard_rejects_missing_core_column() -> None:
-    columns = EntryWorksheetContent.COLUMNS.copy()
-    columns.remove("10-11")
-    dataframe = pd.DataFrame(columns=columns)
-
-    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
-        EntryWorksheetContent.validate_core_header(dataframe)
-
-
-def test_shift_entry_header_guard_rejects_shuffled_core_column() -> None:
-    columns = EntryWorksheetContent.COLUMNS.copy()
-    columns[2], columns[3] = columns[3], columns[2]
-    dataframe = pd.DataFrame(columns=columns)
-
-    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
-        EntryWorksheetContent.validate_core_header(dataframe)
-
-
-def test_shift_entry_header_guard_rejects_inserted_core_column() -> None:
-    columns = EntryWorksheetContent.COLUMNS.copy()
-    columns.insert(3, "manager_note")
-    dataframe = pd.DataFrame(columns=columns)
-
-    with pytest.raises(ValueError, match="Shift Entry worksheet header"):
-        EntryWorksheetContent.validate_core_header(dataframe)
