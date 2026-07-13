@@ -3,8 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-import pandas as pd
-
 MISSING_CONTENT: object = object()
 DEFAULT_FAKE_CONTEXT_VALUE: object = object()
 
@@ -162,17 +160,6 @@ class FakeWorksheet:
         *,
         title: str = "Worksheet",
         worksheet_id: int = 1,
-        frame: pd.DataFrame | None = None,
     ) -> None:
         self.title = title
         self.id = worksheet_id
-        self.frame = frame.copy() if frame is not None else pd.DataFrame()
-        self.updated_frames: list[pd.DataFrame] = []
-
-    async def to_frame(self) -> pd.DataFrame:
-        return self.frame.copy()
-
-    async def update_from_dataframe(self, dataframe: pd.DataFrame) -> None:
-        updated = dataframe.copy()
-        self.updated_frames.append(updated)
-        self.frame = updated

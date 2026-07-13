@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import copy
+
+import numpy as np
 import pandas as pd
 import pytest
 from gspread.exceptions import WorksheetNotFound
 
+from utils import google_sheets as google_sheets_module
 from utils.google_sheets import BORDER_NAMES, AsyncioGspreadWorksheet, GoogleSheet
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 
 
 class RawWorksheet:
@@ -13,7 +18,6 @@ class RawWorksheet:
         *,
         worksheet_id: int = 1,
         title: str = "Worksheet",
-        values: list[list[object]] | None = None,
         batch_values: list[list[list[object]]] | None = None,
         metadata: dict[str, object] | None = None,
         row_count: int = 100,
@@ -21,43 +25,21 @@ class RawWorksheet:
     ) -> None:
         self.id = worksheet_id
         self.title = title
-        self.values = values or []
         self.batch_values = batch_values or []
         self.row_count = row_count
         self.col_count = col_count
-        self.get_calls: list[dict[str, object]] = []
-        self.update_calls: list[dict[str, object]] = []
         self.batch_get_calls: list[dict[str, object]] = []
-        self.batch_update_calls: list[dict[str, object]] = []
-        self.resize_calls: list[dict[str, int]] = []
         self.delete_calls: list[tuple[int, int | None]] = []
         self.spreadsheet_batch_update_calls: list[dict[str, object]] = []
         self.agcm = RawClientManager()
         self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls, metadata)
         self.extra_attribute = "delegated"
 
-    async def get(self, **kwargs: object) -> list[list[object]]:
-        self.get_calls.append(kwargs)
-        return self.values
-
-    async def update(self, values: list[list[object]], **kwargs: object) -> None:
-        self.update_calls.append({"values": values, **kwargs})
-
     async def batch_get(
         self, ranges: list[str], **kwargs: object
     ) -> list[list[list[object]]]:
         self.batch_get_calls.append({"ranges": ranges, **kwargs})
         return self.batch_values
-
-    async def batch_update(
-        self, data: list[dict[str, object]], **kwargs: object
-    ) -> None:
-        self.batch_update_calls.append({"data": data, **kwargs})
-
-    async def resize(self, *, rows: int, cols: int) -> None:
-        self.resize_calls.append({"rows": rows, "cols": cols})
-        self.row_count = rows
-        self.col_count = cols
 
     async def delete_rows(self, index: int, end_index: int | None = None) -> None:
         self.delete_calls.append((index, end_index))
@@ -110,9 +92,169 @@ class RawSpreadsheetClient:
 
 
 class RawSpreadsheet:
-    def __init__(self, worksheets: list[RawWorksheet] | None = None) -> None:
+    def __init__(
+        self,
+        worksheets: list[RawWorksheet] | None = None,
+        *,
+        grids: dict[int, list[list[object]]] | None = None,
+    ) -> None:
         self._worksheets = worksheets or []
         self.added_worksheets: list[dict[str, object]] = []
+        self.batch_update_calls: list[dict[str, object]] = []
+        self.grids = copy.deepcopy(grids or {})
+
+    async def batch_update(self, body: dict[str, object]) -> None:
+        self.batch_update_calls.append(copy.deepcopy(body))
+        requests = body.get("requests")
+        if not isinstance(requests, list):
+            msg = "Invalid batch requests."
+            raise TypeError(msg)
+        original = self.grids
+        self.grids = copy.deepcopy(original)
+        try:
+            for request in requests:
+                self._apply_request(request)
+        except (TypeError, ValueError):
+            self.grids = original
+            raise
+
+    def _apply_request(self, request: object) -> None:
+        if not isinstance(request, dict):
+            msg = "Invalid batch request."
+            raise TypeError(msg)
+        if isinstance(payload := request.get("appendDimension"), dict):
+            self._apply_append(payload)
+            return
+        if isinstance(payload := request.get("insertDimension"), dict):
+            self._apply_range_dimension(payload, insert=True)
+            return
+        if isinstance(payload := request.get("deleteDimension"), dict):
+            self._apply_range_dimension(payload, insert=False)
+            return
+        if isinstance(payload := request.get("updateCells"), dict):
+            self._apply_update(payload)
+            return
+        msg = "Unsupported batch request."
+        raise ValueError(msg)
+
+    def _grid(self, sheet_id: object) -> list[list[object]]:
+        if not isinstance(sheet_id, int) or sheet_id not in self.grids:
+            msg = "Unknown sheet ID."
+            raise ValueError(msg)
+        return self.grids[sheet_id]
+
+    def _apply_append(self, payload: dict[str, object]) -> None:
+        grid = self._grid(payload.get("sheetId"))
+        dimension = payload.get("dimension")
+        length = payload.get("length")
+        if not isinstance(length, int) or length < 1:
+            msg = "Invalid append length."
+            raise ValueError(msg)
+        if dimension == "ROWS":
+            width = len(grid[0]) if grid else 0
+            grid.extend([[""] * width for _ in range(length)])
+        elif dimension == "COLUMNS":
+            for row in grid:
+                row.extend([""] * length)
+        else:
+            msg = "Invalid append dimension."
+            raise ValueError(msg)
+
+    def _apply_range_dimension(
+        self,
+        payload: dict[str, object],
+        *,
+        insert: bool,
+    ) -> None:
+        dimension_range = payload.get("range")
+        if not isinstance(dimension_range, dict):
+            msg = "Invalid dimension range."
+            raise TypeError(msg)
+        grid = self._grid(dimension_range.get("sheetId"))
+        dimension = dimension_range.get("dimension")
+        start = dimension_range.get("startIndex")
+        end = dimension_range.get("endIndex")
+        if not isinstance(start, int) or not isinstance(end, int) or start >= end:
+            msg = "Invalid dimension indices."
+            raise ValueError(msg)
+        size = len(grid) if dimension == "ROWS" else len(grid[0]) if grid else 0
+        if start < 0 or start > size or (not insert and end > size):
+            msg = "Dimension range is outside the grid."
+            raise ValueError(msg)
+        count = end - start
+        if dimension == "ROWS":
+            width = len(grid[0]) if grid else 0
+            if insert:
+                grid[start:start] = [[""] * width for _ in range(count)]
+            else:
+                del grid[start:end]
+        elif dimension == "COLUMNS":
+            for row in grid:
+                if insert:
+                    row[start:start] = [""] * count
+                else:
+                    del row[start:end]
+        else:
+            msg = "Invalid ranged dimension."
+            raise ValueError(msg)
+
+    def _apply_update(self, payload: dict[str, object]) -> None:
+        grid_range = payload.get("range")
+        rows = payload.get("rows")
+        if not isinstance(grid_range, dict) or not isinstance(rows, list):
+            msg = "Invalid cell update."
+            raise TypeError(msg)
+        grid = self._grid(grid_range.get("sheetId"))
+        start_row = grid_range.get("startRowIndex")
+        end_row = grid_range.get("endRowIndex")
+        start_column = grid_range.get("startColumnIndex")
+        end_column = grid_range.get("endColumnIndex")
+        indices = (start_row, end_row, start_column, end_column)
+        if not all(isinstance(index, int) for index in indices):
+            msg = "Invalid cell indices."
+            raise ValueError(msg)
+        assert isinstance(start_row, int)
+        assert isinstance(end_row, int)
+        assert isinstance(start_column, int)
+        assert isinstance(end_column, int)
+        width = len(grid[0]) if grid else 0
+        if (
+            start_row < 0
+            or start_column < 0
+            or end_row > len(grid)
+            or end_column > width
+            or len(rows) != end_row - start_row
+        ):
+            msg = "Cell update is outside the grid."
+            raise ValueError(msg)
+        for row_index, row_data in enumerate(rows, start=start_row):
+            if not isinstance(row_data, dict):
+                msg = "Invalid cell row."
+                raise TypeError(msg)
+            cells = row_data.get("values")
+            if not isinstance(cells, list) or len(cells) != end_column - start_column:
+                msg = "Invalid cell row width."
+                raise ValueError(msg)
+            grid[row_index][start_column:end_column] = [
+                self._cell_value(cell) for cell in cells
+            ]
+
+    @staticmethod
+    def _cell_value(cell: object) -> object:
+        if not isinstance(cell, dict):
+            msg = "Invalid cell."
+            raise TypeError(msg)
+        extended = cell.get("userEnteredValue")
+        if not isinstance(extended, dict):
+            msg = "Invalid extended value."
+            raise TypeError(msg)
+        if not extended:
+            return None
+        for key in ("numberValue", "boolValue", "stringValue", "formulaValue"):
+            if key in extended:
+                return extended[key]
+        msg = "Invalid extended value type."
+        raise ValueError(msg)
 
     async def get_worksheet_by_id(self, worksheet_id: int) -> RawWorksheet | None:
         for worksheet in self._worksheets:
@@ -153,65 +295,402 @@ class FakeGoogleSheet(GoogleSheet):
 
 
 @pytest.mark.asyncio
-async def test_adapter_delegates_worksheet_api_and_pads_rows() -> None:
-    raw = RawWorksheet(
+async def test_batch_update_grid_converts_domain_coordinates_once() -> None:
+    spreadsheet = RawSpreadsheet(grids={42: [["", "", "", ""] for _ in range(2)]})
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutation = google_sheets_module.GridValueUpdate.from_values(
         worksheet_id=42,
-        title="Existing",
-        values=[["username", "score"], ["alice"], ["bob", 10]],
-    )
-    adapter = AsyncioGspreadWorksheet(raw)
-
-    frame = await adapter.to_frame()
-
-    assert adapter.id == 42
-    assert adapter.title == "Existing"
-    assert adapter.extra_attribute == "delegated"
-    assert raw.get_calls == [{"value_render_option": "FORMULA"}]
-    assert frame.equals(
-        pd.DataFrame(
-            [["alice", ""], ["bob", 10]],
-            columns=["username", "score"],
-        )
+        start_row=2,
+        start_column=3,
+        values=[["Alice", 7]],
     )
 
+    await sheet.batch_update_grid([mutation])
 
-@pytest.mark.asyncio
-async def test_adapter_updates_dataframe_through_wrapped_worksheet() -> None:
-    raw = RawWorksheet()
-    adapter = AsyncioGspreadWorksheet(raw)
-    frame = pd.DataFrame({"username": ["alice"], "score": [None]})
-
-    await adapter.update_from_dataframe(frame)
-
-    assert raw.update_calls == [
+    assert spreadsheet.batch_update_calls == [
         {
-            "values": [["username", "score"]],
-            "range_name": "A1",
-            "raw": True,
-        },
-        {
-            "values": [["alice", ""]],
-            "range_name": "A2",
-            "raw": False,
-        },
-    ]
-
-
-@pytest.mark.asyncio
-async def test_adapter_updates_empty_dataframe_header_as_raw_text() -> None:
-    raw = RawWorksheet()
-    adapter = AsyncioGspreadWorksheet(raw)
-    frame = pd.DataFrame(columns=["username", "1-2"])
-
-    await adapter.update_from_dataframe(frame)
-
-    assert raw.update_calls == [
-        {
-            "values": [["username", "1-2"]],
-            "range_name": "A1",
-            "raw": True,
+            "requests": [
+                {
+                    "updateCells": {
+                        "range": {
+                            "sheetId": 42,
+                            "startRowIndex": 1,
+                            "endRowIndex": 2,
+                            "startColumnIndex": 2,
+                            "endColumnIndex": 4,
+                        },
+                        "rows": [
+                            {
+                                "values": [
+                                    {"userEnteredValue": {"stringValue": "Alice"}},
+                                    {"userEnteredValue": {"numberValue": 7}},
+                                ]
+                            }
+                        ],
+                        "fields": "userEnteredValue",
+                    }
+                }
+            ]
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_batch_update_grid_preserves_cross_sheet_mutation_order() -> None:
+    spreadsheet = RawSpreadsheet(
+        grids={
+            10: [
+                ["old_h1", "old_h2", "old_h3"],
+                ["a", "b", "c"],
+                ["d", "e", "f"],
+                ["g", "h", "i"],
+            ],
+            20: [["x", "x2", ""], ["y", "y2", ""], ["z", "z2", ""]],
+        }
+    )
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutations = [
+        google_sheets_module.DimensionMutation.append_rows(10, 2),
+        google_sheets_module.DimensionMutation.append_columns(10, 3),
+        google_sheets_module.DimensionMutation.insert_columns(
+            10,
+            start_column=2,
+            count=2,
+        ),
+        google_sheets_module.DimensionMutation.delete_columns(
+            10,
+            start_column=4,
+        ),
+        google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=10,
+            start_row=1,
+            start_column=1,
+            values=[["username", "score"]],
+        ),
+        google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=20,
+            start_row=3,
+            start_column=2,
+            values=[["alice", 7]],
+        ),
+        google_sheets_module.DimensionMutation.delete_rows(10, start_row=6),
+        google_sheets_module.DimensionMutation.delete_rows(10, start_row=4),
+    ]
+
+    await sheet.batch_update_grid(mutations)
+
+    requests = spreadsheet.batch_update_calls[0]["requests"]
+    assert [next(iter(request)) for request in requests] == [
+        "appendDimension",
+        "appendDimension",
+        "insertDimension",
+        "deleteDimension",
+        "updateCells",
+        "updateCells",
+        "deleteDimension",
+        "deleteDimension",
+    ]
+    assert requests[:4] == [
+        {
+            "appendDimension": {
+                "sheetId": 10,
+                "dimension": "ROWS",
+                "length": 2,
+            }
+        },
+        {
+            "appendDimension": {
+                "sheetId": 10,
+                "dimension": "COLUMNS",
+                "length": 3,
+            }
+        },
+        {
+            "insertDimension": {
+                "range": {
+                    "sheetId": 10,
+                    "dimension": "COLUMNS",
+                    "startIndex": 1,
+                    "endIndex": 3,
+                },
+                "inheritFromBefore": False,
+            }
+        },
+        {
+            "deleteDimension": {
+                "range": {
+                    "sheetId": 10,
+                    "dimension": "COLUMNS",
+                    "startIndex": 3,
+                    "endIndex": 4,
+                }
+            }
+        },
+    ]
+    assert [
+        request["updateCells"]["range"]["sheetId"] for request in requests[4:6]
+    ] == [10, 20]
+    assert [request["deleteDimension"]["range"] for request in requests[6:]] == [
+        {
+            "sheetId": 10,
+            "dimension": "ROWS",
+            "startIndex": 5,
+            "endIndex": 6,
+        },
+        {
+            "sheetId": 10,
+            "dimension": "ROWS",
+            "startIndex": 3,
+            "endIndex": 4,
+        },
+    ]
+    assert spreadsheet.grids == {
+        10: [
+            ["username", "score", "", "old_h3", "", "", ""],
+            ["a", "", "", "c", "", "", ""],
+            ["d", "", "", "f", "", "", ""],
+            ["", "", "", "", "", "", ""],
+        ],
+        20: [["x", "x2", ""], ["y", "y2", ""], ["z", "alice", 7]],
+    }
+
+
+@pytest.mark.asyncio
+async def test_batch_update_grid_skips_empty_mutation_list() -> None:
+    spreadsheet = RawSpreadsheet()
+    sheet = FakeGoogleSheet(spreadsheet)
+
+    await sheet.batch_update_grid([])
+
+    assert spreadsheet.batch_update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_batch_update_grid_rolls_back_on_invalid_late_request() -> None:
+    spreadsheet = RawSpreadsheet(grids={1: [["original"]]})
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutations = [
+        google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=1,
+            start_row=1,
+            start_column=1,
+            values=[["changed"]],
+        ),
+        google_sheets_module.DimensionMutation.delete_rows(1, start_row=99),
+    ]
+
+    with pytest.raises(GoogleSheetsError):
+        await sheet.batch_update_grid(mutations)
+
+    requests = spreadsheet.batch_update_calls[0]["requests"]
+    assert [next(iter(request)) for request in requests] == [
+        "updateCells",
+        "deleteDimension",
+    ]
+    assert spreadsheet.grids == {1: [["original"]]}
+
+
+@pytest.mark.asyncio
+async def test_batch_update_grid_serializes_native_and_dataframe_scalars() -> None:
+    spreadsheet = RawSpreadsheet(grids={1: [[""] * 12]})
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutation = google_sheets_module.GridValueUpdate.from_values(
+        worksheet_id=1,
+        start_row=1,
+        start_column=1,
+        values=[
+            [
+                1,
+                1.25,
+                True,
+                "plain",
+                "=SUM(A2:A3)",
+                None,
+                np.int64(2),
+                np.float32(2.5),
+                np.bool_(0),
+                np.str_("label"),
+                pd.NA,
+                pd.NaT,
+            ]
+        ],
+    )
+
+    await sheet.batch_update_grid([mutation])
+
+    request = spreadsheet.batch_update_calls[0]["requests"][0]["updateCells"]
+    assert [cell["userEnteredValue"] for cell in request["rows"][0]["values"]] == [
+        {"numberValue": 1},
+        {"numberValue": 1.25},
+        {"boolValue": True},
+        {"stringValue": "plain"},
+        {"stringValue": "=SUM(A2:A3)"},
+        {},
+        {"numberValue": 2},
+        {"numberValue": 2.5},
+        {"boolValue": False},
+        {"stringValue": "label"},
+        {},
+        {},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_update_grid_requires_explicit_formula_values() -> None:
+    spreadsheet = RawSpreadsheet(grids={1: [["", ""]]})
+    sheet = FakeGoogleSheet(spreadsheet)
+    mutation = google_sheets_module.GridValueUpdate.from_values(
+        worksheet_id=1,
+        start_row=1,
+        start_column=1,
+        values=[
+            [
+                "=literal text",
+                google_sheets_module.GridFormula("=SUM(A2:A3)"),
+            ]
+        ],
+    )
+
+    await sheet.batch_update_grid([mutation])
+
+    request = spreadsheet.batch_update_calls[0]["requests"][0]["updateCells"]
+    assert [cell["userEnteredValue"] for cell in request["rows"][0]["values"]] == [
+        {"stringValue": "=literal text"},
+        {"formulaValue": "=SUM(A2:A3)"},
+    ]
+
+
+@pytest.mark.parametrize("value", [None, 1, np.nan])
+def test_grid_formula_rejects_non_string_payloads(value: object) -> None:
+    with pytest.raises(TypeError, match="string"):
+        google_sheets_module.GridFormula(value)
+
+
+@pytest.mark.parametrize("value", ["", "SUM(A2:A3)", " formula"])
+def test_grid_formula_requires_equals_marker(value: str) -> None:
+    with pytest.raises(ValueError, match="begin with"):
+        google_sheets_module.GridFormula(value)
+
+
+@pytest.mark.parametrize(
+    ("value", "error"),
+    [
+        (object(), TypeError),
+        (pd.Timestamp("2026-07-13"), TypeError),
+        (float("nan"), ValueError),
+        (np.float64("nan"), ValueError),
+        (np.float32("nan"), ValueError),
+        (np.longdouble("nan"), ValueError),
+        (float("inf"), ValueError),
+        (float("-inf"), ValueError),
+        (np.float64("inf"), ValueError),
+        (np.longdouble("inf"), ValueError),
+    ],
+)
+def test_grid_value_update_rejects_non_json_scalar_values(
+    value: object,
+    error: type[Exception],
+) -> None:
+    with pytest.raises(error, match="grid value"):
+        google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=1,
+            start_row=1,
+            start_column=1,
+            values=[[value]],
+        )
+
+
+@pytest.mark.parametrize(
+    ("start_row", "start_column", "values"),
+    [
+        (0, 1, [[1]]),
+        (1, 0, [[1]]),
+        (1, 1, []),
+        (1, 1, [[]]),
+        (1, 1, [[1], [2, 3]]),
+    ],
+)
+def test_grid_value_update_rejects_invalid_domain_ranges(
+    start_row: int,
+    start_column: int,
+    values: list[list[object]],
+) -> None:
+    with pytest.raises(ValueError, match="grid update"):
+        google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=1,
+            start_row=start_row,
+            start_column=start_column,
+            values=values,
+        )
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: google_sheets_module.DimensionMutation.append_rows(1, 0),
+        lambda: google_sheets_module.DimensionMutation.append_columns(1, -1),
+        lambda: google_sheets_module.DimensionMutation.insert_columns(
+            1,
+            start_column=0,
+        ),
+        lambda: google_sheets_module.DimensionMutation.delete_columns(
+            1,
+            start_column=1,
+            count=0,
+        ),
+        lambda: google_sheets_module.DimensionMutation.delete_rows(
+            1,
+            start_row=0,
+        ),
+    ],
+)
+def test_dimension_mutation_rejects_invalid_domain_ranges(factory: object) -> None:
+    assert callable(factory)
+    with pytest.raises(ValueError, match="dimension mutation"):
+        factory()
+
+
+@pytest.mark.parametrize(
+    "factory",
+    [
+        lambda: google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=1,
+            start_row=True,
+            start_column=1,
+            values=[[1]],
+        ),
+        lambda: google_sheets_module.GridValueUpdate.from_values(
+            worksheet_id=1,
+            start_row=1,
+            start_column=1.5,
+            values=[[1]],
+        ),
+        lambda: google_sheets_module.DimensionMutation.append_rows(1, count=True),
+        lambda: google_sheets_module.DimensionMutation.append_columns(
+            1,
+            np.float64(2.5),
+        ),
+        lambda: google_sheets_module.DimensionMutation.insert_columns(
+            1,
+            start_column=False,
+        ),
+        lambda: google_sheets_module.DimensionMutation.delete_columns(
+            1,
+            start_column=1,
+            count=1.5,
+        ),
+        lambda: google_sheets_module.DimensionMutation.delete_rows(
+            1,
+            start_row=np.float64(2.5),
+        ),
+    ],
+)
+def test_grid_mutation_factories_reject_non_integer_coordinates_and_counts(
+    factory: object,
+) -> None:
+    assert callable(factory)
+    with pytest.raises(ValueError, match="positive integer"):
+        factory()
 
 
 @pytest.mark.asyncio
@@ -229,39 +708,6 @@ async def test_adapter_batch_reads_formulas() -> None:
             "value_render_option": "FORMULA",
         }
     ]
-
-
-@pytest.mark.asyncio
-async def test_adapter_updates_dataframe_rows_as_raw_when_requested() -> None:
-    raw = RawWorksheet()
-    adapter = AsyncioGspreadWorksheet(raw)
-    frame = pd.DataFrame({"JST": ["4-5"]})
-
-    await adapter.update_from_dataframe(frame, raw_data=True)
-
-    assert raw.update_calls == [
-        {
-            "values": [["JST"]],
-            "range_name": "A1",
-            "raw": True,
-        },
-        {
-            "values": [["4-5"]],
-            "range_name": "A2",
-            "raw": True,
-        },
-    ]
-
-
-@pytest.mark.asyncio
-async def test_adapter_batch_updates_user_entered_ranges() -> None:
-    raw = RawWorksheet()
-    adapter = AsyncioGspreadWorksheet(raw)
-    data = [{"range": "A3:B3", "values": [["alice", "Alice"]]}]
-
-    await adapter.batch_update_values(data)
-
-    assert raw.batch_update_calls == [{"data": data, "raw": False}]
 
 
 @pytest.mark.asyncio
@@ -297,6 +743,99 @@ async def test_adapter_batch_updates_mixed_cell_types_atomically() -> None:
         {"numberValue": 1},
         {"boolValue": False},
     ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_typed_values_normalize_scalars_and_clear_blanks() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.batch_update_typed_values(
+        [
+            {
+                "range": "A1:H1",
+                "values": [
+                    [
+                        "",
+                        None,
+                        pd.NA,
+                        pd.NaT,
+                        np.int64(2),
+                        np.bool_(0),
+                        np.str_("label"),
+                        "=literal",
+                    ]
+                ],
+            }
+        ],
+        formula_ranges=set(),
+    )
+
+    request = raw.spreadsheet_batch_update_calls[0]["requests"][0]["updateCells"]
+    assert [value["userEnteredValue"] for value in request["rows"][0]["values"]] == [
+        {},
+        {},
+        {},
+        {},
+        {"numberValue": 2},
+        {"boolValue": False},
+        {"stringValue": "label"},
+        {"stringValue": "=literal"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_plain_text_in_formula_range_before_request() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    with pytest.raises(ValueError, match="formula range"):
+        await adapter.batch_update_typed_values(
+            [{"range": "A1", "values": [["not a formula"]]}],
+            formula_ranges={"A1"},
+        )
+
+    assert raw.spreadsheet_batch_update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_skips_empty_typed_request() -> None:
+    raw = RawWorksheet()
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.batch_update_typed_values([], formula_ranges=set())
+
+    assert raw.spreadsheet_batch_update_calls == []
+
+
+@pytest.mark.asyncio
+async def test_adapter_batches_grid_growth_before_typed_values() -> None:
+    raw = RawWorksheet(row_count=2, col_count=20)
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    await adapter.batch_update_typed_values(
+        [{"range": "A3:AJ3", "values": [[""] * 36]}],
+        formula_ranges=set(),
+        min_rows=3,
+        min_cols=36,
+    )
+
+    requests = raw.spreadsheet_batch_update_calls[0]["requests"]
+    assert [next(iter(request)) for request in requests] == [
+        "appendDimension",
+        "appendDimension",
+        "updateCells",
+    ]
+    assert requests[0]["appendDimension"] == {
+        "sheetId": 1,
+        "dimension": "ROWS",
+        "length": 1,
+    }
+    assert requests[1]["appendDimension"] == {
+        "sheetId": 1,
+        "dimension": "COLUMNS",
+        "length": 16,
+    }
 
 
 @pytest.mark.asyncio
@@ -486,26 +1025,6 @@ async def test_adapter_batch_updates_values_and_draft_formats_atomically() -> No
 
 
 @pytest.mark.asyncio
-async def test_adapter_ensures_only_missing_grid_capacity() -> None:
-    raw = RawWorksheet(row_count=2, col_count=20)
-    adapter = AsyncioGspreadWorksheet(raw)
-
-    await adapter.ensure_size(min_rows=3, min_cols=36)
-
-    assert raw.resize_calls == [{"rows": 3, "cols": 36}]
-
-
-@pytest.mark.asyncio
-async def test_adapter_does_not_resize_sufficient_grid() -> None:
-    raw = RawWorksheet(row_count=100, col_count=40)
-    adapter = AsyncioGspreadWorksheet(raw)
-
-    await adapter.ensure_size(min_rows=3, min_cols=36)
-
-    assert raw.resize_calls == []
-
-
-@pytest.mark.asyncio
 async def test_adapter_deletes_one_physical_row() -> None:
     raw = RawWorksheet()
     adapter = AsyncioGspreadWorksheet(raw)
@@ -576,3 +1095,43 @@ async def test_get_or_create_worksheets_returns_title_keyed_adapters() -> None:
     assert worksheets["Created"].title == "Created"
     assert spreadsheet.added_worksheets == [{"title": "Created", "rows": 12, "cols": 8}]
     assert all(isinstance(ws, AsyncioGspreadWorksheet) for ws in worksheets.values())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_title", "expected_created_title"),
+    [("First", None), ("Second", "First")],
+)
+async def test_get_or_create_worksheets_tracks_only_completed_creations(
+    failure_title: str,
+    expected_created_title: str | None,
+) -> None:
+    class FailingCreationSpreadsheet(RawSpreadsheet):
+        async def add_worksheet(
+            self,
+            title: str,
+            *,
+            rows: int,
+            cols: int,
+        ) -> RawWorksheet:
+            if title == failure_title:
+                raise GoogleSheetsError(
+                    GoogleSheetsErrorKind.TRANSIENT,
+                    "private create failure",
+                )
+            return await super().add_worksheet(title, rows=rows, cols=cols)
+
+    spreadsheet = FailingCreationSpreadsheet()
+    sheet = FakeGoogleSheet(spreadsheet)
+    status = google_sheets_module.WorksheetCreationStatus()
+
+    with pytest.raises(GoogleSheetsError):
+        await sheet.get_or_create_worksheets(
+            ["First", "Second"],
+            creation_status=status,
+        )
+
+    assert status.created is (expected_created_title is not None)
+    assert [item["title"] for item in spreadsheet.added_worksheets] == (
+        [expected_created_title] if expected_created_title is not None else []
+    )

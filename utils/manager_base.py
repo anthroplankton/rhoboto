@@ -2,15 +2,51 @@ from __future__ import annotations
 
 import logging
 from abc import ABC
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from models.base.sheet_config_base import SheetConfigBase
-from utils.google_sheets import GoogleSheet
-from utils.google_sheets_urls import normalize_google_sheet_url
+from utils.google_sheets import GoogleSheet, WorksheetCreationStatus
+from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.google_sheets_urls import extract_google_sheet_id, normalize_google_sheet_url
+from utils.key_async_lock import KeyAsyncLock
+from utils.storage_errors import partial_success_storage_error
 from utils.structs_base import GoogleSheetsMetadata, WorksheetMetadata
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Hashable, Mapping
+
     from models.feature_channel import FeatureChannel
+
+
+SPREADSHEET_TRANSACTION_LOCK = KeyAsyncLock()
+
+
+def spreadsheet_transaction_key(sheet_url: str) -> str:
+    """Return a safe, classified spreadsheet transaction key."""
+    try:
+        return extract_google_sheet_id(sheet_url)
+    except ValueError as exc:
+        raise GoogleSheetsError(
+            GoogleSheetsErrorKind.INVALID_URL,
+            "Check the Google Sheet link and save the settings again.",
+        ) from exc
+
+
+@asynccontextmanager
+async def spreadsheet_transaction(
+    feature_channel_lock: KeyAsyncLock,
+    *,
+    channel_id: Hashable,
+    sheet_url: str,
+) -> AsyncIterator[None]:
+    """Lock a Sheet transaction in channel-first, spreadsheet-second order."""
+    spreadsheet_id = spreadsheet_transaction_key(sheet_url)
+    async with (
+        feature_channel_lock(channel_id),
+        SPREADSHEET_TRANSACTION_LOCK(spreadsheet_id),
+    ):
+        yield
 
 
 class SheetConfigNotFoundError(Exception):
@@ -112,15 +148,29 @@ class ManagerBase[
         )
 
     async def create_or_get_worksheets(
-        self, worksheet_titles: list[str]
+        self,
+        worksheet_titles: list[str],
+        *,
+        creation_status: WorksheetCreationStatus | None = None,
     ) -> TGoogleSheetsMetadata:
         sheet = await self.get_google_sheet()
-        worksheets = await sheet.get_or_create_worksheets(worksheet_titles)
+        if creation_status is None:
+            worksheets = await sheet.get_or_create_worksheets(worksheet_titles)
+        else:
+            worksheets = await sheet.get_or_create_worksheets(
+                worksheet_titles,
+                creation_status=creation_status,
+            )
         return self.GoogleSheetsMetadataType.from_title_mapping(
             sheet.sheet_url, dict(worksheets)
         )
 
-    async def upsert_sheet_config(self, metadata: TGoogleSheetsMetadata) -> None:
+    async def upsert_sheet_config(
+        self,
+        metadata: TGoogleSheetsMetadata,
+        *,
+        extra_defaults: Mapping[str, object] | None = None,
+    ) -> None:
         defaults: dict = {
             "sheet_url": metadata.sheet_url,
         }
@@ -129,6 +179,7 @@ class ManagerBase[
                 defaults.setdefault(ws.db_field, []).append(ws.id)
             else:
                 defaults[ws.db_field] = ws.id
+        defaults.update(extra_defaults or {})
 
         self._sheet_config, _ = await self.SheetConfigType.update_or_create(
             feature_channel=self.feature_channel, defaults=defaults
@@ -158,13 +209,22 @@ class ManagerBase[
         self,
         metadata: TGoogleSheetsMetadata,
         counts: dict[type[WorksheetMetadata], int] | None = None,
+        *,
+        creation_status: WorksheetCreationStatus | None = None,
     ) -> TGoogleSheetsMetadata:
+        counts = counts or {}
+        if all(ws.worksheet is not None for ws in metadata) and all(
+            sum(type(ws) is worksheet_type for ws in metadata) >= count
+            for worksheet_type, count in counts.items()
+        ):
+            return metadata
         ensured_metadata = self.GoogleSheetsMetadataType.assign_missing_default_titles(
             metadata, counts
         )
 
         updated_metadata = await self.create_or_get_worksheets(
-            [ws.title for ws in ensured_metadata if ws.title is not None]
+            [ws.title for ws in ensured_metadata if ws.title is not None],
+            creation_status=creation_status,
         )
 
         return ensured_metadata.extended_by_title(updated_metadata)
@@ -174,6 +234,21 @@ class ManagerBase[
         metadata: TGoogleSheetsMetadata,
         counts: dict[type[WorksheetMetadata], int] | None = None,
     ) -> TGoogleSheetsMetadata:
-        ensured_metadata = await self.ensure_worksheets(metadata, counts)
-        await self.upsert_sheet_config(ensured_metadata)
+        creation_status = WorksheetCreationStatus()
+        original_ids = [worksheet.id for worksheet in metadata]
+        try:
+            ensured_metadata = await self.ensure_worksheets(
+                metadata,
+                counts,
+                creation_status=creation_status,
+            )
+            if [worksheet.id for worksheet in ensured_metadata] != original_ids:
+                await self.upsert_sheet_config(ensured_metadata)
+        except Exception as exc:
+            if not creation_status.created:
+                raise
+            error = partial_success_storage_error(exc)
+            if error is None:
+                raise
+            raise error from error.__cause__
         return ensured_metadata

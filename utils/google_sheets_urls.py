@@ -1,6 +1,20 @@
 from __future__ import annotations
 
+import re
 from urllib.parse import urlparse, urlunparse
+
+
+def extract_google_sheet_id(sheet_url: str) -> str:
+    """Return the spreadsheet ID from a canonical Google Sheets URL."""
+    parsed = urlparse(sheet_url)
+    match = re.fullmatch(
+        r"/spreadsheets/d/([A-Za-z0-9_-]+)(?:/.*)?",
+        parsed.path,
+    )
+    if parsed.scheme != "https" or parsed.netloc != "docs.google.com" or match is None:
+        msg = "Invalid Google Sheet URL."
+        raise ValueError(msg)
+    return match.group(1)
 
 
 def normalize_google_sheet_url(sheet_url: str) -> str:
