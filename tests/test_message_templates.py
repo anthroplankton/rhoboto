@@ -423,7 +423,7 @@ def test_auto_guide_runtime_templates_render(
     [
         (
             "ja",
-            "2日目｜シフト募集を締め切りました 🙇",  # noqa: RUF001
+            "2日目｜シフト登録の受付を自動で締め切りました 🙇",  # noqa: RUF001
             (
                 "ご提出くださった皆さま、ありがとうございました！\n"  # noqa: RUF001
                 "定刻となりましたので、シフト募集を締め切らせていただきます。\n"
@@ -435,7 +435,7 @@ def test_auto_guide_runtime_templates_render(
         ),
         (
             "zh_tw",
-            "第2天｜班表登記已截止 🙇",  # noqa: RUF001
+            "第2天｜班表登記已自動截止 🙇",  # noqa: RUF001
             (
                 "感謝大家登記班表！\n"  # noqa: RUF001
                 "募集截止時間已到，班表登記到此結束。\n"  # noqa: RUF001
@@ -447,7 +447,7 @@ def test_auto_guide_runtime_templates_render(
         ),
         (
             "en",
-            "Day 2 | Shift registration is now closed 🙇",
+            "Day 2 | Shift registration has been automatically closed 🙇",
             (
                 "Thank you, everyone, for your submissions!\n"
                 "The submission deadline has been reached, so shift "
@@ -531,15 +531,15 @@ def test_shift_deadline_close_templates_guard_optional_rows(
         "shift.deadline_close.description", locale, **values
     )
     expected_title = {
-        "ja": "2日目｜シフト募集を締め切りました 🙇",  # noqa: RUF001
-        "zh_tw": "第2天｜班表登記已截止 🙇",  # noqa: RUF001
-        "en": "Day 2 | Shift registration is now closed 🙇",
+        "ja": "2日目｜シフト登録の受付を自動で締め切りました 🙇",  # noqa: RUF001
+        "zh_tw": "第2天｜班表登記已自動截止 🙇",  # noqa: RUF001
+        "en": "Day 2 | Shift registration has been automatically closed 🙇",
     }[locale]
     if case_name == "dayless":
         expected_title = {
-            "ja": "シフト募集を締め切りました 🙇",
-            "zh_tw": "班表登記已截止 🙇",
-            "en": "Shift registration is now closed 🙇",
+            "ja": "シフト登録の受付を自動で締め切りました 🙇",
+            "zh_tw": "班表登記已自動截止 🙇",
+            "en": "Shift registration has been automatically closed 🙇",
         }[locale]
     assert title.rstrip("\n") == expected_title
     draft_label = {

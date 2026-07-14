@@ -4881,9 +4881,9 @@ async def test_render_localized_embeds_preserves_language_order_and_footer(
     )
 
     assert [embed.title for embed in embeds] == [
-        "Day 2 | Shift registration is now closed 🙇\n",
-        "2日目｜シフト募集を締め切りました 🙇\n",
-        "第2天｜班表登記已截止 🙇\n",
+        "Day 2 | Shift registration has been automatically closed 🙇\n",
+        "2日目｜シフト登録の受付を自動で締め切りました 🙇\n",
+        "第2天｜班表登記已自動截止 🙇\n",
     ]
     assert all(embed.color.value == config.DEFAULT_EMBED_COLOR for embed in embeds)
     assert all(embed.footer.text for embed in embeds)
@@ -7274,9 +7274,9 @@ async def test_shift_deadline_close_sends_then_cleans_up_and_completes(
     assert len(channel.send_attempts) == 1
     assert channel.send_attempts[0]["nonce"] == 123
     assert [embed.title for embed in channel.send_attempts[0]["embeds"]] == [
-        "第2天｜班表登記已截止 🙇\n",
-        "2日目｜シフト募集を締め切りました 🙇\n",
-        "Day 2 | Shift registration is now closed 🙇\n",
+        "第2天｜班表登記已自動截止 🙇\n",
+        "2日目｜シフト登録の受付を自動で締め切りました 🙇\n",
+        "Day 2 | Shift registration has been automatically closed 🙇\n",
     ]
     assert channel.edit_names == ["〆shift"]
     assert cleanup_calls
