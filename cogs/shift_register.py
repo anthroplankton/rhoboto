@@ -45,18 +45,18 @@ from utils.reactions import add_reaction_if_possible, transition_processing_reac
 from utils.shift_final import (
     DEFAULT_EVENT_DAY_FORMAT,
     EventDayWriteStatus,
-    FinalGenerationRequest,
     FinalScheduleConflictError,
     FinalScheduleInputError,
     FinalScheduleValidationError,
     FinalScheduleValidationKind,
-    build_final_generation_request,
+    ScheduleUpdateRequest,
+    build_schedule_update_request,
 )
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     AutoCloseDeadlineNotFutureError,
-    FinalGenerationResult,
     FinalScheduleReconfirmationRequired,
+    ScheduleUpdateResult,
     ShiftRegisterManager,
     ShiftTimelineScheduleChange,
     TeamSourceStatus,
@@ -254,7 +254,7 @@ def _format_generate_draft_confirmation(
     )
 
 
-def _event_day_status_message(request: FinalGenerationRequest) -> str | None:
+def _event_day_status_message(request: ScheduleUpdateRequest) -> str | None:
     messages = {
         EventDayWriteStatus.OMITTED: "活動日期錨點未填，本次未寫入",
         EventDayWriteStatus.FORMAT_IGNORED: "活動日期格式已忽略（未提供錨點）",
@@ -266,11 +266,11 @@ def _event_day_status_message(request: FinalGenerationRequest) -> str | None:
     return messages.get(request.event_day.status)
 
 
-def _format_generate_final_confirmation(
+def _format_update_schedule_from_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
     draft_sheet_url: str,
     final_sheet_url: str,
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
 ) -> str:
     event_day = request.event_day
     event_day_line = (
@@ -302,7 +302,7 @@ def _format_generate_final_confirmation(
 
 
 def _format_final_report(
-    result: FinalGenerationResult,
+    result: ScheduleUpdateResult,
     final_sheet_url: str,
     recruitment_ranges: RecruitmentTimeRanges,
 ) -> str:
@@ -403,7 +403,7 @@ def _format_final_conflict_report(error: FinalScheduleConflictError) -> str:
 
 
 def _format_final_partial_success(
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
     final_sheet_url: str,
 ) -> str:
     event_day = request.event_day
@@ -1202,10 +1202,8 @@ class ShiftRegister(
         await self.send_guide_message(interaction)
 
     @app_commands.command(
-        name="generate_final",
-        description=(
-            "Generate the final shift schedule from the confirmed Shift Draft."
-        ),
+        name="update_schedule_from_draft",
+        description=("Update the current shift schedule from the Shift Draft."),
     )
     @app_commands.describe(
         final_schedule_anchor_cell=(
@@ -1222,7 +1220,7 @@ class ShiftRegister(
             feature_display_name,
         )
     )
-    async def generate_final(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def update_schedule_from_draft(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         interaction: Interaction,
         final_schedule_anchor_cell: str | None = None,
@@ -1233,9 +1231,9 @@ class ShiftRegister(
 
         source = require_guild_channel_source(
             interaction,
-            action="generate final shift schedule",
+            action="update schedule from Shift Draft",
         )
-        request: FinalGenerationRequest | None = None
+        request: ScheduleUpdateRequest | None = None
         final_sheet_url = ""
         try:
             feature_channel_context = await self._get_feature_channel_context(source)
@@ -1250,7 +1248,7 @@ class ShiftRegister(
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 feature_config.recruitment_time_ranges
             )
-            request = build_final_generation_request(
+            request = build_schedule_update_request(
                 recruitment_ranges=recruitment_ranges,
                 saved_anchor=feature_config.final_schedule_anchor_cell,
                 supplied_anchor=final_schedule_anchor_cell,
@@ -1266,7 +1264,7 @@ class ShiftRegister(
                 feature_config.sheet_url,
                 feature_config.final_schedule_worksheet_id,
             )
-            confirmation_content = _format_generate_final_confirmation(
+            confirmation_content = _format_update_schedule_from_draft_confirmation(
                 recruitment_ranges,
                 draft_sheet_url,
                 final_sheet_url,
@@ -1314,7 +1312,7 @@ class ShiftRegister(
                 fresh_ranges = RecruitmentTimeRanges.from_json(
                     fresh_config.recruitment_time_ranges
                 )
-                fresh_request = build_final_generation_request(
+                fresh_request = build_schedule_update_request(
                     recruitment_ranges=fresh_ranges,
                     saved_anchor=fresh_config.final_schedule_anchor_cell,
                     supplied_anchor=final_schedule_anchor_cell,
@@ -1340,7 +1338,7 @@ class ShiftRegister(
                     return
                 metadata = await context.manager.fetch_google_sheets_metadata()
                 context.manager.log_missing_worksheet_warnings(metadata)
-                result = await context.manager.generate_final(
+                result = await context.manager.update_schedule_from_draft(
                     metadata,
                     request=fresh_request,
                 )
@@ -1402,7 +1400,7 @@ class ShiftRegister(
                 interaction,
                 exc,
                 source=source,
-                operation="shift_register_generate_final",
+                operation="shift_register_update_schedule_from_draft",
             )
             return
         except Exception as exc:  # noqa: BLE001
@@ -1410,7 +1408,7 @@ class ShiftRegister(
                 interaction,
                 exc,
                 source=source,
-                operation="shift_register_generate_final",
+                operation="shift_register_update_schedule_from_draft",
             )
             return
 

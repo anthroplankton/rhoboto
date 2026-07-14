@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved design for `/shift_register generate_final`. This document defines the
+Approved design for `/shift_register update_schedule_from_draft`. This document defines the
 behavior and implementation contract. It does not authorize a database migration,
 Git history operation, or compatibility alias.
 
@@ -17,7 +17,7 @@ and ephemeral-reply patterns as `generate_draft`.
 
 This feature adds:
 
-- `/shift_register generate_final`;
+- `/shift_register update_schedule_from_draft`;
 - a strict optional override for the persisted Final table anchor;
 - optional activity-date output from the saved Shift Timeline event date;
 - deterministic Honso-column continuity optimization;
@@ -57,7 +57,7 @@ a generic UI/report framework.
 ## Command Surface
 
 ```text
-/shift_register generate_final
+/shift_register update_schedule_from_draft
     final_schedule_anchor_cell: optional string
     event_day_anchor_cell: optional string
     event_day_format: optional string, 1-512 characters
@@ -497,7 +497,7 @@ The implementation and documentation now:
 - replace the global Final ownership language in
   `docs/manual_integration_validation.md` with per-command ownership;
 - clarify that `generate_draft` excludes Final from its read plan while
-  `generate_final` reads Draft and still never reads Final values; and
+  `update_schedule_from_draft` reads Draft and still never reads Final values; and
 - mark Final Schedule generation complete in `docs/runtime_architecture_review.md`.
 
 The Timeline migration's historical instruction to leave Final unchanged, Team

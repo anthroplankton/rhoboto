@@ -15,9 +15,9 @@ from utils.shift_final import (
     FinalScheduleRow,
     FinalScheduleValidationError,
     FinalScheduleValidationKind,
-    build_final_generation_request,
+    build_schedule_update_request,
 )
-from utils.shift_register_manager import FinalGenerationResult
+from utils.shift_register_manager import ScheduleUpdateResult
 from utils.shift_register_structs import RecruitmentTimeRanges
 
 if TYPE_CHECKING:
@@ -42,8 +42,8 @@ def final_config() -> SimpleNamespace:
     )
 
 
-def final_result(config: SimpleNamespace) -> FinalGenerationResult:
-    request = build_final_generation_request(
+def final_result(config: SimpleNamespace) -> ScheduleUpdateResult:
+    request = build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json(
             config.recruitment_time_ranges
         ),
@@ -53,7 +53,7 @@ def final_result(config: SimpleNamespace) -> FinalGenerationResult:
         event_day_anchor="A1",
         event_day_format=None,
     )
-    return FinalGenerationResult(
+    return ScheduleUpdateResult(
         request=request,
         schedule=FinalSchedulePlan(
             rows=(
@@ -79,11 +79,14 @@ def final_result(config: SimpleNamespace) -> FinalGenerationResult:
     )
 
 
-def test_generate_final_event_day_format_has_safe_native_length_limit() -> None:
+def test_update_schedule_from_draft_has_safe_native_length_limit() -> None:
     parameters = {
         parameter.name: parameter
-        for parameter in ShiftRegister.generate_final.parameters
+        for parameter in ShiftRegister.update_schedule_from_draft.parameters
     }
+    assert ShiftRegister.update_schedule_from_draft.name == (
+        "update_schedule_from_draft"
+    )
     event_day_format = parameters["event_day_format"]
 
     assert event_day_format.required is False
@@ -110,7 +113,7 @@ def test_final_contract_error_is_actionable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_final_confirms_before_metadata_and_writes_report(
+async def test_update_schedule_from_draft_confirms_before_metadata_and_writes_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = final_config()
@@ -129,12 +132,12 @@ async def test_generate_final_confirms_before_metadata_and_writes_report(
         def log_missing_worksheet_warnings(self, _metadata: object) -> None:
             events.append("warnings")
 
-        async def generate_final(
+        async def update_schedule_from_draft(
             self,
             _metadata: object,
             *,
             request: object,
-        ) -> FinalGenerationResult:
+        ) -> ScheduleUpdateResult:
             events.append("write")
             assert request == result.request
             return result
@@ -184,7 +187,7 @@ async def test_generate_final_confirms_before_metadata_and_writes_report(
     subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
-    await ShiftRegister.generate_final.callback(
+    await ShiftRegister.update_schedule_from_draft.callback(
         subject,
         interaction,
         None,
@@ -204,7 +207,7 @@ async def test_generate_final_confirms_before_metadata_and_writes_report(
 
 
 @pytest.mark.asyncio
-async def test_generate_final_invalid_main_anchor_does_not_create_view(
+async def test_update_schedule_from_draft_invalid_main_anchor_does_not_create_view(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = final_config()
@@ -233,7 +236,7 @@ async def test_generate_final_invalid_main_anchor_does_not_create_view(
     subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
-    await ShiftRegister.generate_final.callback(
+    await ShiftRegister.update_schedule_from_draft.callback(
         subject,
         interaction,
         "not-a-cell",

@@ -10,9 +10,9 @@ import pytest
 
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_final import (
-    FinalGenerationRequest,
     FinalScheduleValidationError,
-    build_final_generation_request,
+    ScheduleUpdateRequest,
+    build_schedule_update_request,
 )
 from utils.shift_register_manager import (
     FinalScheduleReconfirmationRequired,
@@ -99,8 +99,8 @@ class FinalValueSheet:
             raise self.write_error
 
 
-def make_request() -> FinalGenerationRequest:
-    return build_final_generation_request(
+def make_request() -> ScheduleUpdateRequest:
+    return build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
         saved_anchor="B2",
         supplied_anchor=None,
@@ -110,8 +110,8 @@ def make_request() -> FinalGenerationRequest:
     )
 
 
-def make_request_with_anchor(supplied_anchor: str | None) -> FinalGenerationRequest:
-    return build_final_generation_request(
+def make_request_with_anchor(supplied_anchor: str | None) -> ScheduleUpdateRequest:
+    return build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
         saved_anchor="B2",
         supplied_anchor=supplied_anchor,
@@ -127,8 +127,8 @@ def make_event_request(
     supplied_anchor: str | None = None,
     event_day_anchor: str | None = "A1",
     event_day_format: str | None = None,
-) -> FinalGenerationRequest:
-    return build_final_generation_request(
+) -> ScheduleUpdateRequest:
+    return build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json(
             [{"start": 4, "end": 5}, {"start": 6, "end": 7}]
         ),
@@ -185,14 +185,17 @@ def make_manager(
 
 
 @pytest.mark.asyncio
-async def test_generate_final_reads_only_draft_and_writes_one_atomic_batch() -> None:
+async def test_update_from_draft_reads_only_draft_and_writes_one_batch() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(draft, final)
     metadata = make_metadata(draft, final)
     manager = make_manager(sheet, metadata)
 
-    result = await manager.generate_final(metadata, request=make_request())
+    result = await manager.update_schedule_from_draft(
+        metadata,
+        request=make_request(),
+    )
 
     assert result.schedule.values == [
         ["Runner", "=MANUAL()", "A", "", "", ""],
@@ -205,7 +208,7 @@ async def test_generate_final_reads_only_draft_and_writes_one_atomic_batch() -> 
 
 
 @pytest.mark.asyncio
-async def test_generate_final_formats_only_roles_and_grows_for_date() -> None:
+async def test_update_from_draft_formats_roles_and_grows_for_date() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule", row_count=1, col_count=1)
     sheet = FinalValueSheet(draft, final, draft_grid=draft_grid_for_event())
@@ -213,7 +216,7 @@ async def test_generate_final_formats_only_roles_and_grows_for_date() -> None:
     manager = make_manager(sheet, metadata)
 
     request = make_event_request()
-    result = await manager.generate_final(metadata, request=request)
+    result = await manager.update_schedule_from_draft(metadata, request=request)
 
     typed_call = final.typed_calls[0]
     assert typed_call["data"] == [
@@ -234,7 +237,7 @@ async def test_generate_final_formats_only_roles_and_grows_for_date() -> None:
 
 
 @pytest.mark.asyncio
-async def test_generate_final_validation_failure_does_not_write_or_save() -> None:
+async def test_update_from_draft_validation_failure_does_not_write_or_save() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(
@@ -247,7 +250,7 @@ async def test_generate_final_validation_failure_does_not_write_or_save() -> Non
     manager = make_manager(sheet, metadata, config=config)
 
     with pytest.raises(FinalScheduleValidationError):
-        await manager.generate_final(
+        await manager.update_schedule_from_draft(
             metadata,
             request=make_event_request(supplied_anchor="C3"),
         )
@@ -258,7 +261,7 @@ async def test_generate_final_validation_failure_does_not_write_or_save() -> Non
 
 
 @pytest.mark.asyncio
-async def test_generate_final_repairs_and_requires_reconfirmation_before_read() -> None:
+async def test_update_from_draft_repairs_and_requires_reconfirmation() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(draft, final)
@@ -269,14 +272,14 @@ async def test_generate_final_repairs_and_requires_reconfirmation_before_read() 
     )
 
     with pytest.raises(FinalScheduleReconfirmationRequired):
-        await manager.generate_final(metadata, request=make_request())
+        await manager.update_schedule_from_draft(metadata, request=make_request())
 
     assert sheet.batch_reads == []
     assert sheet.batch_updates == []
 
 
 @pytest.mark.asyncio
-async def test_generate_final_changed_anchor_persists_only_after_sheet_batch() -> None:
+async def test_update_from_draft_anchor_saves_after_sheet_batch() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(draft, final, draft_grid=draft_grid_for_event())
@@ -284,7 +287,7 @@ async def test_generate_final_changed_anchor_persists_only_after_sheet_batch() -
     config = SimpleNamespace(final_schedule_anchor_cell="B2", save=AsyncMock())
     manager = make_manager(sheet, metadata, config=config)
 
-    await manager.generate_final(
+    await manager.update_schedule_from_draft(
         metadata,
         request=make_event_request(
             supplied_anchor="C3",
@@ -299,7 +302,7 @@ async def test_generate_final_changed_anchor_persists_only_after_sheet_batch() -
 
 
 @pytest.mark.asyncio
-async def test_generate_final_sheet_failure_does_not_persist_anchor() -> None:
+async def test_update_from_draft_sheet_failure_does_not_save_anchor() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(
@@ -316,7 +319,7 @@ async def test_generate_final_sheet_failure_does_not_persist_anchor() -> None:
     manager = make_manager(sheet, metadata, config=config)
 
     with pytest.raises(GoogleSheetsError):
-        await manager.generate_final(
+        await manager.update_schedule_from_draft(
             metadata,
             request=make_event_request(
                 supplied_anchor="C3",
@@ -329,7 +332,7 @@ async def test_generate_final_sheet_failure_does_not_persist_anchor() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("supplied_anchor", [None, "B2"])
-async def test_generate_final_omitted_or_unchanged_anchor_skips_db_save(
+async def test_update_schedule_from_draft_omitted_or_unchanged_anchor_skips_db_save(
     supplied_anchor: str | None,
 ) -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
@@ -339,7 +342,7 @@ async def test_generate_final_omitted_or_unchanged_anchor_skips_db_save(
     config = SimpleNamespace(final_schedule_anchor_cell="B2", save=AsyncMock())
     manager = make_manager(sheet, metadata, config=config)
 
-    await manager.generate_final(
+    await manager.update_schedule_from_draft(
         metadata,
         request=make_request_with_anchor(supplied_anchor),
     )
@@ -349,7 +352,7 @@ async def test_generate_final_omitted_or_unchanged_anchor_skips_db_save(
 
 
 @pytest.mark.asyncio
-async def test_generate_final_anchor_save_failure_reports_partial_success() -> None:
+async def test_update_from_draft_anchor_save_failure_is_partial_success() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(draft, final)
@@ -366,7 +369,7 @@ async def test_generate_final_anchor_save_failure_reports_partial_success() -> N
     manager = make_manager(sheet, metadata, config=config)
 
     with pytest.raises(StorageError) as caught:
-        await manager.generate_final(
+        await manager.update_schedule_from_draft(
             metadata,
             request=make_request_with_anchor("C3"),
         )
@@ -377,9 +380,7 @@ async def test_generate_final_anchor_save_failure_reports_partial_success() -> N
 
 
 @pytest.mark.asyncio
-async def test_generate_final_missing_worksheet_without_repair_stops_before_read() -> (
-    None
-):
+async def test_update_from_draft_missing_worksheet_stops_before_read() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
     sheet = FinalValueSheet(draft, final)
@@ -394,7 +395,7 @@ async def test_generate_final_missing_worksheet_without_repair_stops_before_read
     manager = make_manager(sheet, metadata)
 
     with pytest.raises(StorageError) as caught:
-        await manager.generate_final(metadata, request=make_request())
+        await manager.update_schedule_from_draft(metadata, request=make_request())
 
     assert caught.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET
     assert sheet.batch_reads == []

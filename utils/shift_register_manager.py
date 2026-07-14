@@ -54,9 +54,9 @@ from utils.manager_base import (
 )
 from utils.shift_final import (
     EventDayWriteStatus,
-    FinalGenerationRequest,
     FinalScheduleInputError,
     FinalSchedulePlan,
+    ScheduleUpdateRequest,
     build_final_schedule,
 )
 from utils.shift_register_structs import (
@@ -208,8 +208,8 @@ class FinalScheduleReconfirmationRequired(Exception):  # noqa: N818
 
 
 @dataclass(frozen=True)
-class FinalGenerationResult:
-    request: FinalGenerationRequest
+class ScheduleUpdateResult:
+    request: ScheduleUpdateRequest
     schedule: FinalSchedulePlan
 
 
@@ -1704,12 +1704,12 @@ class ShiftRegisterManager(
             worksheet.title,
         )
 
-    async def generate_final(
+    async def update_schedule_from_draft(
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
-        request: FinalGenerationRequest,
-    ) -> FinalGenerationResult:
+        request: ScheduleUpdateRequest,
+    ) -> ScheduleUpdateResult:
         metadata, structure_changed = await self._ensure_current_worksheets(
             metadata,
             required_worksheets=(
@@ -1735,10 +1735,10 @@ class ShiftRegisterManager(
             schedule = build_final_schedule(grids[draft_worksheet.id], request)
             requests = _final_typed_requests(final_worksheet, request, schedule)
             await sheet.batch_update_grid((), worksheet_requests=requests)
-            await self._persist_generated_final_anchor(request.anchor_to_persist)
-        return FinalGenerationResult(request=request, schedule=schedule)
+            await self._persist_final_schedule_anchor(request.anchor_to_persist)
+        return ScheduleUpdateResult(request=request, schedule=schedule)
 
-    async def _persist_generated_final_anchor(self, anchor: str | None) -> None:
+    async def _persist_final_schedule_anchor(self, anchor: str | None) -> None:
         if anchor is None:
             return
         config = await self.get_sheet_config()
@@ -2637,7 +2637,7 @@ def _entry_rgb(color: str) -> dict[str, float]:
 
 def _final_typed_requests(
     worksheet: AsyncioGspreadWorksheet,
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
     schedule: FinalSchedulePlan,
 ) -> list[dict[str, object]]:
     data: list[dict[str, object]] = [
@@ -2665,7 +2665,7 @@ def _final_typed_requests(
 
 
 def _final_background_updates(
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
     schedule: FinalSchedulePlan,
 ) -> list[tuple[str, str]]:
     role_range = _final_role_range(request)
@@ -2698,7 +2698,7 @@ def _final_background_updates(
 
 
 def _final_foreground_updates(
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
     schedule: FinalSchedulePlan,
 ) -> list[tuple[str, dict[str, object], str]]:
     role_range = _final_role_range(request)
@@ -2732,14 +2732,14 @@ def _final_text_color_update(
     )
 
 
-def _final_role_range(request: FinalGenerationRequest) -> str:
+def _final_role_range(request: ScheduleUpdateRequest) -> str:
     return (
         f"{column_letter(request.main_anchor.column + 1)}{request.main_anchor.row}:"
         f"{column_letter(request.main_range.end.column)}{request.main_range.end.row}"
     )
 
 
-def _final_required_rows(request: FinalGenerationRequest) -> int:
+def _final_required_rows(request: ScheduleUpdateRequest) -> int:
     rows = request.main_range.end.row
     if request.event_day.status is EventDayWriteStatus.READY:
         anchor = request.event_day.anchor
@@ -2748,7 +2748,7 @@ def _final_required_rows(request: FinalGenerationRequest) -> int:
     return rows
 
 
-def _final_required_columns(request: FinalGenerationRequest) -> int:
+def _final_required_columns(request: ScheduleUpdateRequest) -> int:
     columns = request.main_range.end.column
     if request.event_day.status is EventDayWriteStatus.READY:
         anchor = request.event_day.anchor

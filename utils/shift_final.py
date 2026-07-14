@@ -133,7 +133,7 @@ class EventDayWritePlan:
 
 
 @dataclass(frozen=True)
-class FinalGenerationRequest:
+class ScheduleUpdateRequest:
     expected_hours: tuple[int, ...]
     recruitment_slots: frozenset[int]
     source_range: str
@@ -239,7 +239,7 @@ def format_event_day(value: date, pattern: str) -> str:
     return "".join(rendered)
 
 
-def build_final_generation_request(  # noqa: PLR0913
+def build_schedule_update_request(  # noqa: PLR0913
     *,
     recruitment_ranges: RecruitmentTimeRanges,
     saved_anchor: str,
@@ -248,7 +248,7 @@ def build_final_generation_request(  # noqa: PLR0913
     event_day_anchor: str | None,
     event_day_format: str | None,
     # The six inputs are the command's DB-backed and per-run contract.
-) -> FinalGenerationRequest:
+) -> ScheduleUpdateRequest:
     configured = recruitment_ranges.ranges.ranges
     if not configured:
         raise FinalScheduleInputError
@@ -268,7 +268,7 @@ def build_final_generation_request(  # noqa: PLR0913
         event_day_anchor=event_day_anchor,
         event_day_format=event_day_format,
     )
-    return FinalGenerationRequest(
+    return ScheduleUpdateRequest(
         expected_hours=expected_hours,
         recruitment_slots=frozenset(recruitment_ranges.ranges.slots),
         source_range=f"B2:G{len(expected_hours) + 1}",
@@ -285,7 +285,7 @@ def build_final_generation_request(  # noqa: PLR0913
 
 def build_final_schedule(
     grid: Sequence[Sequence[object]],
-    request: FinalGenerationRequest,
+    request: ScheduleUpdateRequest,
 ) -> FinalSchedulePlan:
     if not grid:
         raise FinalScheduleValidationError(

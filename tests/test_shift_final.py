@@ -9,14 +9,14 @@ from utils.shift_final import (
     DEFAULT_EVENT_DAY_FORMAT,
     A1Cell,
     EventDayWriteStatus,
-    FinalGenerationRequest,
     FinalRoleConflict,
     FinalScheduleConflictError,
     FinalScheduleInputError,
     FinalScheduleValidationError,
     FinalScheduleValidationKind,
-    build_final_generation_request,
+    ScheduleUpdateRequest,
     build_final_schedule,
+    build_schedule_update_request,
     format_event_day,
     parse_a1_cell,
 )
@@ -51,7 +51,7 @@ def test_parse_a1_cell_rejects_non_cell_or_out_of_contract_values(raw: str) -> N
 
 
 def test_final_request_uses_db_axis_and_exact_rectangles() -> None:
-    request = build_final_generation_request(
+    request = build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json(
             [{"start": 4, "end": 12}, {"start": 20, "end": 28}]
         ),
@@ -119,8 +119,8 @@ def request_for_hours(
     end: int,
     *,
     recruitment_slots: set[int] | None = None,
-) -> FinalGenerationRequest:
-    request = build_final_generation_request(
+) -> ScheduleUpdateRequest:
+    request = build_schedule_update_request(
         recruitment_ranges=RecruitmentTimeRanges.from_json(
             [{"start": start, "end": end}]
         ),
