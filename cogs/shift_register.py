@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 # ruff: noqa: RUF001
+import asyncio
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, cast, override
 
@@ -14,12 +16,27 @@ from cogs.base.feature_channel_base import (
     FeatureChannelBase,
     _send_public_announcement_followups,
 )
+from cogs.base.feature_channel_context import (
+    ConfiguredFeatureChannelContext,
+    FeatureChannelContext,
+)
+from components.ui_settings_flow import prepare_replacement_settings_view
 from components.ui_shift_register import (
+    AUTO_CLOSE_INVALIDATED_MESSAGE,
     SHIFT_REGISTER_DISPLAY_NAME,
     GenerateShiftScheduleConfirmView,
+    ShiftAutoCloseCallbacks,
+    ShiftDeadlineCloseView,
     ShiftRegisterView,
     build_shift_register_settings_panel,
     get_fresh_shift_register_config_or_respond,
+)
+from models.feature_channel import FeatureChannel
+from models.shift_register import ShiftRegisterConfig
+from models.shift_timeline_event_state import (
+    ShiftTimelineEventKind,
+    ShiftTimelineEventState,
+    ShiftTimelineEventStatus,
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.key_async_lock import KeyAsyncLock
@@ -37,9 +54,11 @@ from utils.shift_final import (
 )
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
+    AutoCloseDeadlineNotFutureError,
     FinalGenerationResult,
     FinalScheduleReconfirmationRequired,
     ShiftRegisterManager,
+    ShiftTimelineScheduleChange,
     TeamSourceStatus,
     fresh_shift_channel_transaction,
 )
@@ -58,6 +77,7 @@ from utils.shift_scheduler import (
     STANDBY_SUPPORTER_SLOT,
     hour_label,
 )
+from utils.shift_timeline_scheduler import ShiftTimelineScheduler
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 
@@ -68,9 +88,8 @@ if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
-    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
-    from models.shift_register import ShiftRegisterConfig
+    from models.base.sheet_config_base import SheetConfigBase
     from utils.shift_scheduler import DraftSchedule
 
 
@@ -443,6 +462,247 @@ class ShiftRegister(
     ManagerType = ShiftRegisterManager
     ParserType = ShiftParser
 
+    def __init__(self, bot: Rhoboto) -> None:
+        super().__init__(bot)
+        self._timeline_scheduler = ShiftTimelineScheduler(
+            self._handle_timeline_event,
+            logger=self.logger,
+        )
+        self._timeline_bootstrap_task: asyncio.Task[None] | None = None
+        self._pending_message_ids: dict[
+            tuple[int, ShiftTimelineEventKind], tuple[int, int]
+        ] = {}
+
+    async def cog_load(self) -> None:
+        """Start deadline reconciliation after Discord reports readiness."""
+        if (
+            self._timeline_bootstrap_task is not None
+            and not self._timeline_bootstrap_task.done()
+        ):
+            return
+        self._timeline_bootstrap_task = asyncio.create_task(
+            self._bootstrap_timeline_scheduler(),
+            name="shift-timeline-bootstrap",
+        )
+
+    async def cog_unload(self) -> None:
+        """Stop deadline work before the cog is removed from the bot."""
+        bootstrap = self._timeline_bootstrap_task
+        self._timeline_bootstrap_task = None
+        if bootstrap is not None:
+            bootstrap.cancel()
+            await asyncio.gather(bootstrap, return_exceptions=True)
+        await self._timeline_scheduler.close()
+        self._pending_message_ids.clear()
+
+    async def _bootstrap_timeline_scheduler(self) -> None:
+        await self.bot.wait_until_ready()
+        configs = await ShiftRegisterConfig.all().select_related("feature_channel")
+        for config_item in configs:
+            feature_channel = config_item.feature_channel
+            manager = self.ManagerType(
+                feature_channel,
+                config.GOOGLE_SERVICE_ACCOUNT_PATH,
+            )
+            try:
+                async with self.sheet_write_lock(feature_channel.channel_id):
+                    result = await manager.reconcile_deadline_automation(
+                        now=datetime.now(UTC)
+                    )
+                    change = result.schedule_change
+                    if change is None and config_item.deadline_automation_enabled:
+                        state = await ShiftTimelineEventState.get_or_none(
+                            shift_register_id=config_item.id,
+                            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+                        )
+                        if (
+                            state is not None
+                            and state.status is not ShiftTimelineEventStatus.COMPLETED
+                        ):
+                            change = ShiftTimelineScheduleChange(
+                                shift_register_id=config_item.id,
+                                event_kind=state.event_kind,
+                                scheduled_at=state.scheduled_at,
+                                delivery_nonce=state.delivery_nonce,
+                            )
+                    if change is not None:
+                        self._apply_timeline_schedule_change(change)
+                if result.auto_close_disabled:
+                    self.logger.warning(
+                        "%s Guild=%s Channel=%s",
+                        AUTO_CLOSE_INVALIDATED_MESSAGE,
+                        feature_channel.guild_id,
+                        feature_channel.channel_id,
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception(
+                    "Failed to reconcile Shift timeline deadline. Guild=%s Channel=%s",
+                    feature_channel.guild_id,
+                    feature_channel.channel_id,
+                )
+
+    def _apply_timeline_schedule_change(
+        self,
+        change: ShiftTimelineScheduleChange,
+    ) -> None:
+        key = (change.shift_register_id, change.event_kind)
+        self._pending_message_ids.pop(key, None)
+        if change.scheduled_at is None or change.delivery_nonce is None:
+            self._timeline_scheduler.cancel(*key)
+            return
+        self._timeline_scheduler.schedule(
+            shift_register_id=change.shift_register_id,
+            event_kind=change.event_kind,
+            scheduled_at=change.scheduled_at,
+            delivery_nonce=change.delivery_nonce,
+        )
+
+    def _shift_auto_close_callbacks(self) -> ShiftAutoCloseCallbacks:
+        return ShiftAutoCloseCallbacks(
+            toggle=self._toggle_shift_auto_close,
+            schedule_changed=self._apply_timeline_schedule_change,
+        )
+
+    def _cancel_submission_deadline(self, shift_register_id: int | None) -> None:
+        if shift_register_id is None:
+            return
+        key = (
+            shift_register_id,
+            ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        )
+        self._pending_message_ids.pop(key, None)
+        self._timeline_scheduler.cancel(*key)
+
+    @override
+    async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
+        feature_channel, _ = await FeatureChannel.get_or_create(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            feature_name=self.feature_name,
+        )
+        manager = self.ManagerType(
+            feature_channel,
+            config.GOOGLE_SERVICE_ACCOUNT_PATH,
+        )
+        async with self.sheet_write_lock(channel_id):
+            shift_register_id = await manager.set_manual_feature_enabled(enabled=True)
+        self._cancel_submission_deadline(shift_register_id)
+        self.logger.info(
+            "Enabled Feature: `%s` in Guild: `%s` Channel: `%s`",
+            self.feature_name,
+            guild_id,
+            channel_id,
+        )
+
+    @override
+    async def _disable_channel(self, guild_id: int, channel_id: int) -> bool:
+        feature_channel = await FeatureChannel.get_or_none(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            feature_name=self.feature_name,
+        )
+        if feature_channel is None:
+            self.logger.info(
+                "No record to disable for Feature: `%s` in Guild: `%s` Channel: `%s`",
+                self.feature_name,
+                guild_id,
+                channel_id,
+            )
+            return False
+        manager = self.ManagerType(
+            feature_channel,
+            config.GOOGLE_SERVICE_ACCOUNT_PATH,
+        )
+        async with self.sheet_write_lock(channel_id):
+            shift_register_id = await manager.set_manual_feature_enabled(enabled=False)
+        self._cancel_submission_deadline(shift_register_id)
+        self.logger.info(
+            "Disabled Feature: `%s` in Guild: `%s` Channel: `%s`",
+            self.feature_name,
+            guild_id,
+            channel_id,
+        )
+        return True
+
+    @override
+    async def _clear_feature_settings(self, guild_id: int, channel_id: int) -> None:
+        feature_channel = await FeatureChannel.get_or_none(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            feature_name=self.feature_name,
+        )
+        if feature_channel is None:
+            self.logger.info(
+                "No record to clear for Feature: `%s` in Guild: `%s` Channel: `%s`",
+                self.feature_name,
+                guild_id,
+                channel_id,
+            )
+            return
+        manager = self.ManagerType(
+            feature_channel,
+            config.GOOGLE_SERVICE_ACCOUNT_PATH,
+        )
+        async with self.sheet_write_lock(channel_id):
+            shift_register_id = await manager.clear_feature_settings()
+        self._cancel_submission_deadline(shift_register_id)
+        self.logger.info(
+            "Cleared feature settings for Feature: `%s` in Guild: `%s` Channel: `%s`",
+            self.feature_name,
+            guild_id,
+            channel_id,
+        )
+
+    @override
+    async def _refresh_auto_guide_if_enabled(
+        self,
+        feature_channel_context: FeatureChannelContext[ShiftRegisterManager],
+        channel: object,
+        *,
+        feature_config: SheetConfigBase | None = None,
+    ) -> bool:
+        feature_channel_id = getattr(
+            feature_channel_context.feature_channel,
+            "id",
+            None,
+        )
+        if feature_channel_id is None:
+            return await super()._refresh_auto_guide_if_enabled(
+                feature_channel_context,
+                channel,
+                feature_config=feature_config,
+            )
+
+        try:
+            fresh_feature_channel = await FeatureChannel.get_or_none(
+                id=feature_channel_id
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to refresh auto guide for Feature: `%s` in Guild: `%s` "
+                "Channel: `%s`",
+                self.feature_name,
+                feature_channel_context.guild_id,
+                feature_channel_context.channel_id,
+            )
+            return False
+        if fresh_feature_channel is None or not fresh_feature_channel.is_enabled:
+            return True
+
+        fresh_context = FeatureChannelContext(
+            guild_id=feature_channel_context.guild_id,
+            channel_id=feature_channel_context.channel_id,
+            feature_channel=fresh_feature_channel,
+            manager=feature_channel_context.manager,
+        )
+        return await super()._refresh_auto_guide_if_enabled(
+            fresh_context,
+            channel,
+            feature_config=feature_config,
+        )
+
     @override
     async def _guide_template_values(
         self,
@@ -511,6 +771,7 @@ class ShiftRegister(
             latest_guide_toggle_callback=self._toggle_shift_latest_guide,
             latest_guide_state_resolver=self._latest_guide_state_resolver(manager),
             latest_guide_refresh_callback=self._latest_guide_refresh_callback(manager),
+            auto_close_callbacks=self._shift_auto_close_callbacks(),
         )
 
     async def _toggle_shift_latest_guide(
@@ -533,6 +794,237 @@ class ShiftRegister(
             current_view=current_view,
             feature_config=shift_register,
         )
+
+    async def _toggle_shift_auto_close(
+        self,
+        interaction: Interaction,
+        *,
+        enabled: bool,
+        current_view: View,
+    ) -> None:
+        source = require_guild_channel_source(
+            interaction,
+            action="toggle Shift Register Auto Close",
+        )
+        manager = current_view.shift_register_manager
+        try:
+            async with fresh_shift_channel_transaction(
+                manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ) as shift_register:
+                schedule_change = await manager.set_deadline_automation_enabled(
+                    enabled=enabled,
+                    now=datetime.now(UTC),
+                )
+                shift_register.deadline_automation_enabled = enabled
+        except AutoCloseDeadlineNotFutureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_auto_close_toggle",
+            )
+            return
+
+        self._apply_timeline_schedule_change(schedule_change)
+        try:
+            panel = await self._build_settings_panel(
+                interaction,
+                manager,
+                shift_register,
+            )
+        except Exception as exc:  # noqa: BLE001
+            current_view.stop()
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_auto_close_refresh_panel",
+            )
+            return
+
+        replacement_view = prepare_replacement_settings_view(current_view, panel.view)
+        await interaction.edit_original_response(
+            content=None,
+            embed=panel.embed,
+            view=replacement_view,
+        )
+
+    async def _handle_timeline_event(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        shift_register_id: int,
+        event_kind: ShiftTimelineEventKind,
+        scheduled_at: datetime,
+        delivery_nonce: int,
+    ) -> None:
+        if event_kind is not ShiftTimelineEventKind.SUBMISSION_DEADLINE:
+            self.logger.warning(
+                "Ignoring unknown Shift timeline event kind %r for Shift Register %s.",
+                event_kind,
+                shift_register_id,
+            )
+            return
+
+        config_item = await (
+            ShiftRegisterConfig.filter(id=shift_register_id)
+            .select_related("feature_channel")
+            .first()
+        )
+        if config_item is None:
+            self.logger.info(
+                "Ignoring removed Shift timeline event for Shift Register %s.",
+                shift_register_id,
+            )
+            self._pending_message_ids.pop(
+                (shift_register_id, event_kind),
+                None,
+            )
+            return
+
+        feature_channel = config_item.feature_channel
+        manager = self.ManagerType(
+            feature_channel,
+            config.GOOGLE_SERVICE_ACCOUNT_PATH,
+        )
+        async with self.sheet_write_lock(feature_channel.channel_id):
+            fresh_config = await manager.get_fresh_sheet_config()
+            if fresh_config is None:
+                self._pending_message_ids.pop(
+                    (shift_register_id, event_kind),
+                    None,
+                )
+                return
+            execution = await manager.begin_submission_deadline_close(
+                expected_scheduled_at=scheduled_at,
+                expected_delivery_nonce=delivery_nonce,
+                now=datetime.now(UTC),
+            )
+
+        key = (shift_register_id, event_kind)
+        if execution is None:
+            self._pending_message_ids.pop(key, None)
+            return
+
+        message_id = execution.message_id
+        if execution.status is ShiftTimelineEventStatus.SCHEDULED:
+            cached = self._pending_message_ids.get(key)
+            if cached is not None and cached[0] == execution.delivery_nonce:
+                message_id = cached[1]
+            else:
+                channel = self.bot.get_channel(execution.channel_id)
+                if channel is None:
+                    error_message = "Shift channel is not available."
+                    raise RuntimeError(error_message)
+                recruitment_ranges = RecruitmentTimeRanges.from_json(
+                    fresh_config.recruitment_time_ranges
+                )
+                embeds = await self._render_localized_embeds(
+                    execution.guild_id,
+                    template_key="shift.deadline_close",
+                    values_for_language=lambda language: (
+                        build_shift_timeline_template_values(
+                            language,
+                            day_number=fresh_config.day_number,
+                            event_date=fresh_config.event_date,
+                            recruitment_time_range=(
+                                recruitment_ranges.announcement_display()
+                            ),
+                            submission_deadline_at=(
+                                fresh_config.submission_deadline_at
+                            ),
+                            draft_shift_proposal_at=(
+                                fresh_config.draft_shift_proposal_at
+                            ),
+                            final_shift_notice_at=fresh_config.final_shift_notice_at,
+                        )
+                    ),
+                    include_footer=True,
+                )
+                message = await channel.send(
+                    embeds=embeds,
+                    view=ShiftDeadlineCloseView(self._guide_sheet_url(fresh_config)),
+                    nonce=execution.delivery_nonce,
+                )
+                message_id = message.id
+                self._pending_message_ids[key] = (
+                    execution.delivery_nonce,
+                    message_id,
+                )
+
+            if message_id is None:
+                self._pending_message_ids.pop(key, None)
+                return
+            async with self.sheet_write_lock(feature_channel.channel_id):
+                marked = await manager.mark_submission_deadline_sent(
+                    event_state_id=execution.event_state_id,
+                    delivery_nonce=execution.delivery_nonce,
+                    message_id=message_id,
+                )
+            if not marked:
+                self._pending_message_ids.pop(key, None)
+                return
+            self._pending_message_ids.pop(key, None)
+        elif execution.status is ShiftTimelineEventStatus.SENT:
+            self._pending_message_ids.pop(key, None)
+        else:
+            self._pending_message_ids.pop(key, None)
+            return
+
+        guide_context = FeatureChannelContext(
+            guild_id=execution.guild_id,
+            channel_id=execution.channel_id,
+            feature_channel=feature_channel,
+            manager=manager,
+        )
+        try:
+            deleted = await self._disable_auto_guide_and_delete_message(guide_context)
+            if not deleted:
+                self.logger.warning(
+                    "Failed to clean up Latest Guide after Shift deadline close. "
+                    "Guild=%s Channel=%s",
+                    execution.guild_id,
+                    execution.channel_id,
+                )
+        except Exception:
+            self.logger.exception(
+                "Failed to clean up Latest Guide after Shift deadline close. "
+                "Guild=%s Channel=%s",
+                execution.guild_id,
+                execution.channel_id,
+            )
+
+        channel = self.bot.get_channel(execution.channel_id)
+        if channel is None:
+            self.logger.warning(
+                "Failed to rename Shift deadline channel because it was not "
+                "available. Guild=%s Channel=%s",
+                execution.guild_id,
+                execution.channel_id,
+            )
+        else:
+            try:
+                new_name = (
+                    channel.name
+                    if channel.name.startswith("〆")
+                    else f"〆{channel.name[:99]}"
+                )
+                if new_name != channel.name:
+                    await channel.edit(name=new_name)
+            except Exception:
+                self.logger.exception(
+                    "Failed to rename Shift deadline channel. Guild=%s Channel=%s",
+                    execution.guild_id,
+                    execution.channel_id,
+                )
+
+        async with self.sheet_write_lock(feature_channel.channel_id):
+            await manager.complete_submission_deadline(
+                event_state_id=execution.event_state_id,
+                delivery_nonce=execution.delivery_nonce,
+            )
 
     @override
     async def _process_configured_message_submission(
@@ -563,6 +1055,19 @@ class ShiftRegister(
             self.sheet_write_lock,
             channel_id=message.channel.id,
         ) as fresh_config:
+            fresh_feature_channel = await FeatureChannel.get_or_none(
+                id=manager.feature_channel.id
+            )
+            if fresh_feature_channel is None or not fresh_feature_channel.is_enabled:
+                self.logger.info(
+                    "Skipped stale Shift registration after feature closure. "
+                    "guild=%s channel=%s message=%s",
+                    message.guild.id,
+                    message.channel.id,
+                    message.id,
+                )
+                return None
+            manager.feature_channel = fresh_feature_channel
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 fresh_config.recruitment_time_ranges
             )
