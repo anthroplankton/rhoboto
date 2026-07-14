@@ -122,7 +122,35 @@ async def test_close_uses_configured_db_url(monkeypatch: pytest.MonkeyPatch) -> 
 
     await bot.close()
 
-    assert calls == ["sqlite://:memory:", "super.close"]
+    assert calls == ["super.close", "sqlite://:memory:"]
+
+
+@pytest.mark.asyncio
+async def test_close_closes_db_when_discord_shutdown_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    async def fail_bot_close(_self: commands.Bot) -> None:
+        calls.append("super.close")
+        message = "discord close failed"
+        raise RuntimeError(message)
+
+    async def fake_close_db(db_url: str) -> None:
+        calls.append(db_url)
+
+    bot = Rhoboto(
+        command_prefix="$",
+        db_url="sqlite://:memory:",
+        initial_cogs=[],
+    )
+    monkeypatch.setattr(commands.Bot, "close", fail_bot_close)
+    monkeypatch.setattr("bot.bot.close_db", fake_close_db)
+
+    with pytest.raises(RuntimeError, match="discord close failed"):
+        await bot.close()
+
+    assert calls == ["super.close", "sqlite://:memory:"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +206,6 @@ async def test_setup_hook_registers_persistent_views_after_loading_cogs(
         "register",
         "set_translator",
         "sync",
-        "close_db",
         "super.close",
+        "close_db",
     ]

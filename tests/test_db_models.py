@@ -8,6 +8,7 @@ import pytest
 from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError
 
+import utils.shift_register_manager as shift_register_manager_module
 from models.feature_channel import FeatureChannel
 from models.feature_channel_message_state import (
     FeatureChannelMessageKind,
@@ -18,6 +19,11 @@ from models.feature_channel_message_state import (
 )
 from models.guild_language_settings import GuildLanguageSettings
 from models.shift_register import ShiftRegisterConfig
+from models.shift_timeline_event_state import (
+    ShiftTimelineEventKind,
+    ShiftTimelineEventState,
+    ShiftTimelineEventStatus,
+)
 from models.team_register import TeamRegisterConfig
 from tests.test_manager_fakes import (
     FakeEntryWorksheet,
@@ -27,9 +33,21 @@ from tests.test_manager_fakes import (
 )
 from utils.db import close_db, get_model_modules, init_db
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
-from utils.shift_register_manager import ShiftRegisterManager
+from utils.shift_register_manager import (
+    AutoCloseDeadlineNotFutureError,
+    ShiftRegisterManager,
+)
 from utils.shift_register_structs import RecruitmentTimeRanges
 from utils.storage_errors import StorageError, StorageErrorKind
+
+
+async def _get_deadline_state(
+    shift_register: ShiftRegisterConfig,
+) -> ShiftTimelineEventState | None:
+    return await ShiftTimelineEventState.get_or_none(
+        shift_register=shift_register,
+        event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+    )
 
 
 @pytest.mark.asyncio
@@ -43,6 +61,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
             "FeatureChannelMessageState",
             "GuildLanguageSettings",
             "ShiftRegisterConfig",
+            "ShiftTimelineEventState",
             "TeamRegisterConfig",
         ]
 
@@ -50,6 +69,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         language_description = GuildLanguageSettings.describe(serializable=True)
         team_description = TeamRegisterConfig.describe(serializable=True)
         shift_description = ShiftRegisterConfig.describe(serializable=True)
+        event_description = ShiftTimelineEventState.describe(serializable=True)
 
         assert feature_description["table"] == "feature_channel"
         assert feature_description["pk_field"]["name"] == "id"
@@ -59,6 +79,12 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert language_description["pk_field"]["generated"] is True
         assert team_description["table"] == "team_register"
         assert shift_description["table"] == "shift_register"
+        assert event_description["table"] == "shift_timeline_event_state"
+        fields_by_name = {
+            field["name"]: field for field in event_description["data_fields"]
+        }
+        assert fields_by_name["event_kind"]["constraints"]["max_length"] == 32
+        assert fields_by_name["status"]["constraints"]["max_length"] == 16
 
         language_settings = GuildLanguageSettings(guild_id=1001)
         team_config = TeamRegisterConfig(
@@ -205,6 +231,47 @@ async def test_feature_channel_message_state_enum_unique_and_cascade() -> None:
 
         await feature_channel.delete()
         assert await FeatureChannelMessageState.all().count() == 0
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_event_state_unique_defaults_and_cascade() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="shift_register",
+        )
+        shift_register = await ShiftRegisterConfig.create(
+            feature_channel=feature_channel,
+            sheet_url="https://sheet.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        scheduled_at = dt.datetime(2026, 8, 14, 12, tzinfo=dt.UTC)
+        state = await ShiftTimelineEventState.create(
+            shift_register=shift_register,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=scheduled_at,
+            delivery_nonce=123456789,
+        )
+
+        assert state.status is ShiftTimelineEventStatus.SCHEDULED
+        assert state.message_id is None
+        with pytest.raises(IntegrityError):
+            await ShiftTimelineEventState.create(
+                shift_register=shift_register,
+                event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+                scheduled_at=scheduled_at,
+                delivery_nonce=987654321,
+            )
+
+        await shift_register.delete()
+        assert await ShiftTimelineEventState.all().count() == 0
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 
@@ -492,3 +559,423 @@ async def test_sqlite_init_cancellation_stops_keepalive(
         ] == []
     finally:
         await close_db(db_url)
+
+
+async def _create_deadline_manager(
+    *,
+    deadline: dt.datetime | None = None,
+) -> tuple[FeatureChannel, ShiftRegisterConfig, ShiftRegisterManager]:
+    feature_channel = await FeatureChannel.create(
+        guild_id=1001,
+        channel_id=2002,
+        feature_name="shift_register",
+    )
+    config = await ShiftRegisterConfig.create(
+        feature_channel=feature_channel,
+        sheet_url="https://shift.sheet.example",
+        entry_worksheet_id=1,
+        draft_worksheet_id=2,
+        final_schedule_worksheet_id=3,
+        submission_deadline_at=deadline,
+    )
+    return (
+        feature_channel,
+        config,
+        ShiftRegisterManager(feature_channel, "service.json"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_deadline_automation_enable_disable_and_nonce_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        deadline = now + dt.timedelta(days=1)
+        _channel, config, manager = await _create_deadline_manager(deadline=deadline)
+        monkeypatch.setattr(
+            shift_register_manager_module,
+            "_new_delivery_nonce",
+            lambda: 111,
+        )
+
+        change = await manager.set_deadline_automation_enabled(enabled=True, now=now)
+        await config.refresh_from_db()
+        state = await _get_deadline_state(config)
+        assert config.deadline_automation_enabled is True
+        assert state is not None
+        assert state.status is ShiftTimelineEventStatus.SCHEDULED
+        assert state.scheduled_at == deadline
+        assert state.delivery_nonce == 111
+        assert change.delivery_nonce == 111
+
+        monkeypatch.setattr(
+            shift_register_manager_module,
+            "_new_delivery_nonce",
+            lambda: 222,
+        )
+        change = await manager.set_deadline_automation_enabled(enabled=True, now=now)
+        await config.refresh_from_db()
+        state = await _get_deadline_state(config)
+        assert state is not None
+        assert state.delivery_nonce == 222
+        assert state.message_id is None
+        assert change.delivery_nonce == 222
+
+        change = await manager.set_deadline_automation_enabled(enabled=False, now=now)
+        await config.refresh_from_db()
+        assert config.deadline_automation_enabled is False
+        assert await _get_deadline_state(config) is None
+        assert change.scheduled_at is None
+        assert change.delivery_nonce is None
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_deadline_automation_rejects_nonfuture_enable_without_mutation() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        for deadline in (None, now, now - dt.timedelta(seconds=1)):
+            _channel, config, manager = await _create_deadline_manager(
+                deadline=deadline
+            )
+            with pytest.raises(AutoCloseDeadlineNotFutureError):
+                await manager.set_deadline_automation_enabled(enabled=True, now=now)
+            await config.refresh_from_db()
+            assert config.deadline_automation_enabled is False
+            assert await _get_deadline_state(config) is None
+            await config.delete()
+            await config.feature_channel.delete()
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_deadline_automation_timeline_reconciliation_and_invalidating_save() -> (
+    None
+):
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        first_deadline = now + dt.timedelta(days=1)
+        second_deadline = now + dt.timedelta(days=2)
+        _channel, config, manager = await _create_deadline_manager(
+            deadline=first_deadline
+        )
+        await manager.set_deadline_automation_enabled(enabled=True, now=now)
+        state = await _get_deadline_state(config)
+        assert state is not None
+        first_nonce = state.delivery_nonce
+
+        result = await manager.update_timeline(
+            day_number=2,
+            event_date=dt.date(2026, 8, 2),
+            submission_deadline_at=first_deadline,
+            draft_shift_proposal_at=now + dt.timedelta(days=3),
+            final_shift_notice_at=now + dt.timedelta(days=4),
+            now=now,
+        )
+        assert result.schedule_change is None
+        await config.refresh_from_db()
+        state = await _get_deadline_state(config)
+        assert state is not None
+        assert state.delivery_nonce == first_nonce
+
+        result = await manager.update_timeline(
+            day_number=3,
+            event_date=dt.date(2026, 8, 3),
+            submission_deadline_at=second_deadline,
+            draft_shift_proposal_at=None,
+            final_shift_notice_at=None,
+            now=now,
+        )
+        assert result.schedule_change is not None
+        assert result.schedule_change.scheduled_at == second_deadline
+        await config.refresh_from_db()
+        state = await _get_deadline_state(config)
+        assert state is not None
+        assert state.scheduled_at == second_deadline
+        assert state.delivery_nonce != first_nonce
+        assert state.message_id is None
+
+        result = await manager.update_timeline(
+            day_number=4,
+            event_date=dt.date(2026, 8, 4),
+            submission_deadline_at=now,
+            draft_shift_proposal_at=None,
+            final_shift_notice_at=None,
+            now=now,
+        )
+        assert result.auto_close_disabled is True
+        assert result.schedule_change is not None
+        await config.refresh_from_db()
+        assert config.day_number == 4
+        assert config.event_date == dt.date(2026, 8, 4)
+        assert config.submission_deadline_at == now
+        assert config.deadline_automation_enabled is False
+        assert await _get_deadline_state(config) is None
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_deadline_automation_reconcile_repairs_and_cancels_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        deadline = now + dt.timedelta(days=1)
+        _channel, config, manager = await _create_deadline_manager(deadline=deadline)
+        config.deadline_automation_enabled = True
+        await config.save(update_fields=["deadline_automation_enabled", "updated_at"])
+        monkeypatch.setattr(
+            shift_register_manager_module,
+            "_new_delivery_nonce",
+            lambda: 333,
+        )
+
+        result = await manager.reconcile_deadline_automation(now=now)
+        assert result.schedule_change is not None
+        state = await _get_deadline_state(config)
+        assert state is not None
+        assert state.delivery_nonce == 333
+
+        result = await manager.reconcile_deadline_automation(now=now)
+        assert result.schedule_change is None
+        state = await _get_deadline_state(config)
+        assert state is not None
+        assert state.delivery_nonce == 333
+
+        state.status = ShiftTimelineEventStatus.COMPLETED
+        await state.save(update_fields=["status", "updated_at"])
+        config.deadline_automation_enabled = False
+        await config.save(update_fields=["deadline_automation_enabled", "updated_at"])
+        result = await manager.reconcile_deadline_automation(now=now)
+        assert result.schedule_change is None
+        assert await _get_deadline_state(config) is not None
+
+        config.deadline_automation_enabled = True
+        config.submission_deadline_at = now - dt.timedelta(seconds=1)
+        await config.save(
+            update_fields=[
+                "deadline_automation_enabled",
+                "submission_deadline_at",
+                "updated_at",
+            ]
+        )
+        result = await manager.reconcile_deadline_automation(now=now)
+        assert result.auto_close_disabled is True
+        assert await _get_deadline_state(config) is None
+        await config.refresh_from_db()
+        assert config.deadline_automation_enabled is False
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [ShiftTimelineEventStatus.SCHEDULED, ShiftTimelineEventStatus.SENT],
+)
+async def test_deadline_automation_reconcile_preserves_past_active_state(
+    status: ShiftTimelineEventStatus,
+) -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        deadline = now - dt.timedelta(seconds=1)
+        _channel, config, manager = await _create_deadline_manager(deadline=deadline)
+        config.deadline_automation_enabled = True
+        await config.save(update_fields=["deadline_automation_enabled", "updated_at"])
+        state = await ShiftTimelineEventState.create(
+            shift_register=config,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=deadline,
+            delivery_nonce=123,
+            status=status,
+            message_id=456 if status is ShiftTimelineEventStatus.SENT else None,
+        )
+
+        result = await manager.reconcile_deadline_automation(now=now)
+
+        assert result.schedule_change is None
+        assert result.auto_close_disabled is False
+        await config.refresh_from_db()
+        await state.refresh_from_db()
+        assert config.deadline_automation_enabled is True
+        assert state.status is status
+        assert state.scheduled_at == deadline
+        assert state.delivery_nonce == 123
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_submission_deadline_close_delivery_transitions_are_idempotent() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        deadline = now + dt.timedelta(days=1)
+        feature_channel, config, manager = await _create_deadline_manager(
+            deadline=deadline
+        )
+        await manager.set_deadline_automation_enabled(enabled=True, now=now)
+        state = await _get_deadline_state(config)
+        assert state is not None
+
+        assert (
+            await manager.begin_submission_deadline_close(
+                expected_scheduled_at=deadline,
+                expected_delivery_nonce=state.delivery_nonce + 1,
+                now=deadline,
+            )
+            is None
+        )
+        assert (
+            await manager.begin_submission_deadline_close(
+                expected_scheduled_at=deadline - dt.timedelta(seconds=1),
+                expected_delivery_nonce=state.delivery_nonce,
+                now=deadline,
+            )
+            is None
+        )
+        assert (
+            await manager.begin_submission_deadline_close(
+                expected_scheduled_at=deadline,
+                expected_delivery_nonce=state.delivery_nonce,
+                now=deadline - dt.timedelta(seconds=1),
+            )
+            is None
+        )
+
+        fresh_config = await ShiftRegisterConfig.get(id=config.id)
+        fresh_config.submission_deadline_at = deadline + dt.timedelta(hours=1)
+        await fresh_config.save(update_fields=["submission_deadline_at", "updated_at"])
+        assert (
+            await manager.begin_submission_deadline_close(
+                expected_scheduled_at=deadline,
+                expected_delivery_nonce=state.delivery_nonce,
+                now=deadline,
+            )
+            is None
+        )
+        await feature_channel.refresh_from_db()
+        assert feature_channel.is_enabled is True
+        fresh_config.submission_deadline_at = deadline
+        await fresh_config.save(update_fields=["submission_deadline_at", "updated_at"])
+
+        execution = await manager.begin_submission_deadline_close(
+            expected_scheduled_at=deadline,
+            expected_delivery_nonce=state.delivery_nonce,
+            now=deadline,
+        )
+        assert execution is not None
+        await feature_channel.refresh_from_db()
+        assert feature_channel.is_enabled is False
+        await config.refresh_from_db()
+        await state.refresh_from_db()
+        assert config.deadline_automation_enabled is True
+        assert state.status is ShiftTimelineEventStatus.SCHEDULED
+
+        assert await manager.mark_submission_deadline_sent(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+            message_id=555,
+        )
+        assert await manager.mark_submission_deadline_sent(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+            message_id=555,
+        )
+        assert not await manager.mark_submission_deadline_sent(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+            message_id=556,
+        )
+        assert not await manager.mark_submission_deadline_sent(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce + 1,
+            message_id=555,
+        )
+        assert await manager.complete_submission_deadline(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+        )
+        await config.refresh_from_db()
+        await state.refresh_from_db()
+        assert config.deadline_automation_enabled is False
+        assert state.status is ShiftTimelineEventStatus.COMPLETED
+        assert state.message_id == 555
+        assert not await manager.complete_submission_deadline(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+        )
+        assert (
+            await manager.begin_submission_deadline_close(
+                expected_scheduled_at=deadline,
+                expected_delivery_nonce=state.delivery_nonce,
+                now=deadline,
+            )
+            is None
+        )
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_manual_lifecycle_clears_deadline_state_and_hard_clear_cascades() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        now = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        deadline = now + dt.timedelta(days=1)
+        feature_channel, config, manager = await _create_deadline_manager(
+            deadline=deadline
+        )
+        await manager.set_deadline_automation_enabled(enabled=True, now=now)
+
+        config_id = await manager.set_manual_feature_enabled(enabled=False)
+        assert config_id == config.id
+        await feature_channel.refresh_from_db()
+        await config.refresh_from_db()
+        assert feature_channel.is_enabled is False
+        assert config.deadline_automation_enabled is False
+        assert await _get_deadline_state(config) is None
+
+        config.deadline_automation_enabled = True
+        await config.save(update_fields=["deadline_automation_enabled", "updated_at"])
+        await ShiftTimelineEventState.create(
+            shift_register=config,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=deadline,
+            delivery_nonce=1,
+        )
+        config_id = await manager.set_manual_feature_enabled(enabled=True)
+        assert config_id == config.id
+        await feature_channel.refresh_from_db()
+        assert feature_channel.is_enabled is True
+        assert await _get_deadline_state(config) is None
+
+        config.deadline_automation_enabled = True
+        await config.save(update_fields=["deadline_automation_enabled", "updated_at"])
+        await ShiftTimelineEventState.create(
+            shift_register=config,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=deadline,
+            delivery_nonce=2,
+        )
+        assert await manager.clear_feature_settings() == config.id
+        assert await FeatureChannel.get_or_none(id=feature_channel.id) is None
+        assert await ShiftTimelineEventState.all().count() == 0
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)

@@ -1061,29 +1061,40 @@ class FeatureChannelBase[TManager: ManagerBase, TSubmission, TUpsertResult](
         *,
         include_footer: bool = False,
     ) -> list[Embed]:
+        return await self._render_localized_embeds(
+            context.guild_id,
+            template_key=self.auto_guide_template_key,
+            values_for_language=lambda language: self._auto_guide_template_values(
+                context, language
+            ),
+            include_footer=include_footer,
+        )
+
+    async def _render_localized_embeds(
+        self,
+        guild_id: int,
+        *,
+        template_key: str,
+        values_for_language: Callable[[str], dict[str, object]],
+        include_footer: bool = False,
+    ) -> list[Embed]:
         embeds: list[Embed] = []
-        languages = await get_announcement_languages(context.guild_id, self.logger)
+        languages = await get_announcement_languages(guild_id, self.logger)
         for language in languages:
-            values = self._auto_guide_template_values(context, language)
+            values = values_for_language(language)
             embed = Embed(
                 title=render_message_template(
-                    f"{self.auto_guide_template_key}.title",
-                    language,
-                    **values,
+                    f"{template_key}.title", language, **values
                 ),
                 description=render_message_template(
-                    f"{self.auto_guide_template_key}.description",
-                    language,
-                    **values,
+                    f"{template_key}.description", language, **values
                 ),
                 color=config.DEFAULT_EMBED_COLOR,
             )
             if include_footer:
                 embed.set_footer(
                     text=render_message_template(
-                        f"{self.auto_guide_template_key}.footer",
-                        language,
-                        **values,
+                        f"{template_key}.footer", language, **values
                     )
                 )
             embeds.append(embed)

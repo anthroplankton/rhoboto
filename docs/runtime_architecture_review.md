@@ -10,11 +10,11 @@ large refactor.
 Rhoboto has a sound architecture for its current size: Discord cogs, feature
 lifecycle behavior, database models, Google Sheets managers, and parser/content
 logic are separated into recognizable layers. The main remaining risks are
-concentrated in repeated team/shift workflows, remaining Final Schedule work,
-metadata/open overhead, and operational retry behavior. The Google Sheets adapter,
-typed row-local writes, spreadsheet-scoped value batching, domain error boundary,
-and Shift Draft generation described as missing in the original review have since
-been implemented.
+concentrated in repeated team/shift workflows, metadata/open overhead, and
+operational retry behavior. The Google Sheets adapter, typed row-local writes,
+spreadsheet-scoped value batching, domain error boundary, and complete Shift
+Draft/Final Schedule generation described as missing in the original review have
+since been implemented.
 
 ## Current Architecture
 
@@ -59,10 +59,33 @@ been implemented.
 - The SQLite event-loop keepalive is a pragmatic compatibility workaround and
   should be revisited as Python, aiosqlite, and Tortoise versions change.
 
+## Typed Contract Debt
+
+The Final Schedule follow-up removed `getattr(..., default)` access for declared
+`ShiftRegisterConfig` fields from the Shift cog, settings UI, and manager. Those
+fallbacks hid incomplete test fakes and could also hide model/schema drift at
+runtime. The affected fakes now implement the same required fields as the model.
+
+This was a Shift-focused cleanup, not a project-wide audit. Future debt work
+should inspect `getattr`, `hasattr`, broad `object`/`Any` annotations, and defaulted
+mapping reads at model, config, and worksheet-contract boundaries. For each use:
+
+- access declared required fields directly and give helpers the narrow concrete
+  type or protocol they consume;
+- make test fakes satisfy that same contract instead of preserving production
+  fallbacks; and
+- retain dynamic access only when names are intentionally data-derived, such as
+  `Summary` values keyed by `<worksheet title> ISV` and `<worksheet title> Power`,
+  or when adapting an external framework object whose shape is genuinely dynamic.
+
+Before removing any compatibility fallback, verify the database/schema rollout
+and legacy data contract. Treat required migrations separately rather than
+turning a local type cleanup into an implicit behavior change.
+
 ## Unfinished Functionality
 
-- Shift Register supports Entry and Draft manager workflows, settings, guide, and
-  timeline messages, but Final Schedule generation is not complete.
+- Shift Register supports Entry, Draft, and Final Schedule manager workflows,
+  settings, guide, and timeline messages.
 - Manual Discord and Google Sheets validation has a runbook, but concrete
   validation results still need to be recorded for a development guild and
   disposable spreadsheet.
@@ -94,8 +117,7 @@ been implemented.
 ## Recommended Priority Order
 
 1. Add retry/backoff and request/payload observability for Google Sheets.
-2. Complete the Shift Register Final Schedule workflow.
-3. Add user-facing validation and error messages for remaining sheet setup failures.
-4. Extract shared team/shift upsert lifecycle code where behavior is genuinely
+2. Add user-facing validation and error messages for remaining sheet setup failures.
+3. Extract shared team/shift upsert lifecycle code where behavior is genuinely
    identical.
-5. Expand localization and administrator-facing audit messages.
+4. Expand localization and administrator-facing audit messages.

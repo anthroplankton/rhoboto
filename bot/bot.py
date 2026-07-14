@@ -88,10 +88,11 @@ class Rhoboto(commands.Bot):
             logger.warning("Bot user is None on on_ready.")
 
     async def close(self) -> None:
-        """
-        Closes Tortoise ORM connections and shuts down the Discord bot.
-        """
-        logger.info("Closing Tortoise ORM connections...")
-        await close_db(self.db_url)
-        logger.info("Tortoise ORM connections closed. Shutting down Discord bot.")
-        await super().close()
+        """Unload cogs before closing Tortoise ORM connections."""
+        try:
+            logger.info("Shutting down Discord bot and unloading cogs.")
+            await super().close()
+        finally:
+            logger.info("Closing Tortoise ORM connections.")
+            await close_db(self.db_url)
+            logger.info("Tortoise ORM connections closed.")

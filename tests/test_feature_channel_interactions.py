@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-# ruff: noqa: SLF001
+# ruff: noqa: RUF001, SLF001
 import asyncio
 import datetime as dt
 import logging
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
-from discord import Embed, File, HTTPException, NotFound
+from discord import ButtonStyle, Embed, File, HTTPException, NotFound
 from tortoise.exceptions import DBConnectionError
 
 from bot import config
@@ -27,18 +28,30 @@ from cogs.base.feature_channel_context import (
     MessageParseResult,
 )
 from cogs.shift import Shift
-from cogs.shift_register import ShiftRegister, _format_generate_draft_confirmation
+from cogs.shift_register import (
+    _SHIFT_REPORT_SECTION_PREFIXES,
+    ShiftRegister,
+    ShiftReportAssignment,
+    _format_generate_draft_confirmation,
+    _format_shift_assignment_section,
+    _split_shift_report,
+)
 from cogs.team import Team
 from cogs.team_register import TeamRegister
 from components import ui_shift_register, ui_team_register
 from components.ui_auto_guide import LATEST_GUIDE_ENABLE_REFRESH_FAILED_WARNING
 from components.ui_settings_flow import SettingsPanel, SettingsTimeoutView
-from components.ui_shift_register import ShiftRegisterSheetModal
+from components.ui_shift_register import ShiftDeadlineCloseView, ShiftRegisterSheetModal
 from components.ui_team_register import TeamRegisterSheetModal
 from models.feature_channel import FeatureChannel
 from models.feature_channel_message_state import (
     FeatureChannelMessageKind,
     FeatureChannelMessageState,
+)
+from models.shift_register import ShiftRegisterConfig
+from models.shift_timeline_event_state import (
+    ShiftTimelineEventKind,
+    ShiftTimelineEventStatus,
 )
 from tests.fakes import (
     ConfiguredManager,
@@ -50,9 +63,12 @@ from tests.fakes import (
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
+    SHIFT_REGISTER_SHEET_WRITE_LOCK,
     TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING,
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftGenerationResult,
+    ShiftDeadlineExecution,
+    ShiftTimelineScheduleChange,
     TeamSourceStatus,
 )
 from utils.shift_register_structs import (
@@ -86,6 +102,67 @@ def test_generate_draft_requires_non_negative_power_threshold() -> None:
     assert parameters["runner"].type.value == 6
 
 
+def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> None:
+    report = "\n".join(
+        [
+            "draft generated",
+            _SHIFT_REPORT_SECTION_PREFIXES[0]
+            + "、".join(f"😀user{index}" for index in range(8)),
+            _SHIFT_REPORT_SECTION_PREFIXES[1] + "assigned",
+            "hour 4: 😀alice, 😀bob, 😀carol",
+            _SHIFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
+            "hour 4: 😀dave, 😀eve",
+            "notes attached",
+        ]
+    )
+
+    messages = _split_shift_report(report, limit=80)
+
+    assert len(messages) > 1
+    assert all(len(message.encode("utf-16-le")) // 2 <= 80 for message in messages)
+    assert any(
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[0]) for message in messages
+    )
+    assert any(
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[1]) for message in messages
+    )
+    assert any(
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[2]) for message in messages
+    )
+    assert "".join(messages).replace("\n", "") == report.replace("\n", "")
+
+
+def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
+    report = "\n".join(
+        [
+            "### ✅ 班表草稿已產生",
+            "⚠️ 編成未登録：`Alice`",
+            "- 募集時間【4-12】",
+            "- 已排入（安可｜本走；待機）：",
+            *[f"  - row {index} " + "x" * 40 for index in range(30)],
+        ]
+    )
+
+    messages = _split_shift_report(report, limit=200)
+
+    assert messages[0] == "\n".join(report.splitlines()[:3])
+    assert messages[1].startswith("- 已排入（安可｜本走；待機）：")
+    assert all(len(message.encode("utf-16-le")) // 2 <= 200 for message in messages)
+
+
+def test_format_shift_assignment_section_uses_shared_draft_grammar() -> None:
+    assert _format_shift_assignment_section(
+        [ShiftReportAssignment(15, "`A`", ("`B`", "`C`"), None)],
+        empty=False,
+    ) == [
+        "- 已排入（安可｜本走；待機）：",
+        "  - -# `15-16`：`A`｜`B`、`C`、缺 `1`；缺",
+    ]
+    assert _format_shift_assignment_section([], empty=True) == [
+        "- 已排入（安可｜本走；待機）：なし"
+    ]
+
+
 def test_generate_draft_confirmation_formats_new_destinations() -> None:
     ranges = RecruitmentTimeRanges.from_json(
         [{"start": 4, "end": 12}, {"start": 20, "end": 28}]
@@ -106,7 +183,7 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
         "### ‼️ 確認產生班表草稿\n"
         "請先備份需要保留的內容。確認後將覆蓋 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
-        " 的以下位置："  # noqa: RUF001
+        " 的以下位置："
     )
     assert (
         content.count(
@@ -117,11 +194,11 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     assert "`A1:G31`" in content
     assert "`A27`" in content
     assert "`I1`" in content
-    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content  # noqa: RUF001
+    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content
     assert "`J28:L30`" in content
     assert "`J31`" in content
     assert (
-        "Team Source 同步：\n"  # noqa: RUF001
+        "Team Source 同步：\n"
         "- 確認後會以目前 Discord 成員與 Team 資料更新 "
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
         in content
@@ -134,11 +211,11 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     [
         (
             TeamSourceStatus.UNSET,
-            "Team Source 同步：\n⚠️ 未設定，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 未設定，本次不會同步",
         ),
         (
             TeamSourceStatus.INVALID,
-            "Team Source 同步：\n⚠️ 設定無效，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 設定無效，本次不會同步",
         ),
     ],
 )
@@ -225,26 +302,26 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
 
     assert report == (
         "### ✅ 班表草稿已產生\n"
-        "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
-        "- 安可綜合力閾值：35\n"  # noqa: RUF001
+        "- Runner（ランナー）：`Not set`\n"
+        "- 安可綜合力閾值：35\n"
         "🔄 已同步 "
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)\n"
         "‼️ 已將班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
-        "，並覆蓋原有內容。\n"  # noqa: RUF001
-        "⚠️ 編成未登録：<@333>、E\\`ve\n"  # noqa: RUF001
+        "，並覆蓋原有內容。\n"
+        "⚠️ 編成未登録：<@333>、E\\`ve\n"
         "- 募集時間【4-8・9-12】\n"
-        "- 已排入（安可｜本走；待機）：\n"  # noqa: RUF001
-        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"  # noqa: RUF001
-        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
-        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
-        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
-        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"  # noqa: RUF001
-        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"  # noqa: RUF001
-        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"  # noqa: RUF001
-        "- 未排入（位置已滿）：\n"  # noqa: RUF001
-        "  - -# `4-5`：<@333>、`Dave`\n"  # noqa: RUF001
-        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
+        "- 已排入（安可｜本走；待機）：\n"
+        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"
+        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"
+        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"
+        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"
+        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"
+        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"
+        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"
+        "- 未排入（位置已滿）：\n"
+        "  - -# `4-5`：<@333>、`Dave`\n"
+        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"
     )
     assert "`8-9`" not in report
     assert "`7-8`" in report
@@ -268,7 +345,7 @@ def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
         team_source_warning=None,
     )
 
-    assert "- 已排入（安可｜本走；待機）：なし" in report  # noqa: RUF001
+    assert "- 已排入（安可｜本走；待機）：なし" in report
     assert "`4-5`" not in report
     assert "`5-6`" not in report
     assert "募集時間【4-6】" in report
@@ -321,7 +398,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         ],
     )
     ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
-    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
+    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"
 
     class Manager:
         async def get_saved_team_summary_destination(
@@ -370,7 +447,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
                 team_source_warning=None,
                 recruitment_ranges=ranges,
                 notes_snapshot=notes_snapshot,
-                unregistered_usernames=("carol",),
+                unregistered_usernames=(
+                    "carol",
+                    *(f"user{index}" for index in range(300)),
+                ),
                 team_summary_url=(
                     "https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333"
                 ),
@@ -391,9 +471,16 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             events.append("wait")
@@ -407,7 +494,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
             id=111,
@@ -428,7 +517,14 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     prompt, prompt_kwargs = interaction.original_response_edits[0]
     assert "`A1:G31`" in prompt
     assert isinstance(prompt_kwargs["view"], ConfirmView)
-    content, kwargs = interaction.followup.messages[0]
+    assert len(interaction.followup.messages) > 1
+    assert all(
+        len((content or "").encode("utf-16-le")) // 2 <= 2000
+        for content, _kwargs in interaction.followup.messages
+    )
+    content = "\n".join(
+        content or "" for content, _kwargs in interaction.followup.messages
+    )
     assert (
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit?gid=222#gid=222)"
         in (content or "")
@@ -439,13 +535,20 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333)"
         in (content or "")
     )
-    assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
+    assert "⚠️ 編成未登録：<@333>" in (content or "")
+    kwargs = interaction.followup.messages[0][1]
     attachment = kwargs["file"]
     assert isinstance(attachment, File)
     assert attachment.filename == "shift-draft-notes.txt"
     attachment.fp.seek(0)
     assert attachment.fp.read().decode("utf-8") == notes_snapshot
-    assert kwargs["ephemeral"] is True
+    assert (
+        sum("file" in kwargs for _content, kwargs in interaction.followup.messages) == 1
+    )
+    assert all(
+        kwargs["ephemeral"] is True
+        for _content, kwargs in interaction.followup.messages
+    )
 
 
 @pytest.mark.asyncio
@@ -501,9 +604,16 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -516,7 +626,9 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -604,9 +716,16 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -619,7 +738,9 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -668,9 +789,16 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     class ConfirmView:
         value = confirmation
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -678,7 +806,9 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -689,7 +819,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
         assert interaction.original_response_edits[-1][1] == {"view": None}
     else:
         assert interaction.original_response_edits[-1] == (
-            "✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+            "✖️ 確認逾時，未變更 Shift Draft。",
             {"view": None},
         )
 
@@ -746,9 +876,16 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -756,7 +893,9 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -764,7 +903,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     assert feature_context_calls == 2
     assert interaction.followup.messages == []
     assert interaction.original_response_edits[-1] == (
-        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",  # noqa: RUF001
+        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",
         {"view": None},
     )
 
@@ -788,6 +927,10 @@ async def fake_feature_channel_get_or_none(
         feature_name=feature_name,
         is_enabled=True,
     )
+
+
+async def fake_enabled_feature_channel_by_id(**query: int) -> SimpleNamespace:
+    return SimpleNamespace(id=query["id"], is_enabled=True)
 
 
 class FakeMessage:
@@ -1101,6 +1244,312 @@ class GatedRecordingLock:
         yield
 
 
+class _ManualLifecycleManager:
+    def __init__(
+        self,
+        feature_channel: object,
+        _service_account_path: str,
+        *,
+        events: list[str],
+        config_id: int | None = 91,
+        error: Exception | None = None,
+    ) -> None:
+        self.feature_channel = feature_channel
+        self.events = events
+        self.config_id = config_id
+        self.error = error
+
+    async def set_manual_feature_enabled(self, *, enabled: bool) -> int | None:
+        self.events.append(f"enabled:{enabled}")
+        if self.error is not None:
+            raise self.error
+        return self.config_id
+
+    async def clear_feature_settings(self) -> int | None:
+        self.events.append("clear")
+        if self.error is not None:
+            raise self.error
+        return self.config_id
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_manual_hard_clear_auto_close_cancels_after_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    feature_channel = SimpleNamespace(id=77, is_enabled=True)
+    manager = _ManualLifecycleManager(feature_channel, "service.json", events=events)
+    scheduler = SimpleNamespace(cancel=lambda *_args: events.append("cancel"))
+    subject = ShiftRegister(fake_bot())
+    subject.ManagerType = lambda *_args: manager  # type: ignore[method-assign]
+    subject.sheet_write_lock = RecordingLock()
+    subject._timeline_scheduler = scheduler  # type: ignore[assignment]
+    key = (91, ShiftTimelineEventKind.SUBMISSION_DEADLINE)
+    subject._pending_message_ids[key] = (123, 456)
+
+    async def get_or_none(**_kwargs: object) -> SimpleNamespace:
+        return feature_channel
+
+    async def get_or_create(**_kwargs: object) -> tuple[SimpleNamespace, bool]:
+        events.append("get_or_create")
+        return feature_channel, False
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
+    monkeypatch.setattr(FeatureChannel, "get_or_create", get_or_create)
+
+    await subject._enable_channel(111, 222)
+    assert events == ["get_or_create", "enabled:True", "cancel"]
+    assert key not in subject._pending_message_ids
+    assert subject.sheet_write_lock.keys == [222]
+
+    events.clear()
+    subject._pending_message_ids[key] = (123, 456)
+    assert await subject._disable_channel(111, 222) is True
+    assert events == ["enabled:False", "cancel"]
+    assert key not in subject._pending_message_ids
+
+    events.clear()
+    subject._pending_message_ids[key] = (123, 456)
+    await subject._clear_feature_settings(111, 222)
+    assert events == ["clear", "cancel"]
+    assert key not in subject._pending_message_ids
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_manual_lifecycle_failure_keeps_task_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    feature_channel = SimpleNamespace(id=77, is_enabled=True)
+    error = RuntimeError("transaction failed")
+    manager = _ManualLifecycleManager(
+        feature_channel,
+        "service.json",
+        events=events,
+        error=error,
+    )
+    scheduler = SimpleNamespace(cancel=lambda *_args: events.append("cancel"))
+    subject = ShiftRegister(fake_bot())
+    subject.ManagerType = lambda *_args: manager  # type: ignore[method-assign]
+    subject._timeline_scheduler = scheduler  # type: ignore[assignment]
+    key = (91, ShiftTimelineEventKind.SUBMISSION_DEADLINE)
+    subject._pending_message_ids[key] = (123, 456)
+
+    async def get_or_none(**_kwargs: object) -> SimpleNamespace:
+        return feature_channel
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
+
+    with pytest.raises(RuntimeError, match="transaction failed"):
+        await subject._disable_channel(111, 222)
+
+    assert events == ["enabled:False"]
+    assert subject._pending_message_ids[key] == (123, 456)
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_manual_lifecycle_missing_rows_are_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_feature_channel(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", no_feature_channel)
+    subject = ShiftRegister(fake_bot())
+
+    assert await subject._disable_channel(111, 222) is False
+    await subject._clear_feature_settings(111, 222)
+
+
+class _RegistrationRaceManager:
+    def __init__(
+        self,
+        feature_channel: object,
+        started: asyncio.Event | None = None,
+    ) -> None:
+        self.feature_channel = feature_channel
+        self.started = started
+        self.release = asyncio.Event()
+        self.events: list[str] = []
+
+    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        self.events.append("fresh")
+        if self.started is not None:
+            self.started.set()
+            await self.release.wait()
+        return SimpleNamespace(
+            sheet_url="https://sheet.example",
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        )
+
+    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+        self.events.append("metadata")
+        return SimpleNamespace()
+
+    def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+        self.events.append("warnings")
+
+    async def upsert_or_delete_user_shift(
+        self,
+        _user_info: UserInfo,
+        _shift: RegisterShift | None,
+        *,
+        metadata: object,
+        recruitment_ranges: RecruitmentTimeRanges,
+    ) -> None:
+        del metadata, recruitment_ranges
+        self.events.append("write")
+
+
+def _registration_race_context(
+    manager: _RegistrationRaceManager,
+) -> ConfiguredFeatureChannelContext:
+    return ConfiguredFeatureChannelContext(
+        guild_id=111,
+        channel_id=222,
+        feature_channel=manager.feature_channel,
+        manager=manager,
+        feature_config=SimpleNamespace(
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_shift_registration_close_race_rechecks_inside_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feature_channel = SimpleNamespace(id=77, is_enabled=True)
+    manager = _RegistrationRaceManager(feature_channel)
+    context = _registration_race_context(manager)
+    subject = ShiftRegister(fake_bot())
+    early_lookup = asyncio.Event()
+    before_lock = asyncio.Event()
+    release_to_lock = asyncio.Event()
+
+    async def get_context_or_none(**_kwargs: object) -> object:
+        early_lookup.set()
+        return context
+
+    async def get_configured_context(_context: object) -> object:
+        before_lock.set()
+        await release_to_lock.wait()
+        return context
+
+    async def parse(_message: object) -> object:
+        shift, user_info = shift_register_submission()
+        return MessageParseResult.parsed(shift, user_info=user_info)
+
+    async def get_or_none(**_kwargs: object) -> SimpleNamespace:
+        return feature_channel
+
+    auto_guide_calls: list[object] = []
+
+    async def base_refresh(*args: object, **_kwargs: object) -> bool:
+        auto_guide_calls.append(args)
+        return True
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
+    monkeypatch.setattr(
+        FeatureChannelBase,
+        "_refresh_auto_guide_if_enabled",
+        base_refresh,
+    )
+    subject._get_feature_channel_context_or_none = (  # type: ignore[method-assign]
+        get_context_or_none
+    )
+    subject._get_configured_feature_channel_context = (  # type: ignore[method-assign]
+        get_configured_context
+    )
+    subject._parse_message_submission = parse  # type: ignore[method-assign]
+    subject.sheet_write_lock = SHIFT_REGISTER_SHEET_WRITE_LOCK
+    message = FakeRegisterMessage(content="4-8")
+
+    task = asyncio.create_task(subject.on_message(message))
+    await early_lookup.wait()
+    await before_lock.wait()
+    async with SHIFT_REGISTER_SHEET_WRITE_LOCK(message.channel.id):
+        feature_channel.is_enabled = False
+    release_to_lock.set()
+    await task
+
+    assert manager.events == ["fresh"]
+    assert message.reaction_events == []
+    assert auto_guide_calls == []
+
+
+@pytest.mark.asyncio
+async def test_shift_registration_close_race_wins_then_deadline_closes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feature_channel = SimpleNamespace(id=77, is_enabled=True)
+    manager = _RegistrationRaceManager(feature_channel, asyncio.Event())
+    context = _registration_race_context(manager)
+    subject = ShiftRegister(fake_bot())
+    early_lookup = asyncio.Event()
+
+    async def get_context_or_none(**_kwargs: object) -> object:
+        early_lookup.set()
+        return context
+
+    async def get_configured_context(_context: object) -> object:
+        return context
+
+    async def parse(_message: object) -> object:
+        shift, user_info = shift_register_submission()
+        return MessageParseResult.parsed(shift, user_info=user_info)
+
+    async def close_after_registration() -> None:
+        async with SHIFT_REGISTER_SHEET_WRITE_LOCK(222):
+            feature_channel.is_enabled = False
+            manager.events.append("closed")
+
+    async def get_or_none(**_kwargs: object) -> SimpleNamespace:
+        return feature_channel
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
+    subject._get_feature_channel_context_or_none = (  # type: ignore[method-assign]
+        get_context_or_none
+    )
+    subject._get_configured_feature_channel_context = (  # type: ignore[method-assign]
+        get_configured_context
+    )
+    subject._parse_message_submission = parse  # type: ignore[method-assign]
+    subject._refresh_auto_guide_if_enabled = _noop_async  # type: ignore[method-assign]
+    subject.sheet_write_lock = SHIFT_REGISTER_SHEET_WRITE_LOCK
+    message = FakeRegisterMessage(content="4-8")
+
+    registration = asyncio.create_task(subject.on_message(message))
+    await early_lookup.wait()
+    await manager.started.wait()
+    closing = asyncio.create_task(close_after_registration())
+    await asyncio.sleep(0)
+    manager.release.set()
+    await registration
+    await closing
+
+    assert manager.events == ["fresh", "metadata", "warnings", "write", "closed"]
+    assert feature_channel.is_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_guide_refresh_lookup_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    feature_channel = SimpleNamespace(id=77, is_enabled=True)
+    context = _registration_race_context(_RegistrationRaceManager(feature_channel))
+    subject = ShiftRegister(fake_bot())
+    subject.logger = RecordingLogger()
+
+    async def fail_lookup(**_kwargs: object) -> None:
+        raise private_database_error()
+
+    monkeypatch.setattr(FeatureChannel, "get_or_none", fail_lookup)
+
+    assert await subject._refresh_auto_guide_if_enabled(context, object()) is False
+    assert len(subject.logger.exceptions) == 1  # type: ignore[union-attr]
+
+
 class UnexpectedTeamRegisterManager:
     def __init__(self, *_: object, **__: object) -> None:
         msg = "summary should use self.ManagerType"
@@ -1339,7 +1788,10 @@ class OrderedShiftUpsertManager(ConfiguredManager):
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace:
         self.fresh_sheet_urls.append(self.current_sheet_url)
-        return SimpleNamespace(sheet_url=self.current_sheet_url)
+        return SimpleNamespace(
+            sheet_url=self.current_sheet_url,
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        )
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
         self.events.append("fetch_metadata")
@@ -1482,6 +1934,7 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_auto_guide_is_enabled",
         "_auto_guide_template_values",
         "_render_auto_guide_embeds",
+        "_render_localized_embeds",
         "_auto_guide_delete_callback",
         "_build_auto_guide_buttons_view",
         "_refresh_auto_guide_if_enabled",
@@ -4103,6 +4556,67 @@ async def test_shift_auto_guide_render_smoke_with_footer(
 
 
 @pytest.mark.asyncio
+async def test_render_localized_embeds_preserves_language_order_and_footer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_get_announcement_languages(
+        _guild_id: int,
+        _logger: object,
+    ) -> list[str]:
+        return ["en", "ja", "zh_tw"]
+
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_announcement_languages",
+        fake_get_announcement_languages,
+    )
+    subject = ShiftRegister(fake_bot())
+
+    def values_for_language(language: str) -> dict[str, object]:
+        weekdays = {
+            "ja": ("水", "木", "金"),
+            "zh_tw": ("三", "四", "五"),
+            "en": ("Wed", "Thu", "Fri"),
+        }
+        submission, draft, final = weekdays[language]
+        return {
+            "day_number": 2,
+            "submission_deadline": SimpleNamespace(day=12, weekday=submission, hour=21),
+            "draft_shift_proposal": SimpleNamespace(day=13, weekday=draft, hour=20),
+            "final_shift_notice": SimpleNamespace(day=14, weekday=final, hour=18),
+        }
+
+    embeds = await subject._render_localized_embeds(
+        111,
+        template_key="shift.deadline_close",
+        values_for_language=values_for_language,
+        include_footer=True,
+    )
+
+    assert [embed.title for embed in embeds] == [
+        "Day 2 | Shift registration is now closed 🙇\n",
+        "2日目｜シフト募集を締め切りました 🙇\n",
+        "第2天｜班表登記已截止 🙇\n",
+    ]
+    assert all(embed.color.value == config.DEFAULT_EMBED_COLOR for embed in embeds)
+    assert all(embed.footer.text for embed in embeds)
+
+
+def test_shift_deadline_close_view_has_only_entry_sheet_link() -> None:
+    view = ShiftDeadlineCloseView(
+        "https://docs.google.com/spreadsheets/d/example/edit?gid=444#gid=444"
+    )
+
+    assert len(view.children) == 1
+    button = view.children[0]
+    assert button.style is ButtonStyle.link
+    assert button.label == "Google Sheets"
+    assert str(button.emoji) == "👀"
+    assert button.url.endswith("#gid=444")
+    assert button.custom_id is None
+
+
+@pytest.mark.asyncio
 async def test_team_public_guide_uses_summary_worksheet_gid(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5451,7 +5965,7 @@ async def test_delete_callback_uses_feature_catalog_in_zh_copy(
 
     assert result == (
         "✅ 已成功刪除您在 Google Sheets 中的隊伍編成登記資料。"
-        "若也想移除 Discord 上的原始登記訊息，"  # noqa: RUF001
+        "若也想移除 Discord 上的原始登記訊息，"
         "請記得自行刪除。"
     )
     assert interaction.followup.messages == []
@@ -5626,11 +6140,18 @@ async def test_team_message_waits_then_refreshes_config_inside_channel_lock() ->
 
 
 @pytest.mark.asyncio
-async def test_shift_message_waits_then_refreshes_config_inside_channel_lock() -> None:
+async def test_shift_message_waits_then_refreshes_config_inside_channel_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_by_id,
+    )
     subject = ShiftRegister(fake_bot())
     channel_lock = GatedRecordingLock()
     subject.sheet_write_lock = channel_lock
-    manager = OrderedShiftUpsertManager(object(), "service.json")
+    manager = OrderedShiftUpsertManager(SimpleNamespace(id=77), "service.json")
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
     message = FakeRegisterMessage(content="4-8")
@@ -5655,9 +6176,16 @@ async def test_shift_message_waits_then_refreshes_config_inside_channel_lock() -
 
 
 @pytest.mark.asyncio
-async def test_shift_message_validates_with_fresh_recruitment_ranges() -> None:
+async def test_shift_message_validates_with_fresh_recruitment_ranges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_by_id,
+    )
     subject = ShiftRegister(fake_bot())
-    manager = OrderedShiftUpsertManager(object(), "service.json")
+    manager = OrderedShiftUpsertManager(SimpleNamespace(id=77), "service.json")
 
     async def get_fresh_sheet_config() -> SimpleNamespace:
         return SimpleNamespace(
@@ -5765,13 +6293,18 @@ async def test_team_register_message_upsert_preserves_summary_database_error() -
 
 
 @pytest.mark.asyncio
-async def test_shift_register_message_upsert_preserves_pre_success_database_error() -> (
-    None
-):
+async def test_shift_register_message_upsert_preserves_pre_success_database_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_by_id,
+    )
     subject = ShiftRegister(fake_bot())
     raw_error = private_database_error()
     manager = OrderedShiftUpsertManager(
-        object(),
+        SimpleNamespace(id=77),
         "service.json",
         ensure_error=raw_error,
     )
@@ -5796,11 +6329,17 @@ async def test_shift_register_message_upsert_preserves_pre_success_database_erro
 async def test_shift_register_message_upsert_failure_uses_actual_id_change(
     *,
     ids_changed: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        FeatureChannel,
+        "get_or_none",
+        fake_enabled_feature_channel_by_id,
+    )
     raw_error = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
     subject = ShiftRegister(fake_bot())
     manager = OrderedShiftUpsertManager(
-        object(),
+        SimpleNamespace(id=77),
         "service.json",
         upsert_error=raw_error,
         ensure_changes_ids=ids_changed,
@@ -6073,6 +6612,444 @@ async def test_shift_settings_panel_passes_latest_guide_state_from_base_flow(
         )
     ]
     assert panel_view.message is interaction.followup.sent_message_objects[0]
+
+
+class _TimelineQuery:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def select_related(self, *_fields: str) -> _TimelineQuery:
+        return self
+
+    async def first(self) -> object:
+        return self.value
+
+    def __await__(self) -> object:
+        async def resolve() -> object:
+            return self.value
+
+        return resolve().__await__()
+
+
+class _TimelineChannel:
+    def __init__(self, *, name: str = "shift") -> None:
+        self.name = name
+        self.send_attempts: list[dict[str, object]] = []
+        self.edit_names: list[str] = []
+
+    async def send(self, **kwargs: object) -> SimpleNamespace:
+        self.send_attempts.append(kwargs)
+        return SimpleNamespace(id=9001)
+
+    async def edit(self, *, name: str) -> None:
+        self.edit_names.append(name)
+        self.name = name
+
+
+def _timeline_config(
+    config_id: int = 1,
+    *,
+    enabled: bool = True,
+) -> SimpleNamespace:
+    feature_channel = SimpleNamespace(
+        id=77 + config_id,
+        guild_id=111,
+        channel_id=222 + config_id,
+        feature_name="shift_register",
+        is_enabled=True,
+    )
+    deadline = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+    return SimpleNamespace(
+        id=config_id,
+        feature_channel=feature_channel,
+        deadline_automation_enabled=enabled,
+        sheet_url="https://docs.google.com/spreadsheets/d/example/edit",
+        landing_worksheet_id=444,
+        entry_worksheet_id=444,
+        day_number=2,
+        event_date=dt.date(2026, 8, 12),
+        submission_deadline_at=deadline,
+        draft_shift_proposal_at=dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC),
+        final_shift_notice_at=dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC),
+        recruitment_time_ranges=[{"start": 4, "end": 28}],
+    )
+
+
+class _TimelineBot:
+    def __init__(self, channel: object | None = None) -> None:
+        self.tree = SimpleNamespace(add_command=lambda _command: None)
+        self.user = None
+        self.ready = asyncio.Event()
+        self.channel = channel
+
+    async def wait_until_ready(self) -> None:
+        await self.ready.wait()
+
+    def get_channel(self, _channel_id: int) -> object | None:
+        return self.channel
+
+
+class _BootstrapTimelineManager:
+    instances: ClassVar[list[_BootstrapTimelineManager]] = []
+
+    def __init__(self, feature_channel: object, _service_account_path: str) -> None:
+        self.feature_channel = feature_channel
+        self.reconcile_calls: list[dt.datetime] = []
+        self.__class__.instances.append(self)
+
+    async def reconcile_deadline_automation(
+        self,
+        *,
+        now: dt.datetime,
+    ) -> SimpleNamespace:
+        self.reconcile_calls.append(now)
+        return SimpleNamespace(schedule_change=None, auto_close_disabled=False)
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_bootstrap_waits_and_restores_persisted_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_item = _timeline_config()
+    state = SimpleNamespace(
+        event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        status=ShiftTimelineEventStatus.SCHEDULED,
+        scheduled_at=config_item.submission_deadline_at,
+        delivery_nonce=123,
+    )
+    all_query = _TimelineQuery([config_item])
+    monkeypatch.setattr(
+        ShiftRegisterConfig,
+        "all",
+        classmethod(lambda _cls: all_query),
+    )
+
+    async def fake_state_get_or_none(**_kwargs: object) -> object:
+        return state
+
+    monkeypatch.setattr(
+        "cogs.shift_register.ShiftTimelineEventState.get_or_none",
+        fake_state_get_or_none,
+    )
+    _BootstrapTimelineManager.instances = []
+    bot = _TimelineBot()
+    subject = ShiftRegister(bot)
+    subject.ManagerType = _BootstrapTimelineManager
+    scheduled: list[tuple[object, ...]] = []
+    subject._timeline_scheduler.schedule = lambda **kwargs: scheduled.append(  # type: ignore[method-assign]
+        tuple(kwargs.values())
+    )
+
+    await subject.cog_load()
+    await asyncio.sleep(0)
+    assert _BootstrapTimelineManager.instances == []
+    assert scheduled == []
+
+    bot.ready.set()
+    await subject._timeline_bootstrap_task
+
+    assert len(_BootstrapTimelineManager.instances) == 1
+    assert len(_BootstrapTimelineManager.instances[0].reconcile_calls) == 1
+    assert scheduled == [
+        (
+            config_item.id,
+            ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            config_item.submission_deadline_at,
+            123,
+        )
+    ]
+    await subject.cog_unload()
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_unload_cancels_bootstrap_before_ready() -> None:
+    bot = _TimelineBot()
+    subject = ShiftRegister(bot)
+
+    await subject.cog_load()
+    await subject.cog_unload()
+
+    assert subject._timeline_bootstrap_task is None
+    assert subject._pending_message_ids == {}
+
+
+class _ToggleTimelineManager:
+    def __init__(self) -> None:
+        self.feature_channel = SimpleNamespace(id=77, guild_id=111, channel_id=222)
+        self.config = _timeline_config()
+        self.enabled_values: list[bool] = []
+
+    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+        return self.config
+
+    async def set_deadline_automation_enabled(
+        self,
+        *,
+        enabled: bool,
+        now: dt.datetime,
+    ) -> ShiftTimelineScheduleChange:
+        del now
+        self.enabled_values.append(enabled)
+        return ShiftTimelineScheduleChange(
+            shift_register_id=self.config.id,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=self.config.submission_deadline_at if enabled else None,
+            delivery_nonce=789 if enabled else None,
+        )
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_toggle_commits_then_applies_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subject = ShiftRegister(fake_bot())
+    manager = _ToggleTimelineManager()
+    subject.sheet_write_lock = RecordingLock()
+    schedule_changes: list[ShiftTimelineScheduleChange] = []
+    subject._apply_timeline_schedule_change = schedule_changes.append  # type: ignore[method-assign]
+    panel = SettingsPanel(embed=Embed(title="settings"), view=SettingsTimeoutView())
+
+    async def build_panel(*_args: object, **_kwargs: object) -> SettingsPanel:
+        return panel
+
+    monkeypatch.setattr(subject, "_build_settings_panel", build_panel)
+    stopped: list[bool] = []
+    current_view = SettingsTimeoutView()
+    current_view.shift_register_manager = manager  # type: ignore[attr-defined]
+    current_view.stop = lambda: stopped.append(True)  # type: ignore[method-assign]
+    interaction = FakeInteraction()
+
+    await subject._toggle_shift_auto_close(
+        interaction,
+        enabled=True,
+        current_view=current_view,
+    )
+
+    assert manager.enabled_values == [True]
+    assert subject.sheet_write_lock.keys == [222]
+    assert schedule_changes[0].delivery_nonce == 789
+    assert stopped == [True]
+    assert interaction.original_response_edits[-1][1]["view"] is panel.view
+
+
+@pytest.mark.asyncio
+async def test_shift_deadline_close_sends_then_cleans_up_and_completes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _TimelineChannel()
+    bot = _TimelineBot(channel)
+    subject = ShiftRegister(bot)
+    config_item = _timeline_config()
+    execution = ShiftDeadlineExecution(
+        event_state_id=55,
+        shift_register_id=config_item.id,
+        guild_id=111,
+        channel_id=222,
+        delivery_nonce=123,
+        status=ShiftTimelineEventStatus.SCHEDULED,
+        message_id=None,
+    )
+
+    class DeadlineManager:
+        def __init__(self, feature_channel: object, _service_account_path: str) -> None:
+            self.feature_channel = feature_channel
+            self.begin_calls = 0
+            self.mark_calls: list[tuple[int, int, int]] = []
+            self.complete_calls: list[tuple[int, int]] = []
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config_item
+
+        async def begin_submission_deadline_close(
+            self,
+            **_kwargs: object,
+        ) -> ShiftDeadlineExecution | None:
+            self.begin_calls += 1
+            return execution if self.begin_calls == 1 else None
+
+        async def mark_submission_deadline_sent(
+            self,
+            *,
+            event_state_id: int,
+            delivery_nonce: int,
+            message_id: int,
+        ) -> bool:
+            self.mark_calls.append((event_state_id, delivery_nonce, message_id))
+            return True
+
+        async def complete_submission_deadline(
+            self,
+            *,
+            event_state_id: int,
+            delivery_nonce: int,
+        ) -> bool:
+            self.complete_calls.append((event_state_id, delivery_nonce))
+            return True
+
+    manager_instances: list[DeadlineManager] = []
+
+    def manager_factory(feature_channel: object, path: str) -> DeadlineManager:
+        manager = DeadlineManager(feature_channel, path)
+        manager_instances.append(manager)
+        return manager
+
+    monkeypatch.setattr(subject, "ManagerType", manager_factory)
+    monkeypatch.setattr(
+        ShiftRegisterConfig,
+        "filter",
+        classmethod(lambda _cls, **_kwargs: _TimelineQuery(config_item)),
+    )
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_announcement_languages",
+        lambda _guild_id, _logger: asyncio.sleep(0, result=["zh_tw", "ja", "en"]),
+    )
+    cleanup_calls: list[object] = []
+
+    async def cleanup(context: object) -> bool:
+        cleanup_calls.append(context)
+        return True
+
+    subject._disable_auto_guide_and_delete_message = cleanup  # type: ignore[method-assign]
+    subject.sheet_write_lock = RecordingLock()
+
+    await subject._handle_timeline_event(
+        config_item.id,
+        ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        config_item.submission_deadline_at,
+        123,
+    )
+
+    assert len(channel.send_attempts) == 1
+    assert channel.send_attempts[0]["nonce"] == 123
+    assert [embed.title for embed in channel.send_attempts[0]["embeds"]] == [
+        "第2天｜班表登記已截止 🙇\n",
+        "2日目｜シフト募集を締め切りました 🙇\n",
+        "Day 2 | Shift registration is now closed 🙇\n",
+    ]
+    assert channel.edit_names == ["〆shift"]
+    assert cleanup_calls
+    assert manager_instances[0].mark_calls == [(55, 123, 9001)]
+    assert manager_instances[0].complete_calls == [(55, 123)]
+
+
+@pytest.mark.asyncio
+async def test_shift_deadline_close_reuses_cached_message_when_mark_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _TimelineChannel()
+    bot = _TimelineBot(channel)
+    subject = ShiftRegister(bot)
+    config_item = _timeline_config()
+    execution = ShiftDeadlineExecution(
+        event_state_id=55,
+        shift_register_id=config_item.id,
+        guild_id=111,
+        channel_id=222,
+        delivery_nonce=123,
+        status=ShiftTimelineEventStatus.SCHEDULED,
+        message_id=None,
+    )
+
+    class RetryManager:
+        def __init__(self, feature_channel: object, _service_account_path: str) -> None:
+            self.feature_channel = feature_channel
+            self.calls = 0
+            self.mark_calls = 0
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config_item
+
+        async def begin_submission_deadline_close(
+            self,
+            **_kwargs: object,
+        ) -> ShiftDeadlineExecution:
+            self.calls += 1
+            return execution
+
+        async def mark_submission_deadline_sent(self, **_kwargs: object) -> bool:
+            self.mark_calls += 1
+            if self.mark_calls == 1:
+                error_message = "persist failed"
+                raise RuntimeError(error_message)
+            return True
+
+        async def complete_submission_deadline(self, **_kwargs: object) -> bool:
+            return True
+
+    manager = RetryManager(config_item.feature_channel, "service.json")
+    monkeypatch.setattr(subject, "ManagerType", lambda *_args: manager)
+    monkeypatch.setattr(
+        ShiftRegisterConfig,
+        "filter",
+        classmethod(lambda _cls, **_kwargs: _TimelineQuery(config_item)),
+    )
+    monkeypatch.setattr(
+        feature_channel_base,
+        "get_announcement_languages",
+        lambda _guild_id, _logger: asyncio.sleep(0, result=["en"]),
+    )
+    subject._disable_auto_guide_and_delete_message = (  # type: ignore[method-assign]
+        _noop_async
+    )
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        await subject._handle_timeline_event(
+            config_item.id,
+            ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            config_item.submission_deadline_at,
+            123,
+        )
+    assert subject._pending_message_ids == {
+        (config_item.id, ShiftTimelineEventKind.SUBMISSION_DEADLINE): (123, 9001)
+    }
+
+    await subject._handle_timeline_event(
+        config_item.id,
+        ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        config_item.submission_deadline_at,
+        123,
+    )
+
+    assert len(channel.send_attempts) == 1
+    assert subject._pending_message_ids == {}
+
+
+@pytest.mark.asyncio
+async def test_shift_deadline_close_transition_failure_has_no_discord_side_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    channel = _TimelineChannel()
+    subject = ShiftRegister(_TimelineBot(channel))
+    config_item = _timeline_config()
+
+    class FailingManager:
+        def __init__(self, feature_channel: object, _service_account_path: str) -> None:
+            self.feature_channel = feature_channel
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config_item
+
+        async def begin_submission_deadline_close(self, **_kwargs: object) -> None:
+            error_message = "close transaction failed"
+            raise RuntimeError(error_message)
+
+    monkeypatch.setattr(subject, "ManagerType", FailingManager)
+    monkeypatch.setattr(
+        ShiftRegisterConfig,
+        "filter",
+        classmethod(lambda _cls, **_kwargs: _TimelineQuery(config_item)),
+    )
+
+    with pytest.raises(RuntimeError, match="close transaction failed"):
+        await subject._handle_timeline_event(
+            config_item.id,
+            ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            config_item.submission_deadline_at,
+            123,
+        )
+
+    assert channel.send_attempts == []
 
 
 @pytest.mark.asyncio

@@ -1064,8 +1064,19 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         ("I1:I24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J24:M24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("I1:I20", "#000000", "SOLID", ("left",)),
-        ("I20:M20", "#000000", "SOLID", ("bottom",)),
+        (
+            "I20:M20",
+            "#000000",
+            "SOLID",
+            shift_register_manager.OUTER_BORDER_SIDES,
+        ),
         ("L20", "#FF0000", "SOLID_MEDIUM", ("top", "bottom", "left", "right")),
+        (
+            "B2:G19",
+            "#FF0000",
+            "SOLID_MEDIUM",
+            shift_register_manager.OUTER_BORDER_SIDES,
+        ),
         ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L22", "#000000", "SOLID", ("top",)),
@@ -1667,7 +1678,8 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
     configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
-        recruitment_time_ranges=[{"start": 4, "end": 7}]
+        recruitment_time_ranges=[{"start": 4, "end": 7}],
+        team_source_feature_channel_id=None,
     )
     old_columns = [
         "username",
@@ -1702,7 +1714,8 @@ async def test_generate_draft_rejects_nonbinary_entry_before_draft_write() -> No
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
     value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
-        recruitment_time_ranges=[{"start": 4, "end": 7}]
+        recruitment_time_ranges=[{"start": 4, "end": 7}],
+        team_source_feature_channel_id=None,
     )
     entry_ranges = build_entry_ranges([("bob", "Bob", {4, 5})])
     entry_ranges[2][0][4] = "not binary"

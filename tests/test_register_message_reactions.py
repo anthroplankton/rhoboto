@@ -131,9 +131,14 @@ class FakeMessage:
 
 
 async def fake_enabled_feature_channel_get_or_none(
-    *, guild_id: int, channel_id: int, feature_name: str
+    *,
+    guild_id: int | None = None,
+    channel_id: int | None = None,
+    feature_name: str | None = None,
+    **lookup: int,
 ) -> SimpleNamespace:
     return SimpleNamespace(
+        id=lookup.get("id", 1),
         guild_id=guild_id,
         channel_id=channel_id,
         feature_name=feature_name,
@@ -635,8 +640,8 @@ async def test_shift_message_out_of_recruitment_range_rejects_before_sheets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FakeShiftRegisterManager:
-        def __init__(self, *_: object) -> None:
-            pass
+        def __init__(self, feature_channel: object, *_: object) -> None:
+            self.feature_channel = feature_channel
 
         async def get_sheet_config_or_none(self) -> SimpleNamespace:
             return SimpleNamespace(
@@ -715,8 +720,8 @@ async def test_shift_listener_marks_old_entry_header_contract_error(
     )
 
     class OldHeaderShiftRegisterManager:
-        def __init__(self, *_: object) -> None:
-            pass
+        def __init__(self, feature_channel: object, *_: object) -> None:
+            self.feature_channel = feature_channel
 
         async def upsert_or_delete_user_shift(
             self,
