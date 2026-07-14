@@ -419,6 +419,166 @@ def test_auto_guide_runtime_templates_render(
 
 
 @pytest.mark.parametrize(
+    ("locale", "expected_title", "expected_description", "expected_footer"),
+    [
+        (
+            "ja",
+            "2日目｜シフト募集を締め切りました 🙇",  # noqa: RUF001
+            (
+                "ご提出くださった皆さま、ありがとうございました！\n"  # noqa: RUF001
+                "定刻となりましたので、シフト募集を締め切らせていただきます。\n"
+                "-# 結果は [Google Sheets](https://example.com) で確認できます。\n\n"
+                "- 仮シフト提示：　13日（木）20時\n"  # noqa: RUF001
+                "- 確定シフト提示：14日（金）18時"  # noqa: RUF001
+            ),
+            "募集締切：12日（水）21時（JST）",  # noqa: RUF001
+        ),
+        (
+            "zh_tw",
+            "第2天｜班表登記已截止 🙇",  # noqa: RUF001
+            (
+                "感謝大家登記班表！\n"  # noqa: RUF001
+                "募集截止時間已到，班表登記到此結束。\n"  # noqa: RUF001
+                "-# 可在 [Google Sheets](https://example.com) 確認結果。\n\n"
+                "- 暫定班表公布：13日（四）20時\n"  # noqa: RUF001
+                "- 確定班表公布：14日（五）18時"  # noqa: RUF001
+            ),
+            "募集截止：12日（三）21時（JST）",  # noqa: RUF001
+        ),
+        (
+            "en",
+            "Day 2 | Shift registration is now closed 🙇",
+            (
+                "Thank you, everyone, for your submissions!\n"
+                "The submission deadline has been reached, so shift "
+                "registration is now closed.\n"
+                "-# Results can be checked in [Google Sheets](https://example.com).\n\n"
+                "- Draft shift proposal: 13 (Thu) 20:00\n"
+                "- Final shift notice: 14 (Fri) 18:00"
+            ),
+            "Submission deadline: 12 (Wed) 21:00 JST",
+        ),
+    ],
+)
+def test_shift_deadline_close_templates_render_exact_copy(
+    locale: str,
+    expected_title: str,
+    expected_description: str,
+    expected_footer: str,
+) -> None:
+    values = {
+        "day_number": 2,
+        "submission_deadline": SimpleNamespace(
+            day=12,
+            weekday={"ja": "水", "zh_tw": "三", "en": "Wed"}[locale],
+            hour=21,
+        ),
+        "draft_shift_proposal": SimpleNamespace(
+            day=13,
+            weekday={"ja": "木", "zh_tw": "四", "en": "Thu"}[locale],
+            hour=20,
+        ),
+        "final_shift_notice": SimpleNamespace(
+            day=14,
+            weekday={"ja": "金", "zh_tw": "五", "en": "Fri"}[locale],
+            hour=18,
+        ),
+    }
+
+    for part, expected in (
+        ("title", expected_title),
+        ("description", expected_description),
+        ("footer", expected_footer),
+    ):
+        assert (
+            render_message_template(
+                f"shift.deadline_close.{part}", locale, **values
+            ).rstrip("\n")
+            == expected
+        )
+
+
+@pytest.mark.parametrize("locale", ["ja", "zh_tw", "en"])
+@pytest.mark.parametrize("case_name", ["dayless", "draft_only", "final_only", "none"])
+def test_shift_deadline_close_templates_guard_optional_rows(
+    locale: str,
+    case_name: str,
+) -> None:
+    day_number, draft, final = {
+        "dayless": (None, True, True),
+        "draft_only": (2, True, False),
+        "final_only": (2, False, True),
+        "none": (2, False, False),
+    }[case_name]
+    weekday = {
+        "ja": ("水", "木", "金"),
+        "zh_tw": ("三", "四", "五"),
+        "en": ("Wed", "Thu", "Fri"),
+    }[locale]
+    values = {
+        "day_number": day_number,
+        "submission_deadline": SimpleNamespace(day=12, weekday=weekday[0], hour=21),
+        "draft_shift_proposal": (
+            SimpleNamespace(day=13, weekday=weekday[1], hour=20) if draft else None
+        ),
+        "final_shift_notice": (
+            SimpleNamespace(day=14, weekday=weekday[2], hour=18) if final else None
+        ),
+    }
+
+    title = render_message_template("shift.deadline_close.title", locale, **values)
+    description = render_message_template(
+        "shift.deadline_close.description", locale, **values
+    )
+    expected_title = {
+        "ja": "2日目｜シフト募集を締め切りました 🙇",  # noqa: RUF001
+        "zh_tw": "第2天｜班表登記已截止 🙇",  # noqa: RUF001
+        "en": "Day 2 | Shift registration is now closed 🙇",
+    }[locale]
+    if case_name == "dayless":
+        expected_title = {
+            "ja": "シフト募集を締め切りました 🙇",
+            "zh_tw": "班表登記已截止 🙇",
+            "en": "Shift registration is now closed 🙇",
+        }[locale]
+    assert title.rstrip("\n") == expected_title
+    draft_label = {
+        "ja": "- 仮シフト提示",
+        "zh_tw": "- 暫定班表公布",
+        "en": "- Draft shift proposal",
+    }[locale]
+    final_label = {
+        "ja": "- 確定シフト提示",
+        "zh_tw": "- 確定班表公布",
+        "en": "- Final shift notice",
+    }[locale]
+    assert (draft_label in description) is draft
+    assert (final_label in description) is final
+    if case_name == "none":
+        assert "\n\n" not in description
+        assert (
+            description.rstrip("\n")
+            == {
+                "ja": (
+                    "ご提出くださった皆さま、ありがとうございました！\n"  # noqa: RUF001
+                    "定刻となりましたので、シフト募集を締め切らせていただきます。\n"
+                    "-# 結果は [Google Sheets](https://example.com) で確認できます。"
+                ),
+                "zh_tw": (
+                    "感謝大家登記班表！\n募集截止時間已到，班表登記到此結束。\n"  # noqa: RUF001
+                    "-# 可在 [Google Sheets](https://example.com) 確認結果。"
+                ),
+                "en": (
+                    "Thank you, everyone, for your submissions!\n"
+                    "The submission deadline has been reached, so shift "
+                    "registration is now closed.\n"
+                    "-# Results can be checked in [Google Sheets](https://example.com)."
+                ),
+            }[locale]
+        )
+
+
+@pytest.mark.parametrize(
     ("locale", "expected"),
     [
         (

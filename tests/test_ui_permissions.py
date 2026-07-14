@@ -35,9 +35,14 @@ from components.ui_settings_flow import (
     attach_settings_view_message,
 )
 from components.ui_shift_register import (
+    AUTO_CLOSE_FIELD_NAME,
+    AUTO_CLOSE_INVALID_DEADLINE_MESSAGE,
+    AUTO_CLOSE_INVALIDATED_MESSAGE,
     ApplyTeamSourceButton,
+    AutoCloseButton,
     GenerateShiftScheduleConfirmView,
     ManageTeamSourceButton,
+    ShiftAutoCloseCallbacks,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
     ShiftRegisterSheetModal,
@@ -58,9 +63,12 @@ from components.ui_team_register import (
     TeamRegisterView,
     build_current_settings_embed as build_team_current_settings_embed,
 )
+from models.shift_timeline_event_state import ShiftTimelineEventKind
 from tests.fakes import FakeInteraction, FakeRole
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_register_manager import (
+    ShiftTimelineScheduleChange,
+    ShiftTimelineUpdateResult,
     TeamSource,
     TeamSourceResolution,
     TeamSourceStatus,
@@ -257,6 +265,7 @@ class RecordingShiftRegisterManager:
         self.day_number = 2
         self.event_date = dt.date(2026, 8, 12)
         self.submission_deadline_at = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+        self.deadline_automation_enabled = False
         self.draft_shift_proposal_at = dt.datetime(2026, 8, 13, 11, tzinfo=dt.UTC)
         self.final_shift_notice_at = dt.datetime(2026, 8, 14, 9, tzinfo=dt.UTC)
         self.recruitment_time_ranges = [{"start": 4, "end": 28}]
@@ -268,6 +277,7 @@ class RecordingShiftRegisterManager:
         )
         self.upsert_error: Exception | None = None
         self.save_error: Exception | None = None
+        self.timeline_result = ShiftTimelineUpdateResult()
         self.fresh_config_error: Exception | None = None
         self.refresh_error: Exception | None = None
         self.metadata_error: GoogleSheetsError | None = None
@@ -312,7 +322,7 @@ class RecordingShiftRegisterManager:
         submission_deadline_at: dt.datetime | None,
         draft_shift_proposal_at: dt.datetime | None,
         final_shift_notice_at: dt.datetime | None,
-    ) -> None:
+    ) -> ShiftTimelineUpdateResult:
         if self.save_error is not None:
             raise self.save_error
         self.timeline_updates.append(
@@ -329,6 +339,7 @@ class RecordingShiftRegisterManager:
         self.submission_deadline_at = submission_deadline_at
         self.draft_shift_proposal_at = draft_shift_proposal_at
         self.final_shift_notice_at = final_shift_notice_at
+        return self.timeline_result
 
     async def update_recruitment_time_ranges(self, ranges: object) -> None:
         if self.save_error is not None:
@@ -351,6 +362,7 @@ class RecordingShiftRegisterManager:
             draft_shift_proposal_at=self.draft_shift_proposal_at,
             final_shift_notice_at=self.final_shift_notice_at,
             recruitment_time_ranges=self.recruitment_time_ranges,
+            deadline_automation_enabled=self.deadline_automation_enabled,
         )
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace | None:
@@ -510,6 +522,46 @@ async def noop_latest_guide_toggle(
     del enabled, current_view
 
 
+class RecordingAutoCloseCallbacks:
+    def __init__(self) -> None:
+        self.toggle_calls: list[tuple[object, bool, object]] = []
+        self.schedule_changes: list[ShiftTimelineScheduleChange] = []
+
+    async def toggle(
+        self,
+        interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        self.toggle_calls.append((interaction, enabled, current_view))
+
+    def schedule_changed(self, change: ShiftTimelineScheduleChange) -> None:
+        self.schedule_changes.append(change)
+
+
+def auto_close_callbacks(
+    recorder: RecordingAutoCloseCallbacks,
+) -> ShiftAutoCloseCallbacks:
+    return ShiftAutoCloseCallbacks(
+        toggle=recorder.toggle,
+        schedule_changed=recorder.schedule_changed,
+    )
+
+
+def deadline_schedule_change(
+    *,
+    scheduled_at: dt.datetime | None,
+    delivery_nonce: int | None,
+) -> ShiftTimelineScheduleChange:
+    return ShiftTimelineScheduleChange(
+        shift_register_id=1,
+        event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        scheduled_at=scheduled_at,
+        delivery_nonce=delivery_nonce,
+    )
+
+
 async def latest_guide_is_enabled() -> bool:
     return True
 
@@ -641,6 +693,144 @@ def test_configured_shift_view_starts_with_disable_latest_guide_button() -> None
     assert first_child.style is ButtonStyle.secondary
 
 
+def test_shift_settings_panel_shows_enabled_auto_close_and_approved_rows() -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.deadline_automation_enabled = True
+    manager.submission_deadline_at = dt.datetime(2026, 8, 14, 12, tzinfo=dt.UTC)
+    recorder = RecordingAutoCloseCallbacks()
+    view = ShiftRegisterView(
+        manager,
+        has_existing_settings=True,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        auto_close_callbacks=auto_close_callbacks(recorder),
+        auto_close_enabled=True,
+    )
+    embed = build_shift_current_settings_embed(
+        sheet_url=manager.sheet_url,
+        metadata=manager.metadata,
+        final_schedule_anchor_cell=manager.final_schedule_anchor_cell,
+        shift_register=manager,
+        color=0,
+        latest_guide_enabled=True,
+        team_source=manager.team_source,
+    )
+
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map[AUTO_CLOSE_FIELD_NAME] == (
+        r"- \🟢 `Enabled` : Shift Register will be disabled automatically at "
+        "`2026-08-14 21:00 JST`."
+    )
+    assert [(child.label, child.style, child.row) for child in view.children] == [
+        ("Disable Latest Guide", ButtonStyle.secondary, 0),
+        ("Disable Auto Close", ButtonStyle.secondary, 0),
+        ("Edit Sheet Settings", ButtonStyle.secondary, 1),
+        ("Edit Team Source", ButtonStyle.secondary, 1),
+        ("Edit Recruitment Time Range", ButtonStyle.secondary, 2),
+        ("Edit Shift Timeline", ButtonStyle.secondary, 2),
+    ]
+
+
+def test_shift_settings_panel_shows_disabled_auto_close() -> None:
+    manager = RecordingShiftRegisterManager()
+    recorder = RecordingAutoCloseCallbacks()
+    view = ShiftRegisterView(
+        manager,
+        has_existing_settings=True,
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+    embed = build_shift_current_settings_embed(
+        sheet_url=manager.sheet_url,
+        metadata=manager.metadata,
+        final_schedule_anchor_cell=manager.final_schedule_anchor_cell,
+        shift_register=manager,
+        color=0,
+        team_source=manager.team_source,
+    )
+
+    field_map = {field.name: field.value for field in embed.fields}
+    assert field_map[AUTO_CLOSE_FIELD_NAME] == (
+        r"- \⚫ `Disabled` : No automatic close is scheduled. Enable this to "
+        "disable Shift Register at the saved Submission Deadline."
+    )
+    assert (view.children[0].label, view.children[0].style, view.children[0].row) == (
+        "Enable Auto Close",
+        ButtonStyle.primary,
+        0,
+    )
+
+
+def test_shift_setup_view_has_no_toggle_controls() -> None:
+    recorder = RecordingAutoCloseCallbacks()
+    view = ShiftRegisterView(
+        RecordingShiftRegisterManager(),
+        has_existing_settings=False,
+        latest_guide_enabled=True,
+        latest_guide_toggle_callback=noop_latest_guide_toggle,
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+
+    assert [child.label for child in view.children] == ["Set Up Shift Register"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("permission", ["administrator", "manage_channels"])
+async def test_shift_auto_close_button_rechecks_settings_permissions(
+    permission: str,
+) -> None:
+    recorder = RecordingAutoCloseCallbacks()
+    view = ShiftRegisterView(
+        RecordingShiftRegisterManager(),
+        has_existing_settings=True,
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+    interaction = FakeInteraction(**{permission: False})
+
+    await child_with_label(view, "Enable Auto Close").callback(interaction)
+
+    assert_permission_denied(interaction)
+    assert recorder.toggle_calls == []
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_button_delegates_inverted_action_and_view() -> None:
+    recorder = RecordingAutoCloseCallbacks()
+    view = ShiftRegisterView(
+        RecordingShiftRegisterManager(),
+        has_existing_settings=True,
+        auto_close_callbacks=auto_close_callbacks(recorder),
+        auto_close_enabled=True,
+    )
+    interaction = FakeInteraction()
+
+    await child_with_label(view, "Disable Auto Close").callback(interaction)
+
+    assert interaction.response.deferred == [False]
+    assert recorder.toggle_calls == [(interaction, False, view)]
+
+
+@pytest.mark.asyncio
+async def test_shift_auto_close_button_reports_invalid_deadline() -> None:
+    async def reject_toggle(
+        _interaction: object,
+        *,
+        enabled: bool,
+        current_view: object,
+    ) -> None:
+        del enabled, current_view
+        raise ui_shift_register.AutoCloseDeadlineNotFutureError
+
+    button = AutoCloseButton(enabled=False, toggle_callback=reject_toggle)
+    interaction = FakeInteraction()
+
+    await button.callback(interaction)
+
+    assert interaction.response.deferred == [False]
+    assert interaction.followup.messages == [
+        (AUTO_CLOSE_INVALID_DEADLINE_MESSAGE, {"ephemeral": True})
+    ]
+
+
 @pytest.mark.asyncio
 async def test_team_latest_guide_button_callback_has_view_manager() -> None:
     manager = RecordingTeamRegisterManager()
@@ -727,8 +917,11 @@ def test_shift_settings_embed_includes_latest_guide_status_before_timeline() -> 
     assert field_names.index(LATEST_GUIDE_FIELD_NAME) == (
         field_names.index("Final Schedule Anchor Cell") + 1
     )
-    assert field_names.index("Shift Timeline") == (
+    assert field_names.index(AUTO_CLOSE_FIELD_NAME) == (
         field_names.index(LATEST_GUIDE_FIELD_NAME) + 1
+    )
+    assert field_names.index("Shift Timeline") == (
+        field_names.index(AUTO_CLOSE_FIELD_NAME) + 1
     )
     latest_guide_field = embed.fields[field_names.index(LATEST_GUIDE_FIELD_NAME)]
     assert latest_guide_field.value == (
@@ -808,8 +1001,8 @@ async def test_shift_settings_panel_lists_unique_team_source() -> None:
     assert [getattr(child, "label", None) for child in view.children] == [
         "Edit Sheet Settings",
         "Edit Team Source",
-        "Edit Shift Timeline",
         "Edit Recruitment Time Range",
+        "Edit Shift Timeline",
     ]
 
 
@@ -850,8 +1043,8 @@ async def test_edit_team_source_can_return_to_settings_without_saving() -> None:
     assert labels == [
         "Edit Sheet Settings",
         "Edit Team Source",
-        "Edit Shift Timeline",
         "Edit Recruitment Time Range",
+        "Edit Shift Timeline",
     ]
     assert manager.team_source_apply_calls == []
 
@@ -2593,8 +2786,8 @@ async def test_shift_setup_button_with_existing_config_sends_current_panel() -> 
     assert [child.label for child in kwargs["view"].children] == [
         "Edit Sheet Settings",
         "Edit Team Source",
-        "Edit Shift Timeline",
         "Edit Recruitment Time Range",
+        "Edit Shift Timeline",
     ]
     assert kwargs["embed"].footer.text is None
     assert kwargs["wait"] is True
@@ -2911,8 +3104,8 @@ async def test_apply_team_source_preserves_latest_guide_control() -> None:
         "Disable Latest Guide",
         "Edit Sheet Settings",
         "Edit Team Source",
-        "Edit Shift Timeline",
         "Edit Recruitment Time Range",
+        "Edit Shift Timeline",
     ]
 
 
@@ -3163,6 +3356,140 @@ async def test_shift_timeline_modal_submit_updates_timeline() -> None:
     assert len(interaction.followup.messages) == 1
     _, kwargs = interaction.followup.messages[0]
     assert kwargs["embed"].title == "Shift Register Settings Saved"
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_save_uses_lock_without_schedule_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingShiftRegisterManager()
+    recorder = RecordingAutoCloseCallbacks()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+
+    await modal.on_submit(interaction)
+
+    assert sheet_lock.keys == [222]
+    assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
+    assert recorder.schedule_changes == []
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_save_notifies_future_schedule_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingShiftRegisterManager()
+    future = dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC)
+    manager.timeline_result = ShiftTimelineUpdateResult(
+        schedule_change=deadline_schedule_change(
+            scheduled_at=future,
+            delivery_nonce=123,
+        )
+    )
+    recorder = RecordingAutoCloseCallbacks()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+
+    await modal.on_submit(FakeInteraction())
+
+    assert recorder.schedule_changes == [manager.timeline_result.schedule_change]
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_save_warns_when_auto_close_is_invalidated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.timeline_result = ShiftTimelineUpdateResult(
+        schedule_change=deadline_schedule_change(
+            scheduled_at=None,
+            delivery_nonce=None,
+        ),
+        auto_close_disabled=True,
+    )
+    recorder = RecordingAutoCloseCallbacks()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
+    interaction = FakeInteraction()
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+
+    await modal.on_submit(interaction)
+
+    assert recorder.schedule_changes == [manager.timeline_result.schedule_change]
+    assert interaction.followup.messages[0][0] == AUTO_CLOSE_INVALIDATED_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_shift_timeline_save_failure_does_not_notify_schedule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = RecordingShiftRegisterManager()
+    manager.save_error = DBConnectionError("private database host")
+    manager.timeline_result = ShiftTimelineUpdateResult(
+        schedule_change=deadline_schedule_change(
+            scheduled_at=dt.datetime(2026, 8, 12, 12, tzinfo=dt.UTC),
+            delivery_nonce=123,
+        )
+    )
+    recorder = RecordingAutoCloseCallbacks()
+    sheet_lock = RecordingAsyncLock()
+    monkeypatch.setattr(
+        ui_shift_register,
+        "SHIFT_REGISTER_SHEET_WRITE_LOCK",
+        sheet_lock,
+    )
+    modal = ShiftTimelineModal(
+        manager,
+        day_number="3",
+        event_date="2026-08-12",
+        submission_deadline_at="8/12 21",
+        draft_shift_proposal_at="",
+        final_shift_notice_at="",
+        auto_close_callbacks=auto_close_callbacks(recorder),
+    )
+
+    await modal.on_submit(FakeInteraction())
+
+    assert recorder.schedule_changes == []
 
 
 @pytest.mark.asyncio
