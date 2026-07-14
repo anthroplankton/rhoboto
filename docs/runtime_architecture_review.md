@@ -82,6 +82,39 @@ Before removing any compatibility fallback, verify the database/schema rollout
 and legacy data contract. Treat required migrations separately rather than
 turning a local type cleanup into an implicit behavior change.
 
+## Reusable Refactor Principles
+
+Use these principles when a shared runtime class grows to serve features with
+different capabilities:
+
+- Put a concrete workflow on the lowest base where its ordering and semantics
+  are genuinely identical. Use narrow typed hooks for the steps that differ;
+  avoid a bag of optional mixins or per-method capability checks.
+- Put mutable state at its lowest semantic owner. A child-owned lock already
+  namespaces that feature, so its key should identify the protected resource
+  rather than repeat the feature name. Shared admin/public surfaces may
+  intentionally reference the same child-owned state.
+- Treat adapters as small boundary methods, not an architecture layer. Convert
+  one established contract into another at the boundary without adding adapter
+  classes, registries, or pass-through containers.
+- Use dependent generics to preserve related config, metadata, manager, input,
+  and result types across inherited workflows. Use a narrow Protocol when a
+  consumer needs only a class-level or behavioral capability.
+- Mark required hooks with `abstractmethod` and concrete implementations with
+  `override`. Keep a complete default concrete when it already represents valid
+  behavior; do not force every child to repeat it.
+- Narrow external and framework values once at their boundary. Prefer validated
+  source/channel helpers and explicit `isinstance` branches over broad `object`,
+  `Any`, casts, or defaulted required-field access.
+- Make test fakes satisfy the production contract. Do not retain production
+  fallbacks solely because a loose fake omits required state.
+- Promote a shared type to a public name when subclasses consume it across
+  modules. Do not import private underscore-prefixed contracts or retain aliases
+  after a clean module split.
+
+These rules guide future refactors; they do not by themselves authorize behavior,
+schema, command, or storage-contract changes.
+
 ## Unfinished Functionality
 
 - Shift Register supports Entry, Draft, and Final Schedule manager workflows,
