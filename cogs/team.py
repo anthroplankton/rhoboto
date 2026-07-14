@@ -5,8 +5,12 @@ from typing import TYPE_CHECKING, override
 from discord import Interaction, app_commands
 from discord.app_commands import locale_str
 
-from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
+from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.register_feature_channel_user_base import (
+    RegisterFeatureChannelUserBase,
+)
 from cogs.team_register import TeamRegister
+from models.team_register import TeamRegisterConfig
 from utils.team_register_manager import (
     TeamRegisterManager,
     fresh_team_channel_transaction,
@@ -15,13 +19,17 @@ from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
-    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
+    from cogs.base.register_feature_channel_context import (
+        ConfiguredRegisterFeatureChannelContext,
+    )
     from utils.structs_base import UserInfo
 
 
 class Team(
-    FeatureChannelUserBase[
-        TeamRegister, TeamRegisterManager, TeamRegisterGoogleSheetsMetadata
+    RegisterFeatureChannelUserBase[
+        TeamRegisterConfig,
+        TeamRegisterGoogleSheetsMetadata,
+        TeamRegisterManager,
     ],
     group_name=app_commands.locale_str("team"),
 ):
@@ -30,12 +38,14 @@ class Team(
 
     FeatureChannelType = TeamRegister
     ManagerType = TeamRegisterManager
-    GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
 
     @override
     async def _delete_user_data_transaction(
         self,
-        context: ConfiguredFeatureChannelContext[TeamRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            TeamRegisterConfig,
+            TeamRegisterManager,
+        ],
         user_info: UserInfo,
     ) -> None:
         manager = context.manager

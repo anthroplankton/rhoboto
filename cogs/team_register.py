@@ -7,6 +7,7 @@ from discord import Interaction, Member, Message, app_commands
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
 from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.register_feature_channel_base import RegisterFeatureChannelBase
 from components.ui_storage_errors import send_storage_error
 from components.ui_team_register import (
     TEAM_REGISTER_DISPLAY_NAME,
@@ -15,6 +16,7 @@ from components.ui_team_register import (
     build_team_register_settings_panel,
     get_fresh_team_register_config_or_respond,
 )
+from models.team_register import TeamRegisterConfig
 from utils.key_async_lock import KeyAsyncLock
 from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.storage_errors import (
@@ -26,7 +28,12 @@ from utils.team_register_manager import (
     TeamRegisterManager,
     fresh_team_channel_transaction,
 )
-from utils.team_register_structs import ClassifiedTeams, Team, TeamParser
+from utils.team_register_structs import (
+    ClassifiedTeams,
+    Team,
+    TeamParser,
+    TeamRegisterGoogleSheetsMetadata,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -34,13 +41,21 @@ if TYPE_CHECKING:
     from discord.ui import View
 
     from bot import Rhoboto
-    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
+    from cogs.base.register_feature_channel_context import (
+        ConfiguredRegisterFeatureChannelContext,
+    )
     from components.ui_settings_flow import SettingsPanel
     from utils.structs_base import UserInfo
 
 
 class TeamRegister(
-    FeatureChannelBase[TeamRegisterManager, list[Team], ClassifiedTeams],
+    RegisterFeatureChannelBase[
+        TeamRegisterConfig,
+        TeamRegisterGoogleSheetsMetadata,
+        TeamRegisterManager,
+        list[Team],
+        ClassifiedTeams,
+    ],
     group_name="team_register",
 ):
     feature_name = "team_register"
@@ -77,7 +92,7 @@ class TeamRegister(
         self,
         interaction: Interaction,
         manager: TeamRegisterManager,
-        sheet_config: object,
+        sheet_config: TeamRegisterConfig,
     ) -> SettingsPanel:
         return await build_team_register_settings_panel(
             manager,
@@ -114,7 +129,10 @@ class TeamRegister(
     async def _process_configured_message_submission(
         self,
         message: Message,
-        context: ConfiguredFeatureChannelContext[TeamRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            TeamRegisterConfig,
+            TeamRegisterManager,
+        ],
         submission: list[Team],
         user_info: UserInfo,
     ) -> ClassifiedTeams | None:
@@ -192,8 +210,10 @@ class TeamRegister(
         )
 
         try:
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
         except Exception as exc:
@@ -209,7 +229,7 @@ class TeamRegister(
             return
 
         if context is None:
-            await self._send_missing_config_followup(interaction)
+            await self._send_missing_register_config_followup(interaction)
             return
 
         try:

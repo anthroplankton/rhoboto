@@ -5,20 +5,18 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from io import BytesIO
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, override
 
 from discord import File, User, app_commands
 from discord.utils import escape_markdown, escape_mentions
 
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
-from cogs.base.feature_channel_base import (
-    FeatureChannelBase,
-    _send_public_announcement_followups,
-)
-from cogs.base.feature_channel_context import (
-    ConfiguredFeatureChannelContext,
-    FeatureChannelContext,
+from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.register_feature_channel_base import RegisterFeatureChannelBase
+from cogs.base.register_feature_channel_context import (
+    ConfiguredRegisterFeatureChannelContext,
+    RegisterFeatureChannelContext,
 )
 from components.ui_settings_flow import prepare_replacement_settings_view
 from components.ui_shift_register import (
@@ -38,6 +36,7 @@ from models.shift_timeline_event_state import (
     ShiftTimelineEventState,
     ShiftTimelineEventStatus,
 )
+from utils.announcement_languages import ANNOUNCEMENT_RENDER_FAILURE_MESSAGE
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.key_async_lock import KeyAsyncLock
 from utils.manager_base import SheetConfigNotFoundError
@@ -66,6 +65,7 @@ from utils.shift_register_structs import (
     RecruitmentTimeRanges,
     Shift,
     ShiftParser,
+    ShiftRegisterGoogleSheetsMetadata,
 )
 from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
@@ -89,7 +89,6 @@ if TYPE_CHECKING:
 
     from bot import Rhoboto
     from components.ui_settings_flow import SettingsPanel
-    from models.base.sheet_config_base import SheetConfigBase
     from utils.shift_scheduler import DraftSchedule
 
 
@@ -448,7 +447,13 @@ def _format_draft_username(
 
 
 class ShiftRegister(
-    FeatureChannelBase[ShiftRegisterManager, Shift, Shift],
+    RegisterFeatureChannelBase[
+        ShiftRegisterConfig,
+        ShiftRegisterGoogleSheetsMetadata,
+        ShiftRegisterManager,
+        Shift,
+        Shift,
+    ],
     group_name="shift_register",
 ):
     feature_name = "shift_register"
@@ -658,26 +663,14 @@ class ShiftRegister(
     @override
     async def _refresh_auto_guide_if_enabled(
         self,
-        feature_channel_context: FeatureChannelContext[ShiftRegisterManager],
+        feature_channel_context: RegisterFeatureChannelContext[ShiftRegisterManager],
         channel: object,
         *,
-        feature_config: SheetConfigBase | None = None,
+        feature_config: ShiftRegisterConfig | None = None,
     ) -> bool:
-        feature_channel_id = getattr(
-            feature_channel_context.feature_channel,
-            "id",
-            None,
-        )
-        if feature_channel_id is None:
-            return await super()._refresh_auto_guide_if_enabled(
-                feature_channel_context,
-                channel,
-                feature_config=feature_config,
-            )
-
         try:
             fresh_feature_channel = await FeatureChannel.get_or_none(
-                id=feature_channel_id
+                id=feature_channel_context.feature_channel.id
             )
         except Exception:
             self.logger.exception(
@@ -691,7 +684,7 @@ class ShiftRegister(
         if fresh_feature_channel is None or not fresh_feature_channel.is_enabled:
             return True
 
-        fresh_context = FeatureChannelContext(
+        fresh_context = RegisterFeatureChannelContext(
             guild_id=feature_channel_context.guild_id,
             channel_id=feature_channel_context.channel_id,
             feature_channel=fresh_feature_channel,
@@ -706,7 +699,9 @@ class ShiftRegister(
     @override
     async def _guide_template_values(
         self,
-        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig, ShiftRegisterManager
+        ],
     ) -> dict[str, object]:
         values = await super()._guide_template_values(context)
         values[
@@ -717,11 +712,13 @@ class ShiftRegister(
     @override
     def _auto_guide_template_values(
         self,
-        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig, ShiftRegisterManager
+        ],
         language: str,
     ) -> dict[str, object]:
         values = super()._auto_guide_template_values(context, language)
-        feature_config = cast("ShiftRegisterConfig", context.feature_config)
+        feature_config = context.feature_config
         recruitment_ranges = RecruitmentTimeRanges.from_json(
             feature_config.recruitment_time_ranges
         )
@@ -762,7 +759,7 @@ class ShiftRegister(
         self,
         _interaction: Interaction,
         manager: ShiftRegisterManager,
-        sheet_config: object,
+        sheet_config: ShiftRegisterConfig,
     ) -> SettingsPanel:
         return await build_shift_register_settings_panel(
             manager,
@@ -973,7 +970,7 @@ class ShiftRegister(
             self._pending_message_ids.pop(key, None)
             return
 
-        guide_context = FeatureChannelContext(
+        guide_context = RegisterFeatureChannelContext(
             guild_id=execution.guild_id,
             channel_id=execution.channel_id,
             feature_channel=feature_channel,
@@ -1030,7 +1027,9 @@ class ShiftRegister(
     async def _process_configured_message_submission(
         self,
         message: Message,
-        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig, ShiftRegisterManager
+        ],
         submission: Shift,
         user_info: UserInfo,
     ) -> Shift | None:
@@ -1103,7 +1102,7 @@ class ShiftRegister(
                 )
 
         if invalid:
-            await self._add_invalid_registration_reactions(message)
+            await self._add_invalid_message_reactions(message)
             return None
 
         await transition_processing_reaction(
@@ -1152,15 +1151,17 @@ class ShiftRegister(
             action="post shift registration timeline announcement",
         )
         try:
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
-                await self._send_missing_config_followup(interaction)
+                await self._send_missing_register_config_followup(interaction)
                 return
 
-            feature_config = cast("ShiftRegisterConfig", context.feature_config)
+            feature_config = context.feature_config
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 feature_config.recruitment_time_ranges
             )
@@ -1184,7 +1185,17 @@ class ShiftRegister(
             )
             return
 
-        await _send_public_announcement_followups(interaction, announcements)
+        if not announcements:
+            await interaction.followup.send(
+                ANNOUNCEMENT_RENDER_FAILURE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        for announcement in announcements:
+            await interaction.followup.send(
+                announcement.content,
+                ephemeral=False,
+            )
 
     @app_commands.command(
         name="announce_guide",
@@ -1236,15 +1247,17 @@ class ShiftRegister(
         request: ScheduleUpdateRequest | None = None
         final_sheet_url = ""
         try:
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
-                await self._send_missing_config_followup(interaction)
+                await self._send_missing_register_config_followup(interaction)
                 return
 
-            feature_config = cast("ShiftRegisterConfig", context.feature_config)
+            feature_config = context.feature_config
             recruitment_ranges = RecruitmentTimeRanges.from_json(
                 feature_config.recruitment_time_ranges
             )
@@ -1297,12 +1310,14 @@ class ShiftRegister(
                 )
                 return
 
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
-                await self._send_missing_config_followup(interaction)
+                await self._send_missing_register_config_followup(interaction)
                 return
             async with fresh_shift_channel_transaction(
                 context.manager,
@@ -1448,12 +1463,14 @@ class ShiftRegister(
             action="generate shift draft schedule",
         )
         try:
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
-                await self._send_missing_config_followup(interaction)
+                await self._send_missing_register_config_followup(interaction)
                 return
 
             recruitment_ranges = RecruitmentTimeRanges.from_json(
@@ -1493,12 +1510,14 @@ class ShiftRegister(
                 )
                 return
 
-            feature_channel_context = await self._get_feature_channel_context(source)
-            context = await self._get_configured_feature_channel_context(
+            feature_channel_context = await self._get_register_feature_channel_context(
+                source
+            )
+            context = await self._get_configured_register_feature_channel_context(
                 feature_channel_context
             )
             if context is None:
-                await self._send_missing_config_followup(interaction)
+                await self._send_missing_register_config_followup(interaction)
                 return
             async with fresh_shift_channel_transaction(
                 context.manager,

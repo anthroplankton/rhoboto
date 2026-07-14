@@ -183,8 +183,8 @@ async def test_update_schedule_from_draft_confirms_before_metadata_and_writes_re
     )
     monkeypatch.setattr("cogs.shift_register.fresh_shift_channel_transaction", unlocked)
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
-    subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_register_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_configured_register_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
     await ShiftRegister.update_schedule_from_draft.callback(
@@ -232,8 +232,8 @@ async def test_update_schedule_from_draft_invalid_main_anchor_does_not_create_vi
         UnexpectedView,
     )
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
-    subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_register_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_configured_register_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
     await ShiftRegister.update_schedule_from_draft.callback(

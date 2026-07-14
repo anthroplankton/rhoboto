@@ -10,6 +10,13 @@ from tortoise.exceptions import DBConnectionError
 
 from bot import config
 from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.message_upsert_feature_channel_base import (
+    MessageUpsertFeatureChannelBase,
+)
+from cogs.base.register_feature_channel_base import RegisterFeatureChannelBase
+from cogs.base.register_feature_channel_context import (
+    RegisterFeatureChannelContextMixin,
+)
 from cogs.shift_register import ShiftRegister
 from cogs.team_register import TeamRegister
 from models.feature_channel import FeatureChannel
@@ -95,6 +102,9 @@ class FakeLogger:
     def warning(self, *_: object, **__: object) -> None:
         pass
 
+    def exception(self, *_: object, **__: object) -> None:
+        pass
+
 
 class NoInfoLogger(FakeLogger):
     def info(self, *_: object, **__: object) -> None:
@@ -116,7 +126,7 @@ class FakeMessage:
         self.content = content
         self.author = FakeAuthor()
         self.guild = SimpleNamespace(id=111)
-        self.channel = SimpleNamespace(id=222)
+        self.channel = FakeMessageChannel()
         self.added_reactions: list[str] = []
         self.removed_reactions: list[tuple[str, object]] = []
         self.reaction_events: list[tuple[object, ...]] = []
@@ -128,6 +138,16 @@ class FakeMessage:
     async def remove_reaction(self, emoji: str, user: object) -> None:
         self.removed_reactions.append((emoji, user))
         self.reaction_events.append(("remove", emoji, user))
+
+
+class FakeMessageChannel:
+    id = 222
+
+    async def send(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(id=456)
+
+    async def fetch_message(self, message_id: int) -> SimpleNamespace:
+        return SimpleNamespace(id=message_id)
 
 
 async def fake_enabled_feature_channel_get_or_none(
@@ -207,18 +227,36 @@ def make_subject(feature_name: str) -> SimpleNamespace:
         process_configured,
         subject,
     )
-    for method_name in (
-        "_message_user_info",
-        "_log_received_message",
-        "_build_feature_channel_context",
-        "_get_feature_channel_context_or_none",
-        "_get_configured_feature_channel_context",
-        "_get_message_feature_channel_context_or_none",
-        "_process_feature_channel_message_with_outcome",
-        "_add_invalid_registration_reactions",
+    subject._message_user_info = MessageUpsertFeatureChannelBase._message_user_info
+    for owner, method_names in (
+        (
+            MessageUpsertFeatureChannelBase,
+            (
+                "_log_received_message",
+                "_get_message_feature_channel_context_or_none",
+                "_process_feature_channel_message_with_outcome",
+                "_add_invalid_message_reactions",
+            ),
+        ),
+        (
+            RegisterFeatureChannelContextMixin,
+            (
+                "_build_register_feature_channel_context",
+                "_get_configured_register_feature_channel_context",
+            ),
+        ),
+        (
+            RegisterFeatureChannelBase,
+            (
+                "_build_message_context",
+                "_get_configured_message_context",
+                "_process_enabled_message",
+            ),
+        ),
     ):
-        method = getattr(FeatureChannelBase, method_name)
-        setattr(subject, method_name, MethodType(method, subject))
+        for method_name in method_names:
+            method = getattr(owner, method_name)
+            setattr(subject, method_name, MethodType(method, subject))
     subject._get_enabled_feature_channel_or_none = (
         FeatureChannelBase._get_enabled_feature_channel_or_none
     )
@@ -349,7 +387,7 @@ async def test_team_listener_adds_success_before_removing_processing(
     subject.sheet_write_lock = unlocked
     message = FakeMessage("150/740/33")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     expected = [("add", "✅")]
     if bot_user is not None:
@@ -435,7 +473,7 @@ async def test_team_duplicate_terminal_incident_batches_once_and_succeeds(
     subject.sheet_write_lock = unlocked
     message = FakeMessage("160/800/35.7\n160/800/35.7\n160/800/100")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert len(sheet.batch_updates) == 1
     mutations = sheet.batch_updates[0]
@@ -490,7 +528,7 @@ async def test_team_contract_failure_never_logs_private_pre_operation_data(
     message = FakeMessage("151/741/33.5")
     message.author.display_name = "private-team-display"
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.content not in caplog.text
     assert message.author.display_name not in caplog.text
@@ -788,7 +826,7 @@ async def test_shift_listener_marks_old_entry_header_contract_error(
     )
     message = FakeMessage("4-8")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
     assert message.added_reactions == [
@@ -813,7 +851,7 @@ async def test_shift_listener_marks_config_storage_failure(
     subject.bot = SimpleNamespace(user=bot_user)
     message = FakeMessage("4-8")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.added_reactions == [config.WARNING_EMOJI, "🛠️"]
 
@@ -836,7 +874,7 @@ async def test_shift_listener_lookup_storage_failure_stays_silent(
     subject = make_subject("shift_register")
     message = FakeMessage("ordinary chat")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.added_reactions == []
     assert message.removed_reactions == []
@@ -912,7 +950,7 @@ async def test_shift_listener_adds_success_before_removing_processing(
     )
     message = FakeMessage("4-8")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     expected = [("add", "✅")]
     if bot_user is not None:
@@ -958,7 +996,7 @@ async def test_shift_contract_failure_never_logs_private_pre_operation_data(
     message = FakeMessage("4-8")
     message.author.display_name = "private-shift-display"
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.content not in caplog.text
     assert message.author.display_name not in caplog.text
@@ -992,16 +1030,27 @@ def make_team_summary_subject(manager_type: type[object]) -> SimpleNamespace:
         ManagerType=manager_type,
         sheet_write_lock=unlocked_sheet_write,
     )
-    for method_name in (
-        "_get_feature_channel_context",
-        "_build_feature_channel_context",
-        "_get_configured_feature_channel_context",
-        "_send_missing_config_followup",
-        "_interaction_storage_context",
-        "_send_interaction_storage_error_or_raise",
+    for owner, method_names in (
+        (
+            RegisterFeatureChannelContextMixin,
+            (
+                "_get_register_feature_channel_context",
+                "_build_register_feature_channel_context",
+                "_get_configured_register_feature_channel_context",
+                "_send_missing_register_config_followup",
+            ),
+        ),
+        (
+            FeatureChannelBase,
+            (
+                "_interaction_storage_context",
+                "_send_interaction_storage_error_or_raise",
+            ),
+        ),
     ):
-        method = getattr(FeatureChannelBase, method_name)
-        setattr(subject, method_name, MethodType(method, subject))
+        for method_name in method_names:
+            method = getattr(owner, method_name)
+            setattr(subject, method_name, MethodType(method, subject))
     return subject
 
 
@@ -1034,7 +1083,7 @@ async def test_team_message_prewrite_permission_failure_keeps_access_kind(
     subject.sheet_write_lock = unlocked_sheet_write
     message = FakeMessage("150/740/33")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert "kind=google_sheets_access" in caplog.text
     assert "kind=partial_success" not in caplog.text
@@ -1214,7 +1263,7 @@ async def test_shift_ensure_failure_preserves_manager_storage_kind(
     )
     message = FakeMessage("4-8")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert events == expected_events
     assert f"kind={expected_kind.value}" in caplog.text
@@ -1290,7 +1339,7 @@ async def test_shift_post_ensure_upsert_failure_uses_actual_id_change(
     )
     message = FakeMessage("4-8")
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert events == [
         "fetch",
