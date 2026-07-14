@@ -53,11 +53,14 @@ from utils.manager_base import (
     worksheet_transactions,
 )
 from utils.shift_final import (
+    A1Rectangle,
     EventDayWriteStatus,
     FinalScheduleInputError,
     FinalSchedulePlan,
     ScheduleUpdateRequest,
     build_final_schedule,
+    build_schedule_update_request,
+    parse_a1_range,
 )
 from utils.shift_register_structs import (
     DraftNotesTeamSource,
@@ -211,6 +214,13 @@ class FinalScheduleReconfirmationRequired(Exception):  # noqa: N818
 class ScheduleUpdateResult:
     request: ScheduleUpdateRequest
     schedule: FinalSchedulePlan
+
+
+@dataclass(frozen=True)
+class FinalScheduleRoleSource:
+    selected_range: A1Rectangle
+    projected_values: tuple[tuple[int, int, object], ...]
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1738,6 +1748,40 @@ class ShiftRegisterManager(
             await self._persist_final_schedule_anchor(request.anchor_to_persist)
         return ScheduleUpdateResult(request=request, schedule=schedule)
 
+    async def read_final_schedule_role_source(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        final_schedule_range: A1Rectangle | None,
+        recruitment_ranges: RecruitmentTimeRanges | None,
+        saved_anchor: str,
+    ) -> FinalScheduleRoleSource:
+        selected_range = final_schedule_range
+        if selected_range is None:
+            if recruitment_ranges is None:
+                raise FinalScheduleInputError
+            request = build_schedule_update_request(
+                recruitment_ranges=recruitment_ranges,
+                saved_anchor=saved_anchor,
+                supplied_anchor=None,
+                event_date=None,
+                event_day_anchor=None,
+                event_day_format=None,
+            )
+            selected_range = parse_a1_range(_final_role_range(request))
+
+        final_worksheet = metadata.final_schedule_worksheet.worksheet
+        if final_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+        resource = worksheet_transaction_key(metadata.sheet_url, final_worksheet.id)
+        async with worksheet_transactions([resource]):
+            sheet = await self.get_google_sheet()
+            grids = await sheet.batch_get_worksheet_values([final_worksheet])
+            return _final_schedule_role_source(
+                grids[final_worksheet.id],
+                selected_range,
+            )
+
     async def _persist_final_schedule_anchor(self, anchor: str | None) -> None:
         if anchor is None:
             return
@@ -2967,6 +3011,40 @@ def _entry_team_formula(
         main_isv_column=columns.main_isv,
         encore_isv_column=columns.encore_isv,
         import_last_column=columns.import_last_column,
+    )
+
+
+def _final_schedule_role_source(
+    grid: Sequence[Sequence[object]],
+    selected_range: A1Rectangle,
+) -> FinalScheduleRoleSource:
+    projected_values: list[tuple[int, int, object]] = []
+    labels: list[str] = []
+    seen_labels: set[str] = set()
+    for row_index in range(
+        selected_range.start.row - 1,
+        min(selected_range.end.row, len(grid)),
+    ):
+        row = grid[row_index]
+        for column_index in range(
+            selected_range.start.column - 1,
+            min(selected_range.end.column, len(row)),
+        ):
+            value = row[column_index]
+            if _is_blank(value):
+                continue
+            if not isinstance(value, str):
+                raise WorksheetContractError(
+                    log_hint="final_schedule_role_value_not_text"
+                )
+            projected_values.append((row_index + 1, column_index + 1, value))
+            if value not in seen_labels:
+                labels.append(value)
+                seen_labels.add(value)
+    return FinalScheduleRoleSource(
+        selected_range=selected_range,
+        projected_values=tuple(projected_values),
+        labels=tuple(labels),
     )
 
 

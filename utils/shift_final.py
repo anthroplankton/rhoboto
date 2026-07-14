@@ -204,6 +204,18 @@ def parse_a1_cell(value: str) -> A1Cell:
     return A1Cell(row=row, column=column, a1=normalized)
 
 
+def parse_a1_range(value: str) -> A1Rectangle:
+    if not isinstance(value, str):
+        raise FinalScheduleInputError
+    endpoints = unicodedata.normalize("NFKC", value).split(":")
+    if len(endpoints) != 2:  # noqa: PLR2004
+        raise FinalScheduleInputError
+    start, end = (parse_a1_cell(endpoint) for endpoint in endpoints)
+    if start.row > end.row or start.column > end.column:
+        raise FinalScheduleInputError
+    return A1Rectangle(start=start, end=end)
+
+
 def format_event_day(value: date, pattern: str) -> str:
     if not isinstance(pattern, str):
         raise FinalScheduleInputError

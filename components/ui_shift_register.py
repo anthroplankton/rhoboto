@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from discord import ButtonStyle, Embed, Interaction, Object, TextStyle
@@ -219,6 +220,92 @@ class GenerateShiftScheduleCancelButton(Button):
             ),
             view=None,
         )
+        view.stop()
+
+
+class ScheduleRoleDecision(StrEnum):
+    CONFIRM = "confirm"
+    INCLUDE = "include"
+    SKIP = "skip"
+    CANCEL = "cancel"
+    PERMISSION_LOST = "permission_lost"
+
+
+class AssignScheduleRoleConfirmView(View):
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        has_duplicates: bool,
+        replace_mode: bool,
+        timeout: float = 20.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.requesting_user_id = requesting_user_id
+        self.decision: ScheduleRoleDecision | None = None
+        if has_duplicates:
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "包含重複成員並執行",
+                    ScheduleRoleDecision.INCLUDE,
+                    ButtonStyle.primary,
+                )
+            )
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "略過重複成員並執行",
+                    ScheduleRoleDecision.SKIP,
+                    ButtonStyle.danger if replace_mode else ButtonStyle.secondary,
+                )
+            )
+        else:
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "確認清除並更新",
+                    ScheduleRoleDecision.CONFIRM,
+                    ButtonStyle.danger,
+                )
+            )
+        self.add_item(
+            ScheduleRoleDecisionButton(
+                "取消",
+                ScheduleRoleDecision.CANCEL,
+                ButtonStyle.secondary,
+            )
+        )
+
+    async def authorize(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.requesting_user_id:
+            await interaction.response.send_message(
+                "⚠️ 只有執行此 command 的管理員可以操作。",
+                ephemeral=True,
+            )
+            return False
+        if await require_settings_permissions(interaction):
+            return True
+        self.decision = ScheduleRoleDecision.PERMISSION_LOST
+        self.stop()
+        return False
+
+
+class ScheduleRoleDecisionButton(Button):
+    def __init__(
+        self,
+        label: str,
+        decision: ScheduleRoleDecision,
+        style: ButtonStyle,
+    ) -> None:
+        super().__init__(label=label, style=style)
+        self.decision = decision
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(
+            view, AssignScheduleRoleConfirmView
+        ) or not await view.authorize(interaction):
+            return
+        view.decision = self.decision
+        await interaction.response.defer()
         view.stop()
 
 

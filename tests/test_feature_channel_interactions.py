@@ -59,6 +59,7 @@ from cogs.shift_register import (
     ShiftReportAssignment,
     _format_generate_draft_confirmation,
     _format_shift_assignment_section,
+    _replace_with_shift_report,
     _split_shift_report,
 )
 from cogs.team import Team
@@ -184,6 +185,66 @@ def test_split_shift_report_keeps_recruitment_with_assignments() -> None:
     assert messages[2].startswith("- 募集時間【4-12】")
     assert "- 已排入（安可｜本走；待機）：" in messages[2]
     assert all(len(message.encode("utf-16-le")) // 2 <= 200 for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_replace_with_shift_report_puts_view_on_final_chunk() -> None:
+    interaction = FakeInteraction()
+    original_message = SimpleNamespace(id=100)
+
+    async def edit_original_response(
+        content: object = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        interaction.original_response_edits.append((content, kwargs))
+        return original_message
+
+    interaction.edit_original_response = edit_original_response  # type: ignore[method-assign]
+    view = object()
+    report = "\n".join(f"line {index}: {'x' * 120}" for index in range(30))
+
+    control_message = await _replace_with_shift_report(
+        interaction,
+        report,
+        view=view,
+    )
+
+    assert interaction.original_response_edits[0][1]["view"] is None
+    assert all(
+        kwargs.get("view") is None
+        for _content, kwargs in interaction.followup.messages[:-1]
+    )
+    assert interaction.followup.messages[-1][1]["view"] is view
+    assert interaction.followup.messages[-1][1]["wait"] is True
+    assert control_message is interaction.followup.sent_message_objects[-1]
+
+
+@pytest.mark.asyncio
+async def test_replace_with_shift_report_keeps_view_on_one_chunk() -> None:
+    interaction = FakeInteraction()
+    original_message = SimpleNamespace(id=100)
+
+    async def edit_original_response(
+        content: object = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        interaction.original_response_edits.append((content, kwargs))
+        return original_message
+
+    interaction.edit_original_response = edit_original_response  # type: ignore[method-assign]
+    view = object()
+
+    control_message = await _replace_with_shift_report(
+        interaction,
+        "short report",
+        view=view,
+    )
+
+    assert interaction.original_response_edits == [
+        ("short report", {"view": view}),
+    ]
+    assert interaction.followup.messages == []
+    assert control_message is original_message
 
 
 def test_format_shift_assignment_section_uses_shared_draft_grammar() -> None:
@@ -492,7 +553,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
                 ),
             )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     config = SimpleNamespace(
@@ -527,7 +588,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
     monkeypatch.setattr(
@@ -634,7 +695,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
         draft_worksheet_id=222,
     )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -662,7 +723,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
@@ -746,7 +807,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
         draft_worksheet_id=222,
     )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -774,7 +835,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
@@ -812,7 +873,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
             msg = "Google Sheets must not be accessed before confirmation"
             raise AssertionError(msg)
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -843,7 +904,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
             pass
 
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
         "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
@@ -885,7 +946,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
             msg = "changed destinations must abort before Google Sheets"
             raise AssertionError(msg)
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         nonlocal feature_context_calls
         feature_context_calls += 1
         return object()
@@ -930,7 +991,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
             pass
 
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
         "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView

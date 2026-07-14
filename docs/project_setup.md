@@ -110,15 +110,20 @@ Use this invite URL to add the bot to a Discord server. Replace `CLIENT_ID` with
 the Application Client ID from Discord Developer Portal:
 
 ```text
-https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=347216&scope=bot%20applications.commands&integration_type=0
+https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=268782672&scope=bot%20applications.commands&integration_type=0
 ```
 
-This grants the bot the current recommended permissions for Rhoboto: slash
-commands, reading and sending channel messages, embeds, reactions, external
-emoji, updating the bot's guide messages, and `Manage Channels` (`16`). The
-`Manage Channels` bit is needed only when Automatic Close adds the `〆` prefix
-to the channel name. If it is missing, registration still closes and the
-closing announcement still completes; only the best-effort rename is skipped.
+Use `268782672` as the permissions value in the invite URL above. This grants
+the bot the current recommended permissions for Rhoboto: slash commands,
+reading and sending channel messages, embeds, reactions, external emoji,
+updating the bot's guide messages, `Manage Channels` (`16`), and `Manage Roles`
+(`268435456`). `Manage Channels` is used only when Automatic Close adds the
+`〆` prefix to the channel name. `Manage Roles` is used by
+`/shift_register assign_schedule_role`; Discord also requires the bot's highest
+role to remain above the selected target role.
+
+If `Manage Channels` is missing, registration still closes and the closing
+announcement still completes; only the best-effort rename is skipped.
 
 In Discord Developer Portal, also enable these privileged gateway intents on the
 Bot settings page:
@@ -128,23 +133,16 @@ Bot settings page:
 
 Do not grant the bot `Administrator` by default.
 
-If a future role-assignment feature is implemented and enabled, use the
-Manage Roles invite variant instead:
-
-```text
-https://discord.com/oauth2/authorize?client_id=CLIENT_ID&permissions=268782672&scope=bot%20applications.commands&integration_type=0
-```
-
 Existing installations do not receive the new permission automatically.
-Reauthorize the bot with the revised URL, or grant it `Manage Channels`
-manually. Category and channel-specific permission overwrites can still deny
-the bot's effective permission, so verify the permission in the target channel.
+Reauthorize the bot with the revised URL, or grant it `Manage Roles` manually.
+Retain `Manage Channels` if Automatic Close channel renaming is needed.
+Category and channel-specific permission overwrites can still deny the bot's
+effective permission, so verify the permission in the target channel.
 The close remains fail-closed when rename permission is unavailable: it does
 not reopen registration or resend the announcement just because the channel
 name could not be changed.
 
-For role assignment, the bot's Discord role must be above every role it should
-assign. Do not use the bot to assign high-risk roles unless that workflow has a
+Do not use the bot to assign high-risk roles unless that workflow has a
 separate permission review.
 
 ## Heroku Deployment

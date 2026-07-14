@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, override
 
-from discord import File, User, app_commands
+from discord import File, HTTPException, Role, User, app_commands
 from discord.utils import escape_markdown, escape_mentions
 
 from bot import config
@@ -22,7 +22,9 @@ from components.ui_settings_flow import prepare_replacement_settings_view
 from components.ui_shift_register import (
     AUTO_CLOSE_INVALIDATED_MESSAGE,
     SHIFT_REGISTER_DISPLAY_NAME,
+    AssignScheduleRoleConfirmView,
     GenerateShiftScheduleConfirmView,
+    ScheduleRoleDecision,
     ShiftAutoCloseCallbacks,
     ShiftDeadlineCloseView,
     ShiftRegisterView,
@@ -43,6 +45,7 @@ from utils.manager_base import SheetConfigNotFoundError
 from utils.reactions import add_reaction_if_possible, transition_processing_reaction
 from utils.shift_final import (
     DEFAULT_EVENT_DAY_FORMAT,
+    A1Rectangle,
     EventDayWriteStatus,
     FinalScheduleConflictError,
     FinalScheduleInputError,
@@ -50,11 +53,13 @@ from utils.shift_final import (
     FinalScheduleValidationKind,
     ScheduleUpdateRequest,
     build_schedule_update_request,
+    parse_a1_range,
 )
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     AutoCloseDeadlineNotFutureError,
     FinalScheduleReconfirmationRequired,
+    FinalScheduleRoleSource,
     ScheduleUpdateResult,
     ShiftRegisterManager,
     ShiftTimelineScheduleChange,
@@ -71,6 +76,13 @@ from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
     render_shift_timeline_announcement_messages,
 )
+from utils.shift_schedule_role import (
+    ScheduleRolePlan,
+    ScheduleRoleResolution,
+    ScheduleRoleUpdateMode,
+    plan_schedule_role_update,
+    resolve_schedule_role_labels,
+)
 from utils.shift_scheduler import (
     ENCORE_SUPPORTER_SLOT,
     HONSO_SUPPORTER_SLOTS,
@@ -82,12 +94,13 @@ from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from discord import Interaction, Message
+    from discord import Interaction, Member, Message
     from discord.ui import View
 
     from bot import Rhoboto
+    from cogs.base.discord_context import GuildChannelSource
     from components.ui_settings_flow import SettingsPanel
     from utils.shift_scheduler import DraftSchedule
 
@@ -116,6 +129,24 @@ class ShiftReportAssignment:
     encore: str | None
     honso: tuple[str, ...]
     standby: str | None
+
+
+@dataclass(frozen=True)
+class ScheduleRoleExecutionResult:
+    added_member_ids: tuple[int, ...]
+    removed_member_ids: tuple[int, ...]
+    add_failed_member_ids: tuple[int, ...]
+    remove_failed_member_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ScheduleRolePreviewSnapshot:
+    sheet_url: str
+    final_schedule_worksheet_id: int
+    role_id: int
+    mode: ScheduleRoleUpdateMode
+    source: FinalScheduleRoleSource
+    resolution: ScheduleRoleResolution
 
 
 def _split_long_shift_report_section(section: str, limit: int) -> list[str]:
@@ -418,11 +449,212 @@ def _format_final_partial_success(
 async def _replace_with_shift_report(
     interaction: Interaction,
     report: str,
-) -> None:
+    *,
+    view: View | None = None,
+) -> Message:
     messages = _split_shift_report(report)
-    await interaction.edit_original_response(content=messages[0], view=None)
-    for message in messages[1:]:
-        await interaction.followup.send(message, ephemeral=True)
+    control_message = await interaction.edit_original_response(
+        content=messages[0],
+        view=view if len(messages) == 1 else None,
+    )
+    for index, message in enumerate(messages[1:], start=1):
+        is_last = index == len(messages) - 1
+        if view is not None and is_last:
+            control_message = await interaction.followup.send(
+                message,
+                ephemeral=True,
+                view=view,
+                wait=True,
+            )
+        else:
+            await interaction.followup.send(message, ephemeral=True)
+    return control_message
+
+
+def _format_schedule_role_members(
+    member_ids: Sequence[int],
+    members_by_id: Mapping[int, Member],
+) -> str:
+    return (
+        "、".join(members_by_id[member_id].mention for member_id in member_ids)
+        or "なし"
+    )
+
+
+def _format_schedule_role_preview(
+    role: Role,
+    resolution: ScheduleRoleResolution,
+    plan: ScheduleRolePlan,
+    members_by_id: Mapping[int, Member],
+    *,
+    mode: ScheduleRoleUpdateMode,
+) -> str:
+    lines = [
+        (
+            "### ‼️ role 更新確認"
+            if mode is ScheduleRoleUpdateMode.REPLACE
+            else "### ⚠️ role 更新確認"
+        ),
+        (
+            f"將賦予 {role.mention}："
+            f"{_format_schedule_role_members(plan.add_member_ids, members_by_id)}"
+        ),
+    ]
+    if plan.already_member_ids:
+        lines.append(
+            f"原本已有 {role.mention}："
+            f"{_format_schedule_role_members(plan.already_member_ids, members_by_id)}"
+        )
+    if plan.remove_member_ids:
+        lines.append(
+            f"將清除以下成員的 {role.mention}："
+            f"{_format_schedule_role_members(plan.remove_member_ids, members_by_id)}"
+        )
+    if resolution.unresolved_labels:
+        lines.append(
+            "⚠️ 找不到對應的 Discord 成員："
+            + "、".join(
+                _format_display_name(label) for label in resolution.unresolved_labels
+            )
+        )
+    if resolution.duplicate_groups:
+        lines.append("重複的成員：")
+        lines.extend(
+            f"- {_format_display_name(group.label)}："
+            f"{_format_schedule_role_members(group.member_ids, members_by_id)}"
+            for group in resolution.duplicate_groups
+        )
+    if mode is ScheduleRoleUpdateMode.REPLACE:
+        lines.append("")
+        lines.append(f"若繼續，將清除班表外成員的 {role.mention}。")
+        if resolution.duplicate_groups:
+            lines.append(
+                f"若略過，將清除未被其他班表名稱辨識的重複成員之 {role.mention}。"
+            )
+        if resolution.unresolved_labels:
+            lines.append(f"若其仍在 guild，所持有的 {role.mention} 也會被清除。")
+    else:
+        lines.append("")
+    lines.append("尚未變更任何 role，請確認後再繼續。")
+    return "\n".join(lines)
+
+
+def _format_schedule_role_result(
+    role: Role,
+    resolution: ScheduleRoleResolution,
+    plan: ScheduleRolePlan,
+    execution: ScheduleRoleExecutionResult,
+    members_by_id: Mapping[int, Member],
+    *,
+    duplicate_decision: ScheduleRoleDecision | None,
+) -> str:
+    result_has_error = bool(
+        resolution.unresolved_labels
+        or execution.add_failed_member_ids
+        or execution.remove_failed_member_ids
+    )
+    added_members = _format_schedule_role_members(
+        execution.added_member_ids, members_by_id
+    )
+    removed_members = _format_schedule_role_members(
+        execution.removed_member_ids, members_by_id
+    )
+    add_failed_members = _format_schedule_role_members(
+        execution.add_failed_member_ids, members_by_id
+    )
+    remove_failed_members = _format_schedule_role_members(
+        execution.remove_failed_member_ids, members_by_id
+    )
+    lines = [
+        "### ⚠️ role 更新結果" if result_has_error else "### ✅ role 更新結果",
+        f"已經賦予 {role.mention}：{added_members}",
+    ]
+    if plan.already_member_ids:
+        lines.append(
+            f"原本已有 {role.mention}："
+            f"{_format_schedule_role_members(plan.already_member_ids, members_by_id)}"
+        )
+    if execution.removed_member_ids:
+        lines.append(f"已清除以下成員的 {role.mention}：{removed_members}")
+    if resolution.unresolved_labels:
+        lines.append(
+            "⚠️ 找不到對應的 Discord 成員："
+            + "、".join(
+                _format_display_name(label) for label in resolution.unresolved_labels
+            )
+        )
+    if execution.add_failed_member_ids:
+        lines.append(f"⚠️ 無法賦予 {role.mention}：{add_failed_members}")
+    if execution.remove_failed_member_ids:
+        lines.append(f"⚠️ 無法清除 {role.mention}：{remove_failed_members}")
+    if resolution.duplicate_groups and duplicate_decision in {
+        ScheduleRoleDecision.INCLUDE,
+        ScheduleRoleDecision.SKIP,
+    }:
+        label = (
+            "已包含重複的成員："
+            if duplicate_decision is ScheduleRoleDecision.INCLUDE
+            else "已略過重複的成員："
+        )
+        lines.append(label)
+        lines.extend(
+            f"- {_format_display_name(group.label)}："
+            f"{_format_schedule_role_members(group.member_ids, members_by_id)}"
+            for group in resolution.duplicate_groups
+        )
+    return "\n".join(lines)
+
+
+def _replace_schedule_role_state_line(
+    content: str,
+    replacement: str,
+) -> str:
+    lines = content.rsplit("\n", maxsplit=1)
+    lines[-1] = replacement
+    return "\n".join(lines)
+
+
+async def _edit_schedule_role_control_message(
+    interaction: Interaction,
+    control_message: Message | None,
+    content: str,
+) -> None:
+    edit = getattr(control_message, "edit", None)
+    if edit is None:
+        await interaction.edit_original_response(content=content, view=None)
+    else:
+        await edit(content=content, view=None)
+
+
+async def _apply_schedule_role_plan(
+    role: Role,
+    plan: ScheduleRolePlan,
+    members_by_id: Mapping[int, Member],
+) -> ScheduleRoleExecutionResult:
+    added: list[int] = []
+    removed: list[int] = []
+    add_failed: list[int] = []
+    remove_failed: list[int] = []
+    for member_id in plan.add_member_ids:
+        try:
+            await members_by_id[member_id].add_roles(role, atomic=True)
+        except HTTPException:
+            add_failed.append(member_id)
+        else:
+            added.append(member_id)
+    for member_id in plan.remove_member_ids:
+        try:
+            await members_by_id[member_id].remove_roles(role, atomic=True)
+        except HTTPException:
+            remove_failed.append(member_id)
+        else:
+            removed.append(member_id)
+    return ScheduleRoleExecutionResult(
+        added_member_ids=tuple(added),
+        removed_member_ids=tuple(removed),
+        add_failed_member_ids=tuple(add_failed),
+        remove_failed_member_ids=tuple(remove_failed),
+    )
 
 
 def _format_draft_username(
@@ -453,6 +685,7 @@ class ShiftRegister(
     timeline_template_key = "shift.timeline"
     sheet_write_lock = SHIFT_REGISTER_SHEET_WRITE_LOCK
     auto_guide_lock = KeyAsyncLock()
+    schedule_role_lock = KeyAsyncLock()
 
     ManagerType = ShiftRegisterManager
     ParserType = ShiftParser
@@ -467,6 +700,62 @@ class ShiftRegister(
         self._pending_message_ids: dict[
             tuple[int, ShiftTimelineEventKind], tuple[int, int]
         ] = {}
+
+    async def _get_shift_finalization_context_or_none(
+        self,
+        source: GuildChannelSource,
+    ) -> (
+        ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig,
+            ShiftRegisterManager,
+        ]
+        | None
+    ):
+        feature_context = await self._get_register_feature_channel_context_or_none(
+            guild_id=source.guild.id,
+            channel_id=source.channel.id,
+            require_enabled=False,
+        )
+        if feature_context is None:
+            return None
+        return await self._get_configured_register_feature_channel_context(
+            feature_context
+        )
+
+    async def _read_schedule_role_snapshot(
+        self,
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig,
+            ShiftRegisterManager,
+        ],
+        *,
+        members: Sequence[Member],
+        role_id: int,
+        mode: ScheduleRoleUpdateMode,
+        final_schedule_range: A1Rectangle | None,
+    ) -> ScheduleRolePreviewSnapshot:
+        feature_config = context.feature_config
+        recruitment_ranges = (
+            RecruitmentTimeRanges.from_json(feature_config.recruitment_time_ranges)
+            if final_schedule_range is None
+            else None
+        )
+        metadata = await context.manager.fetch_google_sheets_metadata()
+        context.manager.log_missing_worksheet_warnings(metadata)
+        source = await context.manager.read_final_schedule_role_source(
+            metadata,
+            final_schedule_range=final_schedule_range,
+            recruitment_ranges=recruitment_ranges,
+            saved_anchor=feature_config.final_schedule_anchor_cell,
+        )
+        return ScheduleRolePreviewSnapshot(
+            sheet_url=feature_config.sheet_url,
+            final_schedule_worksheet_id=feature_config.final_schedule_worksheet_id,
+            role_id=role_id,
+            mode=mode,
+            source=source,
+            resolution=resolve_schedule_role_labels(source.labels, members),
+        )
 
     async def cog_load(self) -> None:
         """Start deadline reconciliation after Discord reports readiness."""
@@ -1215,12 +1504,6 @@ class ShiftRegister(
         ),
         event_day_format=(f"Event date format. Default: {DEFAULT_EVENT_DAY_FORMAT}"),
     )
-    @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(
-            feature_name,
-            feature_display_name,
-        )
-    )
     async def update_schedule_from_draft(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         interaction: Interaction,
@@ -1237,12 +1520,7 @@ class ShiftRegister(
         request: ScheduleUpdateRequest | None = None
         final_sheet_url = ""
         try:
-            feature_channel_context = await self._get_register_feature_channel_context(
-                source
-            )
-            context = await self._get_configured_register_feature_channel_context(
-                feature_channel_context
-            )
+            context = await self._get_shift_finalization_context_or_none(source)
             if context is None:
                 await self._send_missing_register_config_followup(interaction)
                 return
@@ -1300,12 +1578,7 @@ class ShiftRegister(
                 )
                 return
 
-            feature_channel_context = await self._get_register_feature_channel_context(
-                source
-            )
-            context = await self._get_configured_register_feature_channel_context(
-                feature_channel_context
-            )
+            context = await self._get_shift_finalization_context_or_none(source)
             if context is None:
                 await self._send_missing_register_config_followup(interaction)
                 return
@@ -1434,12 +1707,6 @@ class ShiftRegister(
         ),
         runner="Discord user pinned to the Runner (ランナー) lane for every hour.",
     )
-    @app_commands.check(
-        FeatureChannelBase.feature_enabled_app_command_predicate(
-            feature_name,
-            feature_display_name,
-        )
-    )
     async def generate_draft(
         self,
         interaction: Interaction,
@@ -1453,12 +1720,7 @@ class ShiftRegister(
             action="generate shift draft schedule",
         )
         try:
-            feature_channel_context = await self._get_register_feature_channel_context(
-                source
-            )
-            context = await self._get_configured_register_feature_channel_context(
-                feature_channel_context
-            )
+            context = await self._get_shift_finalization_context_or_none(source)
             if context is None:
                 await self._send_missing_register_config_followup(interaction)
                 return
@@ -1500,12 +1762,7 @@ class ShiftRegister(
                 )
                 return
 
-            feature_channel_context = await self._get_register_feature_channel_context(
-                source
-            )
-            context = await self._get_configured_register_feature_channel_context(
-                feature_channel_context
-            )
+            context = await self._get_shift_finalization_context_or_none(source)
             if context is None:
                 await self._send_missing_register_config_followup(interaction)
                 return
@@ -1601,6 +1858,277 @@ class ShiftRegister(
                     filename="shift-draft-notes.txt",
                 )
             await interaction.followup.send(report_message, **send_kwargs)
+
+    @app_commands.command(
+        name="assign_schedule_role",
+        description="Assign a Discord role from the current Final Schedule.",
+    )
+    @app_commands.describe(
+        role="Discord role to update from the Final Schedule.",
+        role_update_mode="Add scheduled members or fully replace role membership.",
+        final_schedule_range="Optional bounded Final range, for example B2:G12.",
+    )
+    @app_commands.choices(
+        role_update_mode=[
+            app_commands.Choice(name="只新增", value="add_only"),
+            app_commands.Choice(
+                name="完全取代（清除班表外成員）",
+                value="replace",
+            ),
+        ]
+    )
+    async def assign_schedule_role(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        interaction: Interaction,
+        role: Role,
+        role_update_mode: str = ScheduleRoleUpdateMode.ADD_ONLY.value,
+        final_schedule_range: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        source = require_guild_channel_source(
+            interaction,
+            action="assign Final Schedule Discord role",
+        )
+        if not role.is_assignable():
+            await interaction.edit_original_response(
+                content=(
+                    f"⚠️ {config.CONFUSED_EMOJI} Bot 無法新增或清除 {role.mention}，"
+                    "請確認 role 類型與角色順位。"
+                ),
+                view=None,
+            )
+            return
+        try:
+            selected_range = (
+                parse_a1_range(final_schedule_range)
+                if final_schedule_range is not None
+                else None
+            )
+        except FinalScheduleInputError:
+            await interaction.edit_original_response(
+                content=(
+                    f"⚠️ {config.CONFUSED_EMOJI} "
+                    "Final Schedule Range 格式無效，未變更任何 role。"
+                ),
+                view=None,
+            )
+            return
+        mode = ScheduleRoleUpdateMode(role_update_mode)
+        control_message: Message | None = None
+        control_content: str | None = None
+        try:
+            context = await self._get_shift_finalization_context_or_none(source)
+            if context is None:
+                await self._send_missing_register_config_followup(interaction)
+                return
+            snapshot = await self._read_schedule_role_snapshot(
+                context,
+                members=source.guild.members,
+                role_id=role.id,
+                mode=mode,
+                final_schedule_range=selected_range,
+            )
+            members_by_id = {member.id: member for member in source.guild.members}
+            has_duplicates = bool(snapshot.resolution.duplicate_groups)
+            requires_preview = mode is ScheduleRoleUpdateMode.REPLACE or has_duplicates
+
+            if requires_preview:
+                preview_plan = plan_schedule_role_update(
+                    snapshot.resolution,
+                    tuple(member.id for member in role.members),
+                    mode=mode,
+                    include_duplicates=None if has_duplicates else False,
+                )
+                preview = _format_schedule_role_preview(
+                    role,
+                    snapshot.resolution,
+                    preview_plan,
+                    members_by_id,
+                    mode=mode,
+                )
+                view = AssignScheduleRoleConfirmView(
+                    requesting_user_id=interaction.user.id,
+                    has_duplicates=has_duplicates,
+                    replace_mode=mode is ScheduleRoleUpdateMode.REPLACE,
+                )
+                control_message = await _replace_with_shift_report(
+                    interaction,
+                    preview,
+                    view=view,
+                )
+                control_content = _split_shift_report(preview)[-1]
+                await view.wait()
+                duplicate_decision = view.decision
+                terminal_state = {
+                    None: "✖️ 確認逾時，未變更任何 role。",
+                    ScheduleRoleDecision.CANCEL: "✖️ 已取消，未變更任何 role。",
+                    ScheduleRoleDecision.PERMISSION_LOST: (
+                        "⚠️ 權限已變更，未變更任何 role。"
+                    ),
+                }.get(duplicate_decision)
+                if terminal_state is not None:
+                    await _edit_schedule_role_control_message(
+                        interaction,
+                        control_message,
+                        _replace_schedule_role_state_line(
+                            control_content or preview,
+                            terminal_state,
+                        ),
+                    )
+                    return
+
+                await _edit_schedule_role_control_message(
+                    interaction,
+                    control_message,
+                    _replace_schedule_role_state_line(
+                        control_content or preview,
+                        f"{config.PROCESSING_EMOJI} role 更新中…",
+                    ),
+                )
+                context = await self._get_shift_finalization_context_or_none(source)
+                if context is None:
+                    await _edit_schedule_role_control_message(
+                        interaction,
+                        control_message,
+                        _replace_schedule_role_state_line(
+                            control_content or preview,
+                            "⚠️ role 更新未完成，未變更任何 role。",
+                        ),
+                    )
+                    await self._send_missing_register_config_followup(interaction)
+                    return
+                current_snapshot = await self._read_schedule_role_snapshot(
+                    context,
+                    members=source.guild.members,
+                    role_id=role.id,
+                    mode=mode,
+                    final_schedule_range=selected_range,
+                )
+                if current_snapshot != snapshot:
+                    await _edit_schedule_role_control_message(
+                        interaction,
+                        control_message,
+                        _replace_schedule_role_state_line(
+                            control_content or preview,
+                            "⚠️ Final Schedule 或 Discord 成員資料已變更，"
+                            "未變更任何 role；請重新執行 command。",
+                        ),
+                    )
+                    return
+                include_duplicates = duplicate_decision is ScheduleRoleDecision.INCLUDE
+                members_by_id = {member.id: member for member in source.guild.members}
+                async with self.schedule_role_lock((source.guild.id, role.id)):
+                    plan = plan_schedule_role_update(
+                        snapshot.resolution,
+                        tuple(member.id for member in role.members),
+                        mode=mode,
+                        include_duplicates=include_duplicates,
+                    )
+                    execution = await _apply_schedule_role_plan(
+                        role,
+                        plan,
+                        members_by_id,
+                    )
+                result = _format_schedule_role_result(
+                    role,
+                    snapshot.resolution,
+                    plan,
+                    execution,
+                    members_by_id,
+                    duplicate_decision=duplicate_decision,
+                )
+                if (
+                    execution.add_failed_member_ids
+                    or execution.remove_failed_member_ids
+                ):
+                    self.logger.warning(
+                        "Schedule role operation had partial failures. "
+                        "guild=%s role=%s adds_failed=%s removes_failed=%s",
+                        source.guild.id,
+                        role.id,
+                        len(execution.add_failed_member_ids),
+                        len(execution.remove_failed_member_ids),
+                    )
+                for message in _split_shift_report(result):
+                    await interaction.followup.send(message, ephemeral=True)
+                return
+
+            async with self.schedule_role_lock((source.guild.id, role.id)):
+                plan = plan_schedule_role_update(
+                    snapshot.resolution,
+                    tuple(member.id for member in role.members),
+                    mode=mode,
+                    include_duplicates=False,
+                )
+                execution = await _apply_schedule_role_plan(
+                    role,
+                    plan,
+                    members_by_id,
+                )
+            result = _format_schedule_role_result(
+                role,
+                snapshot.resolution,
+                plan,
+                execution,
+                members_by_id,
+                duplicate_decision=None,
+            )
+            if execution.add_failed_member_ids or execution.remove_failed_member_ids:
+                self.logger.warning(
+                    "Schedule role operation had partial failures. "
+                    "guild=%s role=%s adds_failed=%s removes_failed=%s",
+                    source.guild.id,
+                    role.id,
+                    len(execution.add_failed_member_ids),
+                    len(execution.remove_failed_member_ids),
+                )
+            await _replace_with_shift_report(interaction, result)
+        except FinalScheduleInputError:
+            await _edit_schedule_role_control_message(
+                interaction,
+                control_message,
+                (
+                    "⚠️ role 更新未完成，未變更任何 role。"
+                    if control_message is not None
+                    else (
+                        f"⚠️ {config.CONFUSED_EMOJI} "
+                        "Final Schedule Range 格式無效，未變更任何 role。"
+                    )
+                ),
+            )
+        except StorageError as exc:
+            if control_message is not None:
+                await _edit_schedule_role_control_message(
+                    interaction,
+                    control_message,
+                    _replace_schedule_role_state_line(
+                        control_content or "",
+                        "⚠️ role 更新未完成，未變更任何 role。",
+                    ),
+                )
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_assign_schedule_role",
+            )
+        except Exception as exc:  # noqa: BLE001
+            if control_message is not None:
+                await _edit_schedule_role_control_message(
+                    interaction,
+                    control_message,
+                    _replace_schedule_role_state_line(
+                        control_content or "",
+                        "⚠️ role 更新未完成，未變更任何 role。",
+                    ),
+                )
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_assign_schedule_role",
+            )
 
     @staticmethod
     def _format_draft_report(

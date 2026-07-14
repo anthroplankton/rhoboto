@@ -8,6 +8,7 @@ import pytest
 from utils.shift_final import (
     DEFAULT_EVENT_DAY_FORMAT,
     A1Cell,
+    A1Rectangle,
     EventDayWriteStatus,
     FinalRoleConflict,
     FinalScheduleConflictError,
@@ -19,6 +20,7 @@ from utils.shift_final import (
     build_schedule_update_request,
     format_event_day,
     parse_a1_cell,
+    parse_a1_range,
 )
 from utils.shift_register_structs import DraftWorksheetContent, RecruitmentTimeRanges
 from utils.shift_scheduler import hour_label
@@ -48,6 +50,47 @@ def test_parse_a1_cell_is_strict_and_normalized(
 def test_parse_a1_cell_rejects_non_cell_or_out_of_contract_values(raw: str) -> None:
     with pytest.raises(FinalScheduleInputError):
         parse_a1_cell(raw)
+
+
+@pytest.mark.parametrize(
+    ("raw", "canonical"),
+    [
+        ("B2:G12", "B2:G12"),
+        (" ｂ２ ： ｇ１２ ", "B2:G12"),  # noqa: RUF001
+        ("A1:A1", "A1:A1"),
+    ],
+)
+def test_parse_a1_range_is_bounded_and_normalized(
+    raw: str,
+    canonical: str,
+) -> None:
+    rectangle = parse_a1_range(raw)
+
+    assert isinstance(rectangle, A1Rectangle)
+    assert rectangle.a1 == canonical
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        "A1",
+        "A1:",
+        ":B2",
+        "A1:B2:C3",
+        "B2:A1",
+        "A2:B1",
+        "A:A",
+        "1:2",
+        "$A$1:B2",
+        "Sheet1!A1:B2",
+    ],
+)
+def test_parse_a1_range_rejects_unbounded_qualified_or_reversed_input(
+    raw: str,
+) -> None:
+    with pytest.raises(FinalScheduleInputError):
+        parse_a1_range(raw)
 
 
 def test_final_request_uses_db_axis_and_exact_rectangles() -> None:

@@ -39,9 +39,11 @@ from components.ui_shift_register import (
     AUTO_CLOSE_INVALID_DEADLINE_MESSAGE,
     AUTO_CLOSE_INVALIDATED_MESSAGE,
     ApplyTeamSourceButton,
+    AssignScheduleRoleConfirmView,
     AutoCloseButton,
     GenerateShiftScheduleConfirmView,
     ManageTeamSourceButton,
+    ScheduleRoleDecision,
     ShiftAutoCloseCallbacks,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
@@ -4040,6 +4042,102 @@ async def test_generate_draft_cancel_allows_requester() -> None:
     assert view.is_finished()
     assert interaction.response.edits == [
         ("✖️ 已取消生成，未變更 Shift Draft。", {"view": None})  # noqa: RUF001
+    ]
+
+
+@pytest.mark.parametrize(
+    ("has_duplicates", "replace_mode", "labels"),
+    [
+        (
+            True,
+            False,
+            ("包含重複成員並執行", "略過重複成員並執行", "取消"),
+        ),
+        (
+            True,
+            True,
+            ("包含重複成員並執行", "略過重複成員並執行", "取消"),
+        ),
+        (False, True, ("確認清除並更新", "取消")),
+    ],
+)
+def test_schedule_role_view_has_expected_buttons(
+    has_duplicates: bool,  # noqa: FBT001
+    replace_mode: bool,  # noqa: FBT001
+    labels: tuple[str, ...],
+) -> None:
+    view = AssignScheduleRoleConfirmView(
+        requesting_user_id=333,
+        has_duplicates=has_duplicates,
+        replace_mode=replace_mode,
+    )
+
+    assert tuple(child.label for child in view.children) == labels
+    if has_duplicates and replace_mode:
+        assert view.children[1].style is ButtonStyle.danger
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "decision"),
+    [
+        ("包含重複成員並執行", ScheduleRoleDecision.INCLUDE),
+        ("略過重複成員並執行", ScheduleRoleDecision.SKIP),
+        ("確認清除並更新", ScheduleRoleDecision.CONFIRM),
+        ("取消", ScheduleRoleDecision.CANCEL),
+    ],
+)
+async def test_schedule_role_view_allows_requester_and_defers(
+    label: str,
+    decision: ScheduleRoleDecision,
+) -> None:
+    view = AssignScheduleRoleConfirmView(
+        requesting_user_id=333,
+        has_duplicates=label in {"包含重複成員並執行", "略過重複成員並執行"},
+        replace_mode=label in {"略過重複成員並執行", "確認清除並更新"},
+    )
+    interaction = FakeInteraction(user_id=333)
+
+    await child_with_label(view, label).callback(interaction)
+
+    assert view.decision is decision
+    assert view.is_finished()
+    assert interaction.response.deferred == [False]
+
+
+@pytest.mark.asyncio
+async def test_schedule_role_view_rejects_other_user_without_finishing() -> None:
+    view = AssignScheduleRoleConfirmView(
+        requesting_user_id=333,
+        has_duplicates=True,
+        replace_mode=False,
+    )
+    interaction = FakeInteraction(user_id=444)
+
+    await child_with_label(view, "包含重複成員並執行").callback(interaction)
+
+    assert view.decision is None
+    assert not view.is_finished()
+    assert interaction.response.messages == [
+        ("⚠️ 只有執行此 command 的管理員可以操作。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_schedule_role_view_stops_after_permission_loss() -> None:
+    view = AssignScheduleRoleConfirmView(
+        requesting_user_id=333,
+        has_duplicates=False,
+        replace_mode=True,
+    )
+    interaction = FakeInteraction(user_id=333, manage_channels=False)
+
+    await child_with_label(view, "確認清除並更新").callback(interaction)
+
+    assert view.decision is ScheduleRoleDecision.PERMISSION_LOST
+    assert view.is_finished()
+    assert interaction.response.messages == [
+        (MISSING_SETTINGS_PERMISSION_MESSAGE, {"ephemeral": True})
     ]
 
 

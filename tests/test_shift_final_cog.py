@@ -95,6 +95,51 @@ def test_update_schedule_from_draft_has_safe_native_length_limit() -> None:
     assert f"Default: {DEFAULT_EVENT_DAY_FORMAT}" in str(event_day_format.description)
 
 
+def test_shift_finalization_commands_do_not_require_enabled_membership() -> None:
+    assert ShiftRegister.generate_draft.checks == []
+    assert ShiftRegister.update_schedule_from_draft.checks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [True, False])
+async def test_shift_finalization_context_ignores_enabled_state(
+    configured: bool,  # noqa: FBT001
+) -> None:
+    subject = ShiftRegister.__new__(ShiftRegister)
+    source = SimpleNamespace(
+        guild=SimpleNamespace(id=111),
+        channel=SimpleNamespace(id=222),
+    )
+    feature_context = SimpleNamespace(feature_channel=SimpleNamespace(is_enabled=False))
+    configured_context = SimpleNamespace(feature_config=SimpleNamespace())
+    calls: list[dict[str, object]] = []
+
+    async def get_context_or_none(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return feature_context
+
+    async def get_configured_context(_context: object) -> object | None:
+        return configured_context if configured else None
+
+    subject._get_register_feature_channel_context_or_none = (  # type: ignore[method-assign]  # noqa: SLF001
+        get_context_or_none
+    )
+    subject._get_configured_register_feature_channel_context = (  # type: ignore[method-assign]  # noqa: SLF001
+        get_configured_context
+    )
+
+    result = await subject._get_shift_finalization_context_or_none(source)  # noqa: SLF001
+
+    assert result is (configured_context if configured else None)
+    assert calls == [
+        {
+            "guild_id": 111,
+            "channel_id": 222,
+            "require_enabled": False,
+        }
+    ]
+
+
 def test_final_contract_error_is_actionable() -> None:
     content = _format_final_contract_error(
         FinalScheduleValidationError(
@@ -144,7 +189,7 @@ async def test_update_schedule_from_draft_confirms_before_metadata_and_writes_re
 
     manager = Manager()
 
-    async def get_feature_context(_source: object) -> object:
+    async def get_feature_context(**_kwargs: object) -> object:
         events.append("feature")
         return object()
 
@@ -183,7 +228,7 @@ async def test_update_schedule_from_draft_confirms_before_metadata_and_writes_re
     )
     monkeypatch.setattr("cogs.shift_register.fresh_shift_channel_transaction", unlocked)
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_register_feature_channel_context_or_none = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
     subject._get_configured_register_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
@@ -213,7 +258,7 @@ async def test_update_schedule_from_draft_invalid_main_anchor_does_not_create_vi
     config = final_config()
     called = False
 
-    async def get_feature_context(_source: object) -> object:
+    async def get_feature_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -232,7 +277,7 @@ async def test_update_schedule_from_draft_invalid_main_anchor_does_not_create_vi
         UnexpectedView,
     )
     subject = ShiftRegister(fake_bot())
-    subject._get_register_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_register_feature_channel_context_or_none = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
     subject._get_configured_register_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
     interaction = FakeInteraction()
 
