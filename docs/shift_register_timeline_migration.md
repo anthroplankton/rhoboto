@@ -1,7 +1,8 @@
 # Shift Register Timeline Migration
 
 This checklist covers the one-time migration for the Shift Register timeline,
-recruitment range, and bot-managed Shift Entry count/Team layout.
+automatic-close event state, recruitment range, and bot-managed Shift Entry
+count/Team layout.
 
 Use a development guild and disposable spreadsheet first. Do not run these steps
 against production data without a database backup and a rollback plan.
@@ -12,7 +13,9 @@ This migration includes:
 
 - Persisting Shift Register timeline fields in `shift_register`.
 - Persisting `recruitment_time_ranges`, defaulting to `4-28`.
-- Reserving `deadline_automation_enabled`, defaulting to `false`.
+- Persisting `deadline_automation_enabled`, defaulting to `false`.
+- Persisting the Shift-specific `shift_timeline_event_state` row used by the
+  automatic Submission Deadline close workflow.
 - Moving Shift Entry worksheets to the count row plus fixed `A:AJ` layout.
 - Showing Team Summary ISV/Encore information in Shift Entry through formulas.
 - Persisting an optional Team Register source for each Shift Register.
@@ -23,8 +26,7 @@ This migration includes:
 
 This migration does not include:
 
-- Scheduler jobs.
-- Automatic deadline close.
+- Draft or Final shift reminder jobs.
 - Automatic draft shift generation.
 - Reminder channels.
 - Role assignment from final shifts.
@@ -54,12 +56,33 @@ Add nullable `team_source_feature_channel_id` to `shift_register` as a foreign k
 to `feature_channel.id` with `ON DELETE SET NULL`. Existing rows stay `null`; no
 backfill is required.
 
+Create the Shift timeline event-state table with this logical schema:
+
+```text
+shift_timeline_event_state
+- integer primary key id
+- shift_register_id foreign key -> shift_register.id ON DELETE CASCADE
+- event_kind varchar capacity 32
+- scheduled_at aware datetime
+- delivery_nonce signed bigint
+- status varchar capacity 16
+- nullable message_id bigint
+- created_at and updated_at timestamps
+- UNIQUE (shift_register_id, event_kind)
+```
+
+The current event kind is `submission_deadline`; the `event_kind` capacity also
+reserves the reviewed `draft_shift_proposal` and `final_shift_notice` names for
+future reminders. The initial row status is `scheduled`, and a successfully
+announced event progresses through `sent` to `completed`.
+
 This repository does not track an Aerich or equivalent migration module.
-`generate_schemas()` is not a safe existing-production migration mechanism. Back up
-the database, stop the bot, inspect the schema generated from the current model in a
-disposable database, then apply the reviewed database-specific equivalent. Do not
-reuse one `ALTER TABLE` command across SQLite and the production database; SQLite
-may require a table rebuild.
+`generate_schemas()` is only the current fresh-database schema path; it is not a
+safe existing-production migration mechanism. Back up the database, stop the
+worker, inspect the schema generated from the current model in a disposable
+database, then apply and review the database-specific equivalent. Do not reuse
+one `ALTER TABLE` or `CREATE TABLE` statement across SQLite and the production
+database; SQLite may require a table rebuild.
 
 Backfill existing rows:
 
@@ -71,12 +94,34 @@ Verification query checklist:
 
 - Every row in `shift_register` has non-empty `recruitment_time_ranges`.
 - Every existing row has `deadline_automation_enabled = false`.
+- `shift_timeline_event_state` exists with the columns, foreign key, capacities,
+  and unique constraint listed above; the new table is initially empty and
+  accepts the first scheduled event row.
 - Existing sheet URL and worksheet ID columns are unchanged.
 - Existing `final_schedule_anchor_cell` values are unchanged.
 - `team_source_feature_channel_id` exists, is nullable, and references
   `feature_channel.id` with `ON DELETE SET NULL`.
 - Deleting a selected Team FeatureChannel clears the Shift relation without
   deleting Shift settings.
+
+### Database deployment order
+
+1. Back up the database and stop the bot worker.
+2. Apply and review the database-specific table, foreign-key, and unique-index
+   creation for `shift_timeline_event_state` and the existing Shift columns.
+3. Verify existing tables are unchanged and the new event-state table is empty
+   and usable.
+4. Deploy the application code that reads and writes the new state.
+5. Start the worker, then run the startup and manual deadline checks below.
+
+No normal data backfill is required for `shift_timeline_event_state`. On startup,
+a valid enabled future deadline with no or stale event row is repaired to a fresh
+`scheduled` row. A matching active `scheduled` or `sent` row is retained for
+immediate execution even when its saved deadline passed while the worker was
+offline; this is the missed-deadline restart path. An enabled configuration with
+no saved deadline, or with a past deadline and no matching active row, is
+disabled and logged. A `completed` row or a disabled Auto Close setting does not
+receive a new event row.
 
 ## Shift Entry Worksheet Migration
 
@@ -198,12 +243,16 @@ Manual checks are listed in `docs/manual_integration_validation.md`.
 
 If the migration must be rolled back:
 
-- Stop the bot before changing database schema or worksheet headers.
+- Stop the bot before changing database schema or worksheet headers, and deploy
+  the previous application version before removing the new table.
 - Restore the database backup and spreadsheet backup together.
 - When rolling back only Team source selection, deploy code that no longer reads
   the relation before removing its constraint and column.
 - Re-enable the bot only after slash commands and settings panels match the
   restored code version.
+- The old application version ignores `shift_timeline_event_state`, so the table
+  may remain temporarily. Drop it only after rollback startup and manual checks
+  pass, using the reviewed database-specific operation.
 
 Do not mix the new bot code with old Shift Entry worksheet headers. The bot will
 reject old headers to avoid corrupting entries.
