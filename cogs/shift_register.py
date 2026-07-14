@@ -97,9 +97,10 @@ def _format_display_name(name: str) -> str:
 
 
 _SHIFT_REPORT_SECTION_PREFIXES = (
-    "- 已排入（",
     "⚠️ 編成未登録：",
+    "- 募集時間【",
     "- 未排入（",
+    "附件是生成時資料的 Notes 快照",
 )
 _MAX_BMP_CODE_POINT = 0xFFFF
 _FINAL_CONTRACT_VALUE_LIMIT = 160
@@ -154,18 +155,7 @@ def _split_shift_report(report: str, *, limit: int = 2000) -> list[str]:
     if _discord_content_length(report) <= limit:
         return [report]
 
-    lines = report.splitlines()
-    assignment_index = next(
-        (index for index, line in enumerate(lines) if line.startswith("- 已排入（")),
-        None,
-    )
     messages: list[str] = []
-    if assignment_index is not None:
-        preamble = "\n".join(lines[:assignment_index])
-        if preamble and _discord_content_length(preamble) <= limit:
-            messages.append(preamble)
-            report = "\n".join(lines[assignment_index:])
-
     pending_lines: list[str] = []
     pending_length = 0
     for line in report.splitlines():
@@ -1605,7 +1595,7 @@ class ShiftRegister(
         )
         for index, report_message in enumerate(report_messages):
             send_kwargs: dict[str, object] = {"ephemeral": True}
-            if index == 0:
+            if index == len(report_messages) - 1:
                 send_kwargs["file"] = File(
                     BytesIO(result.notes_snapshot.encode("utf-8")),
                     filename="shift-draft-notes.txt",

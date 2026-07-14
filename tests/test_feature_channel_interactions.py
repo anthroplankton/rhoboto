@@ -55,7 +55,6 @@ from cogs.base.register_feature_channel_user_base import (
 )
 from cogs.shift import Shift
 from cogs.shift_register import (
-    _SHIFT_REPORT_SECTION_PREFIXES,
     ShiftRegister,
     ShiftReportAssignment,
     _format_generate_draft_confirmation,
@@ -144,13 +143,13 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
     report = "\n".join(
         [
             "draft generated",
-            _SHIFT_REPORT_SECTION_PREFIXES[0]
-            + "、".join(f"😀user{index}" for index in range(8)),
-            _SHIFT_REPORT_SECTION_PREFIXES[1] + "assigned",
+            "⚠️ 編成未登録：" + "、".join(f"😀user{index}" for index in range(8)),
+            "- 募集時間【4-8】",
+            "- 已排入（安可｜本走；待機）：",
             "hour 4: 😀alice, 😀bob, 😀carol",
-            _SHIFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
+            "- 未排入（位置已滿）：",
             "hour 4: 😀dave, 😀eve",
-            "notes attached",
+            "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。",
         ]
     )
 
@@ -158,19 +157,16 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
 
     assert len(messages) > 1
     assert all(len(message.encode("utf-16-le")) // 2 <= 80 for message in messages)
+    assert any(message.startswith("⚠️ 編成未登録：") for message in messages)
+    assert any(message.startswith("- 募集時間【") for message in messages)
+    assert any(message.startswith("- 未排入（") for message in messages)
     assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[0]) for message in messages
-    )
-    assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[1]) for message in messages
-    )
-    assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[2]) for message in messages
+        message.startswith("附件是生成時資料的 Notes 快照") for message in messages
     )
     assert "".join(messages).replace("\n", "") == report.replace("\n", "")
 
 
-def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
+def test_split_shift_report_keeps_recruitment_with_assignments() -> None:
     report = "\n".join(
         [
             "### ✅ 班表草稿已產生",
@@ -183,8 +179,10 @@ def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
 
     messages = _split_shift_report(report, limit=200)
 
-    assert messages[0] == "\n".join(report.splitlines()[:3])
-    assert messages[1].startswith("- 已排入（安可｜本走；待機）：")
+    assert messages[0] == report.splitlines()[0]
+    assert messages[1].startswith("⚠️ 編成未登録：")
+    assert messages[2].startswith("- 募集時間【4-12】")
+    assert "- 已排入（安可｜本走；待機）：" in messages[2]
     assert all(len(message.encode("utf-16-le")) // 2 <= 200 for message in messages)
 
 
@@ -574,7 +572,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         in (content or "")
     )
     assert "⚠️ 編成未登録：<@333>" in (content or "")
-    kwargs = interaction.followup.messages[0][1]
+    kwargs = interaction.followup.messages[-1][1]
     attachment = kwargs["file"]
     assert isinstance(attachment, File)
     assert attachment.filename == "shift-draft-notes.txt"
@@ -582,6 +580,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     assert attachment.fp.read().decode("utf-8") == notes_snapshot
     assert (
         sum("file" in kwargs for _content, kwargs in interaction.followup.messages) == 1
+    )
+    assert "附件是生成時資料的 Notes 快照" in (
+        interaction.followup.messages[-1][0] or ""
     )
     assert all(
         kwargs["ephemeral"] is True
