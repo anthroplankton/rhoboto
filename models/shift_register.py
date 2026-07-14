@@ -64,7 +64,7 @@ class ShiftRegisterConfig(SheetConfigBase):
     )
     deadline_automation_enabled: bool = fields.BooleanField(
         default=False,
-        description="Reserved flag for future submission deadline automation",
+        description="Automatically disable Shift Register at Submission Deadline",
     )
 
     class Meta:

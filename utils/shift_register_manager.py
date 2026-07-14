@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import math
+import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from itertools import pairwise
 from typing import TYPE_CHECKING, overload, override
 
+from tortoise.transactions import in_transaction
+
 from models.feature_channel import FeatureChannel
 from models.shift_register import ShiftRegisterConfig
+from models.shift_timeline_event_state import (
+    ShiftTimelineEventKind,
+    ShiftTimelineEventState,
+    ShiftTimelineEventStatus,
+)
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import BORDER_NAMES, GoogleSheet, WorksheetCreationStatus
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
@@ -23,7 +32,7 @@ from utils.team_register_structs import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Hashable, Sequence
-    from datetime import date, datetime
+    from datetime import date
 
     from discord import Member
 
@@ -69,11 +78,34 @@ from utils.storage_errors import (
 )
 
 SHIFT_REGISTER_SHEET_WRITE_LOCK = KeyAsyncLock()
+MAX_DISCORD_NONCE = (1 << 63) - 1
 OUTER_BORDER_SIDES = ("top", "bottom", "left", "right")
 ENTRY_RULE_MARKER = "rhoboto:shift-entry:"
 DRAFT_CANDIDATE_RULE_MARKER = "rhoboto:shift-draft:candidate:"
 ENTRY_IDENTITY_LAST_COLUMN = 3
 ENTRY_AVAILABILITY_FIRST_COLUMN = 6
+
+
+def _new_delivery_nonce() -> int:
+    return secrets.randbelow(MAX_DISCORD_NONCE) + 1
+
+
+def _is_future_deadline(deadline: datetime | None, now: datetime) -> bool:
+    return deadline is not None and deadline > now
+
+
+def _deadline_schedule_change(
+    shift_register_id: int,
+    *,
+    scheduled_at: datetime | None = None,
+    delivery_nonce: int | None = None,
+) -> ShiftTimelineScheduleChange:
+    return ShiftTimelineScheduleChange(
+        shift_register_id=shift_register_id,
+        event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+        scheduled_at=scheduled_at,
+        delivery_nonce=delivery_nonce,
+    )
 
 
 @asynccontextmanager
@@ -129,6 +161,35 @@ class DraftTeamProfileResolution:
     status: TeamSourceStatus
     profiles: dict[str, DraftTeamProfile]
     notes_team_source: DraftNotesTeamSource | None = None
+
+
+class AutoCloseDeadlineNotFutureError(ValueError):
+    """Raised when Auto Close is enabled without a future deadline."""
+
+
+@dataclass(frozen=True)
+class ShiftTimelineScheduleChange:
+    shift_register_id: int
+    event_kind: ShiftTimelineEventKind
+    scheduled_at: datetime | None
+    delivery_nonce: int | None
+
+
+@dataclass(frozen=True)
+class ShiftTimelineUpdateResult:
+    schedule_change: ShiftTimelineScheduleChange | None = None
+    auto_close_disabled: bool = False
+
+
+@dataclass(frozen=True)
+class ShiftDeadlineExecution:
+    event_state_id: int
+    shift_register_id: int
+    guild_id: int
+    channel_id: int
+    delivery_nonce: int
+    status: ShiftTimelineEventStatus
+    message_id: int | None
 
 
 @dataclass(frozen=True)
@@ -839,7 +900,7 @@ class ShiftRegisterManager(
             raise
         return metadata
 
-    async def update_timeline(
+    async def update_timeline(  # noqa: PLR0913
         self,
         *,
         day_number: int | None,
@@ -847,15 +908,20 @@ class ShiftRegisterManager(
         submission_deadline_at: datetime | None,
         draft_shift_proposal_at: datetime | None,
         final_shift_notice_at: datetime | None,
-    ) -> None:
-        shift_register_config = await self.get_sheet_config()
-        shift_register_config.day_number = day_number
-        shift_register_config.event_date = event_date
-        shift_register_config.submission_deadline_at = submission_deadline_at
-        shift_register_config.draft_shift_proposal_at = draft_shift_proposal_at
-        shift_register_config.final_shift_notice_at = final_shift_notice_at
-        await shift_register_config.save(
-            update_fields=[
+        now: datetime | None = None,
+    ) -> ShiftTimelineUpdateResult:
+        effective_now = now or datetime.now(UTC)
+        async with in_transaction() as connection:
+            shift_register_config = await self._get_locked_shift_config(connection)
+            deadline_changed = (
+                shift_register_config.submission_deadline_at != submission_deadline_at
+            )
+            shift_register_config.day_number = day_number
+            shift_register_config.event_date = event_date
+            shift_register_config.submission_deadline_at = submission_deadline_at
+            shift_register_config.draft_shift_proposal_at = draft_shift_proposal_at
+            shift_register_config.final_shift_notice_at = final_shift_notice_at
+            timeline_fields = [
                 "day_number",
                 "event_date",
                 "submission_deadline_at",
@@ -863,6 +929,464 @@ class ShiftRegisterManager(
                 "final_shift_notice_at",
                 "updated_at",
             ]
+
+            if shift_register_config.deadline_automation_enabled and not (
+                _is_future_deadline(submission_deadline_at, effective_now)
+            ):
+                shift_register_config.deadline_automation_enabled = False
+                timeline_fields.append("deadline_automation_enabled")
+                await shift_register_config.save(
+                    using_db=connection,
+                    update_fields=timeline_fields,
+                )
+                await self._delete_deadline_event(
+                    shift_register_config.id,
+                    connection,
+                )
+                self._sheet_config = shift_register_config
+                return ShiftTimelineUpdateResult(
+                    schedule_change=_deadline_schedule_change(shift_register_config.id),
+                    auto_close_disabled=True,
+                )
+
+            await shift_register_config.save(
+                using_db=connection,
+                update_fields=timeline_fields,
+            )
+            self._sheet_config = shift_register_config
+
+            if (
+                not shift_register_config.deadline_automation_enabled
+                or not deadline_changed
+            ):
+                return ShiftTimelineUpdateResult()
+
+            state = await self._reset_deadline_event(
+                shift_register_config,
+                connection,
+            )
+            return ShiftTimelineUpdateResult(
+                schedule_change=_deadline_schedule_change(
+                    shift_register_config.id,
+                    scheduled_at=state.scheduled_at,
+                    delivery_nonce=state.delivery_nonce,
+                )
+            )
+
+    async def set_deadline_automation_enabled(
+        self,
+        *,
+        enabled: bool,
+        now: datetime,
+    ) -> ShiftTimelineScheduleChange:
+        async with in_transaction() as connection:
+            shift_register_config = await self._get_locked_shift_config(connection)
+            if enabled and not _is_future_deadline(
+                shift_register_config.submission_deadline_at,
+                now,
+            ):
+                raise AutoCloseDeadlineNotFutureError
+
+            shift_register_config.deadline_automation_enabled = enabled
+            await shift_register_config.save(
+                using_db=connection,
+                update_fields=["deadline_automation_enabled", "updated_at"],
+            )
+            self._sheet_config = shift_register_config
+            if not enabled:
+                await self._delete_deadline_event(
+                    shift_register_config.id,
+                    connection,
+                )
+                return _deadline_schedule_change(shift_register_config.id)
+
+            state = await self._reset_deadline_event(
+                shift_register_config,
+                connection,
+            )
+            return _deadline_schedule_change(
+                shift_register_config.id,
+                scheduled_at=state.scheduled_at,
+                delivery_nonce=state.delivery_nonce,
+            )
+
+    async def reconcile_deadline_automation(
+        self,
+        *,
+        now: datetime,
+    ) -> ShiftTimelineUpdateResult:
+        async with in_transaction() as connection:
+            shift_register_config = await self._get_locked_shift_config(connection)
+            state = await self._get_locked_deadline_event(
+                shift_register_config.id,
+                connection,
+            )
+            deadline = shift_register_config.submission_deadline_at
+            if shift_register_config.deadline_automation_enabled:
+                matching_active_state = (
+                    state is not None
+                    and state.status
+                    in (
+                        ShiftTimelineEventStatus.SCHEDULED,
+                        ShiftTimelineEventStatus.SENT,
+                    )
+                    and state.scheduled_at == deadline
+                )
+                if not matching_active_state and not _is_future_deadline(deadline, now):
+                    shift_register_config.deadline_automation_enabled = False
+                    await shift_register_config.save(
+                        using_db=connection,
+                        update_fields=["deadline_automation_enabled", "updated_at"],
+                    )
+                    if state is not None:
+                        await state.delete(using_db=connection)
+                    self._sheet_config = shift_register_config
+                    return ShiftTimelineUpdateResult(
+                        schedule_change=_deadline_schedule_change(
+                            shift_register_config.id
+                        ),
+                        auto_close_disabled=True,
+                    )
+
+                if state is None:
+                    state = await self._reset_deadline_event(
+                        shift_register_config,
+                        connection,
+                    )
+                    return ShiftTimelineUpdateResult(
+                        schedule_change=_deadline_schedule_change(
+                            shift_register_config.id,
+                            scheduled_at=state.scheduled_at,
+                            delivery_nonce=state.delivery_nonce,
+                        )
+                    )
+                if state.scheduled_at != deadline:
+                    state = await self._reset_deadline_event(
+                        shift_register_config,
+                        connection,
+                        state=state,
+                    )
+                    return ShiftTimelineUpdateResult(
+                        schedule_change=_deadline_schedule_change(
+                            shift_register_config.id,
+                            scheduled_at=state.scheduled_at,
+                            delivery_nonce=state.delivery_nonce,
+                        )
+                    )
+                return ShiftTimelineUpdateResult()
+
+            if (
+                state is not None
+                and state.status is not ShiftTimelineEventStatus.COMPLETED
+            ):
+                await state.delete(using_db=connection)
+                return ShiftTimelineUpdateResult(
+                    schedule_change=_deadline_schedule_change(shift_register_config.id)
+                )
+            return ShiftTimelineUpdateResult()
+
+    async def begin_submission_deadline_close(  # noqa: PLR0911
+        self,
+        *,
+        expected_scheduled_at: datetime,
+        expected_delivery_nonce: int,
+        now: datetime,
+    ) -> ShiftDeadlineExecution | None:
+        async with in_transaction() as connection:
+            shift_register_config = await self._get_locked_shift_config(connection)
+            state = await self._get_locked_deadline_event(
+                shift_register_config.id,
+                connection,
+            )
+            if state is None or state.status is ShiftTimelineEventStatus.COMPLETED:
+                return None
+            if not shift_register_config.deadline_automation_enabled:
+                return None
+            if shift_register_config.submission_deadline_at != state.scheduled_at:
+                return None
+            if state.scheduled_at != expected_scheduled_at:
+                return None
+            if state.delivery_nonce != expected_delivery_nonce:
+                return None
+            if state.scheduled_at > now:
+                return None
+
+            if state.status is ShiftTimelineEventStatus.SCHEDULED:
+                feature_channel = await self._get_locked_feature_channel(
+                    shift_register_config.feature_channel_id,
+                    connection,
+                )
+                feature_channel.is_enabled = False
+                await feature_channel.save(
+                    using_db=connection,
+                    update_fields=["is_enabled", "updated_at"],
+                )
+
+            feature_channel = await self._get_locked_feature_channel(
+                shift_register_config.feature_channel_id,
+                connection,
+            )
+            return ShiftDeadlineExecution(
+                event_state_id=state.id,
+                shift_register_id=shift_register_config.id,
+                guild_id=feature_channel.guild_id,
+                channel_id=feature_channel.channel_id,
+                delivery_nonce=state.delivery_nonce,
+                status=state.status,
+                message_id=state.message_id,
+            )
+
+    async def mark_submission_deadline_sent(
+        self,
+        *,
+        event_state_id: int,
+        delivery_nonce: int,
+        message_id: int,
+    ) -> bool:
+        async with in_transaction() as connection:
+            state = await self._get_locked_deadline_event_by_id(
+                event_state_id,
+                connection,
+            )
+            if state is None or state.delivery_nonce != delivery_nonce:
+                return False
+            if state.status is ShiftTimelineEventStatus.SENT:
+                return state.message_id == message_id
+            if state.status is not ShiftTimelineEventStatus.SCHEDULED:
+                return False
+            state.status = ShiftTimelineEventStatus.SENT
+            state.message_id = message_id
+            await state.save(
+                using_db=connection,
+                update_fields=["status", "message_id", "updated_at"],
+            )
+            return True
+
+    async def complete_submission_deadline(
+        self,
+        *,
+        event_state_id: int,
+        delivery_nonce: int,
+    ) -> bool:
+        async with in_transaction() as connection:
+            state = await self._get_locked_deadline_event_by_id(
+                event_state_id,
+                connection,
+            )
+            if (
+                state is None
+                or state.delivery_nonce != delivery_nonce
+                or state.status is not ShiftTimelineEventStatus.SENT
+            ):
+                return False
+            shift_register_config = await self._get_locked_shift_config_by_id(
+                state.shift_register_id,
+                connection,
+            )
+            shift_register_config.deadline_automation_enabled = False
+            await shift_register_config.save(
+                using_db=connection,
+                update_fields=["deadline_automation_enabled", "updated_at"],
+            )
+            state.status = ShiftTimelineEventStatus.COMPLETED
+            await state.save(
+                using_db=connection,
+                update_fields=["status", "updated_at"],
+            )
+            self._sheet_config = shift_register_config
+            return True
+
+    async def set_manual_feature_enabled(self, *, enabled: bool) -> int | None:
+        async with in_transaction() as connection:
+            feature_channel = await self._get_locked_feature_channel(
+                self.feature_channel.id,
+                connection,
+                required=False,
+            )
+            if feature_channel is None:
+                return None
+            shift_register_config = await self._get_locked_shift_config(
+                connection,
+                required=False,
+            )
+            feature_channel.is_enabled = enabled
+            await feature_channel.save(
+                using_db=connection,
+                update_fields=["is_enabled", "updated_at"],
+            )
+            if shift_register_config is None:
+                self._sheet_config = None
+                return None
+            shift_register_config.deadline_automation_enabled = False
+            await shift_register_config.save(
+                using_db=connection,
+                update_fields=["deadline_automation_enabled", "updated_at"],
+            )
+            await self._delete_deadline_event(
+                shift_register_config.id,
+                connection,
+            )
+            self._sheet_config = shift_register_config
+            return shift_register_config.id
+
+    async def clear_feature_settings(self) -> int | None:
+        async with in_transaction() as connection:
+            shift_register_config = await self._get_locked_shift_config(
+                connection,
+                required=False,
+            )
+            config_id = shift_register_config.id if shift_register_config else None
+            feature_channel = await self._get_locked_feature_channel(
+                self.feature_channel.id,
+                connection,
+                required=False,
+            )
+            if feature_channel is not None:
+                await feature_channel.delete(using_db=connection)
+            self._sheet_config = None
+            return config_id
+
+    async def _get_locked_shift_config(
+        self,
+        connection: object,
+        *,
+        required: bool = True,
+    ) -> ShiftRegisterConfig | None:
+        config = await self._get_locked_shift_config_by_feature_channel(
+            self.feature_channel.id,
+            connection,
+        )
+        if config is None and required:
+            raise SheetConfigNotFoundError(self.feature_channel)
+        return config
+
+    async def _get_locked_shift_config_by_feature_channel(
+        self,
+        feature_channel_id: int,
+        connection: object,
+    ) -> ShiftRegisterConfig | None:
+        return await (
+            ShiftRegisterConfig.filter(feature_channel_id=feature_channel_id)
+            .using_db(connection)
+            .select_for_update()
+            .first()
+        )
+
+    async def _get_locked_shift_config_by_id(
+        self,
+        config_id: int,
+        connection: object,
+    ) -> ShiftRegisterConfig:
+        config = await (
+            ShiftRegisterConfig.filter(id=config_id)
+            .using_db(connection)
+            .select_for_update()
+            .first()
+        )
+        if config is None:
+            raise SheetConfigNotFoundError(self.feature_channel)
+        return config
+
+    async def _get_locked_feature_channel(
+        self,
+        feature_channel_id: int,
+        connection: object,
+        *,
+        required: bool = True,
+    ) -> FeatureChannel | None:
+        feature_channel = await (
+            FeatureChannel.filter(id=feature_channel_id)
+            .using_db(connection)
+            .select_for_update()
+            .first()
+        )
+        if feature_channel is None and required:
+            raise SheetConfigNotFoundError(self.feature_channel)
+        return feature_channel
+
+    async def _get_locked_deadline_event(
+        self,
+        shift_register_id: int,
+        connection: object,
+    ) -> ShiftTimelineEventState | None:
+        return await (
+            ShiftTimelineEventState.filter(
+                shift_register_id=shift_register_id,
+                event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            )
+            .using_db(connection)
+            .select_for_update()
+            .first()
+        )
+
+    async def _get_locked_deadline_event_by_id(
+        self,
+        event_state_id: int,
+        connection: object,
+    ) -> ShiftTimelineEventState | None:
+        return await (
+            ShiftTimelineEventState.filter(
+                id=event_state_id,
+                event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+                shift_register__feature_channel_id=self.feature_channel.id,
+            )
+            .using_db(connection)
+            .select_for_update()
+            .first()
+        )
+
+    async def _reset_deadline_event(
+        self,
+        shift_register_config: ShiftRegisterConfig,
+        connection: object,
+        *,
+        state: ShiftTimelineEventState | None = None,
+    ) -> ShiftTimelineEventState:
+        deadline = shift_register_config.submission_deadline_at
+        if deadline is None:
+            raise AutoCloseDeadlineNotFutureError
+        state = state or await self._get_locked_deadline_event(
+            shift_register_config.id,
+            connection,
+        )
+        if state is None:
+            return await ShiftTimelineEventState.create(
+                using_db=connection,
+                shift_register=shift_register_config,
+                event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+                scheduled_at=deadline,
+                delivery_nonce=_new_delivery_nonce(),
+                status=ShiftTimelineEventStatus.SCHEDULED,
+                message_id=None,
+            )
+        state.scheduled_at = deadline
+        state.delivery_nonce = _new_delivery_nonce()
+        state.status = ShiftTimelineEventStatus.SCHEDULED
+        state.message_id = None
+        await state.save(
+            using_db=connection,
+            update_fields=[
+                "scheduled_at",
+                "delivery_nonce",
+                "status",
+                "message_id",
+                "updated_at",
+            ],
+        )
+        return state
+
+    async def _delete_deadline_event(
+        self,
+        shift_register_id: int,
+        connection: object,
+    ) -> None:
+        await (
+            ShiftTimelineEventState.filter(
+                shift_register_id=shift_register_id,
+                event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            )
+            .using_db(connection)
+            .delete()
         )
 
     async def update_recruitment_time_ranges(
