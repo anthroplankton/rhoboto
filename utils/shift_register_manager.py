@@ -43,6 +43,13 @@ from utils.manager_base import (
     worksheet_transaction_key,
     worksheet_transactions,
 )
+from utils.shift_final import (
+    EventDayWriteStatus,
+    FinalGenerationRequest,
+    FinalScheduleInputError,
+    FinalSchedulePlan,
+    build_final_schedule,
+)
 from utils.shift_register_structs import (
     DraftNotesTeamSource,
     DraftWorksheetContent,
@@ -135,6 +142,16 @@ class DraftGenerationResult:
     team_summary_url: str | None = None
 
 
+class FinalScheduleReconfirmationRequired(Exception):  # noqa: N818
+    """Raised after missing Final inputs are repaired and need reconfirmation."""
+
+
+@dataclass(frozen=True)
+class FinalGenerationResult:
+    request: FinalGenerationRequest
+    schedule: FinalSchedulePlan
+
+
 @dataclass(frozen=True)
 class EntryPresentationPlan:
     format_updates: tuple[tuple[str, dict[str, object], str], ...]
@@ -178,7 +195,7 @@ class ShiftRegisterManager(
     async def get_saved_team_source_channel_id(self) -> int | None:
         """Return the Discord channel ID for the saved Team source."""
         config = await self.get_sheet_config()
-        source_id = getattr(config, "team_source_feature_channel_id", None)
+        source_id = config.team_source_feature_channel_id
         if source_id is None:
             return None
         source = await FeatureChannel.get_or_none(id=source_id)
@@ -189,7 +206,7 @@ class ShiftRegisterManager(
     ) -> tuple[TeamSourceStatus, str | None]:
         """Return the DB-configured Summary destination without Sheets access."""
         config = await self.get_sheet_config()
-        source_id = getattr(config, "team_source_feature_channel_id", None)
+        source_id = config.team_source_feature_channel_id
         if source_id is None:
             return TeamSourceStatus.UNSET, None
         configs = await TeamRegisterConfig.filter(feature_channel_id=source_id)
@@ -245,10 +262,10 @@ class ShiftRegisterManager(
             missing_status = TeamSourceStatus.INVALID
         else:
             shift_config = await self.get_sheet_config_or_none()
-            selected_id = getattr(
-                shift_config,
-                "team_source_feature_channel_id",
-                None,
+            selected_id = (
+                shift_config.team_source_feature_channel_id
+                if shift_config is not None
+                else None
             )
             if selected_id is None:
                 return TeamSourceStatus.UNSET, None, None
@@ -1163,6 +1180,56 @@ class ShiftRegisterManager(
             worksheet.title,
         )
 
+    async def generate_final(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        request: FinalGenerationRequest,
+    ) -> FinalGenerationResult:
+        metadata, structure_changed = await self._ensure_current_worksheets(
+            metadata,
+            required_worksheets=(
+                metadata.draft_worksheet.worksheet,
+                metadata.final_schedule_worksheet.worksheet,
+            ),
+        )
+        if structure_changed:
+            raise FinalScheduleReconfirmationRequired
+
+        draft_worksheet = metadata.draft_worksheet.worksheet
+        final_worksheet = metadata.final_schedule_worksheet.worksheet
+        if draft_worksheet is None or final_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, draft_worksheet.id),
+            worksheet_transaction_key(metadata.sheet_url, final_worksheet.id),
+        ]
+        async with worksheet_transactions(resources):
+            sheet = await self.get_google_sheet()
+            grids = await sheet.batch_get_worksheet_values([draft_worksheet])
+            schedule = build_final_schedule(grids[draft_worksheet.id], request)
+            requests = _final_typed_requests(final_worksheet, request, schedule)
+            await sheet.batch_update_grid((), worksheet_requests=requests)
+            await self._persist_generated_final_anchor(request.anchor_to_persist)
+        return FinalGenerationResult(request=request, schedule=schedule)
+
+    async def _persist_generated_final_anchor(self, anchor: str | None) -> None:
+        if anchor is None:
+            return
+        config = await self.get_sheet_config()
+        config.final_schedule_anchor_cell = anchor
+        try:
+            await config.save(
+                update_fields=["final_schedule_anchor_cell", "updated_at"]
+            )
+        except Exception as exc:
+            partial = partial_success_storage_error(exc)
+            if partial is None:
+                raise
+            partial.log_hint = "final_schedule_written_anchor_not_persisted"
+            raise partial from partial.__cause__
+
     async def generate_draft(  # noqa: C901, PLR0912
         self,
         metadata: ShiftRegisterGoogleSheetsMetadata,
@@ -2036,6 +2103,186 @@ def _entry_rgb(color: str) -> dict[str, float]:
         name: int(color[start : start + 2], 16) / 255
         for name, start in (("red", 1), ("green", 3), ("blue", 5))
     }
+
+
+def _final_typed_requests(
+    worksheet: AsyncioGspreadWorksheet,
+    request: FinalGenerationRequest,
+    schedule: FinalSchedulePlan,
+) -> list[dict[str, object]]:
+    data: list[dict[str, object]] = [
+        {"range": request.main_range.a1, "values": schedule.values}
+    ]
+    if request.event_day.status is EventDayWriteStatus.READY:
+        anchor = request.event_day.anchor
+        value = request.event_day.value
+        if anchor is None or value is None:
+            raise FinalScheduleInputError
+        data.append(
+            {
+                "range": anchor.a1,
+                "values": [[value]],
+            }
+        )
+    return worksheet.typed_update_requests(
+        data,
+        formula_ranges=set(),
+        background_updates=_final_background_updates(request, schedule),
+        format_updates=_final_foreground_updates(request, schedule),
+        min_rows=_final_required_rows(request),
+        min_cols=_final_required_columns(request),
+    )
+
+
+def _final_background_updates(
+    request: FinalGenerationRequest,
+    schedule: FinalSchedulePlan,
+) -> list[tuple[str, str]]:
+    role_range = _final_role_range(request)
+    split_cells: list[tuple[int, int, str]] = []
+    for row_offset, row in enumerate(schedule.rows):
+        role_values = (row.encore, *row.honso, row.standby)
+        for role_offset, name in enumerate(role_values):
+            if name in schedule.split_colors:
+                split_cells.append(
+                    (
+                        request.main_anchor.row + row_offset,
+                        request.main_anchor.column + 1 + role_offset,
+                        schedule.split_colors[name],
+                    )
+                )
+    gap_rows = [
+        request.main_anchor.row + row_offset
+        for row_offset, row in enumerate(schedule.rows)
+        if not row.is_recruitment
+    ]
+    return [
+        (role_range, "#FFFFFF"),
+        *_coalesce_final_cells(split_cells),
+        *_coalesce_final_rows(
+            gap_rows,
+            start_column=request.main_anchor.column + 1,
+            end_column=request.main_range.end.column,
+        ),
+    ]
+
+
+def _final_foreground_updates(
+    request: FinalGenerationRequest,
+    schedule: FinalSchedulePlan,
+) -> list[tuple[str, dict[str, object], str]]:
+    role_range = _final_role_range(request)
+    encore_cells = [
+        (
+            request.main_anchor.row + row_offset,
+            request.main_anchor.column + 1,
+        )
+        for row_offset, row in enumerate(schedule.rows)
+        if row.encore
+    ]
+    return [
+        _final_text_color_update(role_range, "#000000"),
+        *(
+            _final_text_color_update(range_name, "#FF0000")
+            for range_name, _color in _coalesce_final_cells(
+                encore_cells, include_color=False
+            )
+        ),
+    ]
+
+
+def _final_text_color_update(
+    range_name: str,
+    color: str,
+) -> tuple[str, dict[str, object], str]:
+    return (
+        range_name,
+        {"textFormat": {"foregroundColorStyle": {"rgbColor": _entry_rgb(color)}}},
+        "userEnteredFormat.textFormat.foregroundColorStyle",
+    )
+
+
+def _final_role_range(request: FinalGenerationRequest) -> str:
+    return (
+        f"{column_letter(request.main_anchor.column + 1)}{request.main_anchor.row}:"
+        f"{column_letter(request.main_range.end.column)}{request.main_range.end.row}"
+    )
+
+
+def _final_required_rows(request: FinalGenerationRequest) -> int:
+    rows = request.main_range.end.row
+    if request.event_day.status is EventDayWriteStatus.READY:
+        anchor = request.event_day.anchor
+        if anchor is not None:
+            rows = max(rows, anchor.row)
+    return rows
+
+
+def _final_required_columns(request: FinalGenerationRequest) -> int:
+    columns = request.main_range.end.column
+    if request.event_day.status is EventDayWriteStatus.READY:
+        anchor = request.event_day.anchor
+        if anchor is not None:
+            columns = max(columns, anchor.column)
+    return columns
+
+
+def _coalesce_final_cells(
+    cells: list[tuple[int, int, str] | tuple[int, int]],
+    *,
+    include_color: bool = True,
+) -> list[tuple[str, str]]:
+    grouped: dict[tuple[int, str], list[int]] = {}
+    for cell in cells:
+        row, column = cell[:2]
+        color = cell[2] if include_color else ""
+        grouped.setdefault((column, color), []).append(row)
+    ranges: list[tuple[str, str]] = []
+    for (column, _color), rows in grouped.items():
+        rows.sort()
+        start = previous = rows[0]
+        for row in rows[1:]:
+            if row == previous + 1:
+                previous = row
+                continue
+            ranges.append((_final_range(column, start, column, previous), _color))
+            start = previous = row
+        ranges.append((_final_range(column, start, column, previous), _color))
+    return ranges
+
+
+def _coalesce_final_rows(
+    rows: list[int],
+    *,
+    start_column: int,
+    end_column: int,
+) -> list[tuple[str, str]]:
+    if not rows:
+        return []
+    rows.sort()
+    ranges: list[tuple[str, str]] = []
+    start = previous = rows[0]
+    for row in rows[1:]:
+        if row == previous + 1:
+            previous = row
+            continue
+        ranges.append(
+            (_final_range(start_column, start, end_column, previous), "#CCCCCC")
+        )
+        start = previous = row
+    ranges.append((_final_range(start_column, start, end_column, previous), "#CCCCCC"))
+    return ranges
+
+
+def _final_range(
+    start_column: int,
+    start_row: int,
+    end_column: int,
+    end_row: int,
+) -> str:
+    start = f"{column_letter(start_column)}{start_row}"
+    end = f"{column_letter(end_column)}{end_row}"
+    return start if start == end else f"{start}:{end}"
 
 
 def _trim_blank_rows(rows: list[list[object]]) -> list[list[object]]:

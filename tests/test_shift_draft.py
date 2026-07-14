@@ -1667,7 +1667,8 @@ async def test_generate_draft_rejects_old_entry_header() -> None:
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
     configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
-        recruitment_time_ranges=[{"start": 4, "end": 7}]
+        recruitment_time_ranges=[{"start": 4, "end": 7}],
+        team_source_feature_channel_id=None,
     )
     old_columns = [
         "username",
@@ -1702,7 +1703,8 @@ async def test_generate_draft_rejects_nonbinary_entry_before_draft_write() -> No
     manager = ShiftRegisterManager(make_feature_channel(), "service.json")
     value_sheet = configure_draft_value_sheet(manager)
     manager._sheet_config = SimpleNamespace(  # noqa: SLF001
-        recruitment_time_ranges=[{"start": 4, "end": 7}]
+        recruitment_time_ranges=[{"start": 4, "end": 7}],
+        team_source_feature_channel_id=None,
     )
     entry_ranges = build_entry_ranges([("bob", "Bob", {4, 5})])
     entry_ranges[2][0][4] = "not binary"

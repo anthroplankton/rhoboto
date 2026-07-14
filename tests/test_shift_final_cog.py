@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+import datetime as dt
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
+
+import pytest
+
+from cogs.shift_register import ShiftRegister, _format_final_contract_error
+from tests.fakes import FakeInteraction
+from utils.shift_final import (
+    DEFAULT_EVENT_DAY_FORMAT,
+    FinalSchedulePlan,
+    FinalScheduleRow,
+    FinalScheduleValidationError,
+    FinalScheduleValidationKind,
+    build_final_generation_request,
+)
+from utils.shift_register_manager import FinalGenerationResult
+from utils.shift_register_structs import RecruitmentTimeRanges
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
+
+def fake_bot() -> SimpleNamespace:
+    return SimpleNamespace(
+        tree=SimpleNamespace(add_command=lambda _command: None),
+        user=None,
+    )
+
+
+def final_config() -> SimpleNamespace:
+    return SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/example/edit",
+        draft_worksheet_id=2,
+        final_schedule_worksheet_id=3,
+        final_schedule_anchor_cell="B2",
+        recruitment_time_ranges=[{"start": 4, "end": 6}],
+        event_date=dt.date(2026, 12, 21),
+    )
+
+
+def final_result(config: SimpleNamespace) -> FinalGenerationResult:
+    request = build_final_generation_request(
+        recruitment_ranges=RecruitmentTimeRanges.from_json(
+            config.recruitment_time_ranges
+        ),
+        saved_anchor=config.final_schedule_anchor_cell,
+        supplied_anchor=None,
+        event_date=config.event_date,
+        event_day_anchor="A1",
+        event_day_format=None,
+    )
+    return FinalGenerationResult(
+        request=request,
+        schedule=FinalSchedulePlan(
+            rows=(
+                FinalScheduleRow(
+                    hour=4,
+                    is_recruitment=True,
+                    runner="Runner A",
+                    encore="Encore",
+                    honso=("Main", "", ""),
+                    standby="",
+                ),
+                FinalScheduleRow(
+                    hour=5,
+                    is_recruitment=True,
+                    runner="Runner B",
+                    encore="",
+                    honso=("", "", ""),
+                    standby="Standby",
+                ),
+            ),
+            split_colors={},
+        ),
+    )
+
+
+def test_generate_final_event_day_format_has_safe_native_length_limit() -> None:
+    parameters = {
+        parameter.name: parameter
+        for parameter in ShiftRegister.generate_final.parameters
+    }
+    event_day_format = parameters["event_day_format"]
+
+    assert event_day_format.required is False
+    assert event_day_format.min_value == 1
+    assert event_day_format.max_value == 512
+    assert f"Default: {DEFAULT_EVENT_DAY_FORMAT}" in str(event_day_format.description)
+
+
+def test_final_contract_error_is_actionable() -> None:
+    content = _format_final_contract_error(
+        FinalScheduleValidationError(
+            FinalScheduleValidationKind.AXIS,
+            row=5,
+            column=1,
+            expected="7-8",
+            detected="8-9",
+        )
+    )
+
+    assert "第 5 列、第 1 欄" in content
+    assert "預期：7-8" in content  # noqa: RUF001
+    assert "實際：8-9" in content  # noqa: RUF001
+    assert "`axis`" not in content
+
+
+@pytest.mark.asyncio
+async def test_generate_final_confirms_before_metadata_and_writes_report(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = final_config()
+    result = final_result(config)
+    events: list[str] = []
+
+    class Manager:
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            events.append("config")
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> object:
+            events.append("metadata")
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            events.append("warnings")
+
+        async def generate_final(
+            self,
+            _metadata: object,
+            *,
+            request: object,
+        ) -> FinalGenerationResult:
+            events.append("write")
+            assert request == result.request
+            return result
+
+    manager = Manager()
+
+    async def get_feature_context(_source: object) -> object:
+        events.append("feature")
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        events.append("context")
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    @asynccontextmanager
+    async def unlocked(
+        *_args: object,
+        **_kwargs: object,
+    ) -> AsyncIterator[SimpleNamespace]:
+        events.append("lock")
+        yield config
+
+    class ConfirmView:
+        value = True
+
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
+            assert requesting_user_id == 333
+            assert destination_label == "Final Schedule"
+            assert destination_url.endswith("#gid=3")
+
+        async def wait(self) -> None:
+            events.append("confirm")
+
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView",
+        ConfirmView,
+    )
+    monkeypatch.setattr("cogs.shift_register.fresh_shift_channel_transaction", unlocked)
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_final.callback(
+        subject,
+        interaction,
+        None,
+        "A1",
+        None,
+    )
+
+    assert events.index("confirm") < events.index("metadata")
+    assert events.index("metadata") < events.index("write")
+    prompt, prompt_kwargs = interaction.original_response_edits[0]
+    assert "B2:G3" in prompt
+    assert prompt_kwargs["view"].__class__ is ConfirmView
+    report = interaction.original_response_edits[-1][0]
+    assert "### ✅ 確定班表已產生" in report
+    assert "`Runner A`、`Runner B`" in report
+    assert "缺 `2`" in report
+
+
+@pytest.mark.asyncio
+async def test_generate_final_invalid_main_anchor_does_not_create_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = final_config()
+    called = False
+
+    async def get_feature_context(_source: object) -> object:
+        return object()
+
+    async def get_configured_context(_context: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            manager=SimpleNamespace(),
+            feature_config=config,
+        )
+
+    class UnexpectedView:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal called
+            called = True
+
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView",
+        UnexpectedView,
+    )
+    subject = ShiftRegister(fake_bot())
+    subject._get_feature_channel_context = get_feature_context  # type: ignore[method-assign]  # noqa: SLF001
+    subject._get_configured_feature_channel_context = get_configured_context  # type: ignore[method-assign]  # noqa: SLF001
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_final.callback(
+        subject,
+        interaction,
+        "not-a-cell",
+        None,
+        None,
+    )
+
+    assert not called
+    assert "Final Schedule Anchor Cell" in interaction.original_response_edits[-1][0]

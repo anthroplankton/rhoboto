@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+# ruff: noqa: RUF001
+from dataclasses import dataclass
 from io import BytesIO
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 from discord import File, User, app_commands
-from discord.utils import escape_markdown
+from discord.utils import escape_markdown, escape_mentions
 
 from bot import config
 from cogs.base.discord_context import require_guild_channel_source
@@ -14,16 +16,29 @@ from cogs.base.feature_channel_base import (
 )
 from components.ui_shift_register import (
     SHIFT_REGISTER_DISPLAY_NAME,
-    GenerateDraftConfirmView,
+    GenerateShiftScheduleConfirmView,
     ShiftRegisterView,
     build_shift_register_settings_panel,
     get_fresh_shift_register_config_or_respond,
 )
 from utils.google_sheets_urls import google_sheet_url_with_gid
 from utils.key_async_lock import KeyAsyncLock
+from utils.manager_base import SheetConfigNotFoundError
 from utils.reactions import add_reaction_if_possible, transition_processing_reaction
+from utils.shift_final import (
+    DEFAULT_EVENT_DAY_FORMAT,
+    EventDayWriteStatus,
+    FinalGenerationRequest,
+    FinalScheduleConflictError,
+    FinalScheduleInputError,
+    FinalScheduleValidationError,
+    FinalScheduleValidationKind,
+    build_final_generation_request,
+)
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
+    FinalGenerationResult,
+    FinalScheduleReconfirmationRequired,
     ShiftRegisterManager,
     TeamSourceStatus,
     fresh_shift_channel_transaction,
@@ -43,10 +58,11 @@ from utils.shift_scheduler import (
     STANDBY_SUPPORTER_SLOT,
     hour_label,
 )
+from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import UserInfo
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
 
     from discord import Interaction, Message
     from discord.ui import View
@@ -54,6 +70,7 @@ if TYPE_CHECKING:
     from bot import Rhoboto
     from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
     from components.ui_settings_flow import SettingsPanel
+    from models.shift_register import ShiftRegisterConfig
     from utils.shift_scheduler import DraftSchedule
 
 
@@ -61,19 +78,28 @@ def _format_display_name(name: str) -> str:
     return escape_markdown(name) if "`" in name else f"`{name}`"
 
 
-_DRAFT_REPORT_SECTION_PREFIXES = (
-    "⚠️ 編成未登録：",  # noqa: RUF001
-    "- 已排入（",  # noqa: RUF001
-    "- 未排入（",  # noqa: RUF001
+_SHIFT_REPORT_SECTION_PREFIXES = (
+    "- 已排入（",
+    "⚠️ 編成未登録：",
+    "- 未排入（",
 )
 _MAX_BMP_CODE_POINT = 0xFFFF
+_FINAL_CONTRACT_VALUE_LIMIT = 160
 
 
 def _discord_content_length(content: str) -> int:
     return len(content.encode("utf-16-le")) // 2
 
 
-def _split_long_draft_report_section(section: str, limit: int) -> list[str]:
+@dataclass(frozen=True)
+class ShiftReportAssignment:
+    hour: int
+    encore: str | None
+    honso: tuple[str, ...]
+    standby: str | None
+
+
+def _split_long_shift_report_section(section: str, limit: int) -> list[str]:
     chunks: list[str] = []
     start = 0
     width = 0
@@ -105,20 +131,31 @@ def _split_long_draft_report_section(section: str, limit: int) -> list[str]:
     return chunks
 
 
-def _split_draft_report(report: str, *, limit: int = 2000) -> list[str]:
-    """Split a report at semantic boundaries within Discord's content limit."""
+def _split_shift_report(report: str, *, limit: int = 2000) -> list[str]:
+    """Split a Shift report at semantic boundaries within Discord's limit."""
     if _discord_content_length(report) <= limit:
         return [report]
 
+    lines = report.splitlines()
+    assignment_index = next(
+        (index for index, line in enumerate(lines) if line.startswith("- 已排入（")),
+        None,
+    )
     messages: list[str] = []
+    if assignment_index is not None:
+        preamble = "\n".join(lines[:assignment_index])
+        if preamble and _discord_content_length(preamble) <= limit:
+            messages.append(preamble)
+            report = "\n".join(lines[assignment_index:])
+
     pending_lines: list[str] = []
     pending_length = 0
     for line in report.splitlines():
-        line_chunks = _split_long_draft_report_section(line, limit)
+        line_chunks = _split_long_shift_report_section(line, limit)
         for chunk_index, chunk in enumerate(line_chunks):
             chunk_length = _discord_content_length(chunk)
             starts_section = chunk_index == 0 and line.startswith(
-                _DRAFT_REPORT_SECTION_PREFIXES
+                _SHIFT_REPORT_SECTION_PREFIXES
             )
             if pending_lines and (
                 starts_section or pending_length + 1 + chunk_length > limit
@@ -139,6 +176,28 @@ def _split_draft_report(report: str, *, limit: int = 2000) -> list[str]:
     return messages
 
 
+def _format_shift_assignment_section(
+    assignments: Sequence[ShiftReportAssignment],
+    *,
+    empty: bool,
+) -> list[str]:
+    lines = ["- 已排入（安可｜本走；待機）："]
+    if empty:
+        lines[0] += "なし"
+        return lines
+    for assignment in assignments:
+        honso = list(assignment.honso)
+        missing_honso = 3 - len(honso)
+        if missing_honso:
+            honso.append(f"缺 `{missing_honso}`")
+        lines.append(
+            f"  - -# `{hour_label(assignment.hour)}`："
+            f"{assignment.encore or '缺'}｜{'、'.join(honso)}；"
+            f"{assignment.standby or '缺'}"
+        )
+    return lines
+
+
 def _format_generate_draft_confirmation(
     recruitment_ranges: RecruitmentTimeRanges,
     draft_sheet_url: str,
@@ -152,36 +211,210 @@ def _format_generate_draft_confirmation(
             "### ‼️ 確認產生班表草稿",
             (
                 "請先備份需要保留的內容。確認後將覆蓋 "
-                f"[Shift Draft]({draft_sheet_url}) 的以下位置："  # noqa: RUF001
+                f"[Shift Draft]({draft_sheet_url}) 的以下位置："
             ),
-            "- 班表：`A1:G31`",  # noqa: RUF001
-            f"- Notes：`A{final_row + 2}`",  # noqa: RUF001
+            "- 班表：`A1:G31`",
+            f"- Notes：`A{final_row + 2}`",
+            (f"- 候補：`I1`、閾值・圖例 `I{final_row + 1}:M{final_row + 1}`"),
+            f"- 反查：`J{final_row + 3}:L{final_row + 5}`",
+            (f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"),
             (
-                f"- 候補：`I1`、閾值・圖例 "  # noqa: RUF001
-                f"`I{final_row + 1}:M{final_row + 1}`"
-            ),
-            f"- 反查：`J{final_row + 3}:L{final_row + 5}`",  # noqa: RUF001
-            (
-                f"- 編成一覧：Team Source 可用時從 `J{final_row + 6}` 寫入"  # noqa: RUF001
-            ),
-            (
-                "Team Source 同步：\n"  # noqa: RUF001
+                "Team Source 同步：\n"
                 "- 確認後會以目前 Discord 成員與 Team 資料更新 "
                 f"[Team Summary]({team_summary_url})"
                 if team_summary_url is not None
                 else (
-                    "Team Source 同步：\n⚠️ 未設定，本次不會同步"  # noqa: RUF001
+                    "Team Source 同步：\n⚠️ 未設定，本次不會同步"
                     if team_source_status is TeamSourceStatus.UNSET
-                    else "Team Source 同步：\n⚠️ 設定無效，本次不會同步"  # noqa: RUF001
+                    else "Team Source 同步：\n⚠️ 設定無效，本次不會同步"
                 )
             ),
             "",
-            (
-                "Notes・候補的展開位置若已有資料，將保留該資料並可能顯示 "  # noqa: RUF001
-                "`#REF!`。"
-            ),
+            ("Notes・候補的展開位置若已有資料，將保留該資料並可能顯示 `#REF!`。"),
         ]
     )
+
+
+def _event_day_status_message(request: FinalGenerationRequest) -> str | None:
+    messages = {
+        EventDayWriteStatus.OMITTED: "活動日期錨點未填，本次未寫入",
+        EventDayWriteStatus.FORMAT_IGNORED: "活動日期格式已忽略（未提供錨點）",
+        EventDayWriteStatus.INVALID_ANCHOR: "活動日期錨點格式無效，本次未寫入",
+        EventDayWriteStatus.OVERLAPS_MAIN: "活動日期錨點與主範圍重疊，本次未寫入",
+        EventDayWriteStatus.MISSING_EVENT_DATE: "DB 沒有活動日期，本次未寫入",
+        EventDayWriteStatus.INVALID_FORMAT: "活動日期格式無效，本次未寫入",
+    }
+    return messages.get(request.event_day.status)
+
+
+def _format_generate_final_confirmation(
+    recruitment_ranges: RecruitmentTimeRanges,
+    draft_sheet_url: str,
+    final_sheet_url: str,
+    request: FinalGenerationRequest,
+) -> str:
+    event_day = request.event_day
+    event_day_line = (
+        f"- 活動日期：`{event_day.anchor.a1}` = `{event_day.value}`"
+        if event_day.status is EventDayWriteStatus.READY
+        and event_day.anchor is not None
+        and event_day.value is not None
+        else f"- 活動日期：⚠️ {_event_day_status_message(request)}"
+    )
+    anchor_line = (
+        f"- 這次會將新的 Final Schedule Anchor Cell `{request.main_anchor.a1}` "
+        "寫回設定（僅在寫入成功後儲存）。"
+        if request.anchor_to_persist is not None
+        else f"- Final Schedule Anchor Cell：`{request.main_anchor.a1}`"
+    )
+    return "\n".join(
+        [
+            "### ‼️ 確認產生確定班表",
+            "請先備份需要保留的內容。確認後才會讀取 Draft 並覆蓋 Final：",
+            f"- 來源 [Shift Draft]({draft_sheet_url})：`{request.source_range}`",
+            f"- 主範圍 [Final Schedule]({final_sheet_url})：`{request.main_range.a1}`",
+            event_day_line,
+            anchor_line,
+            f"- 募集時間【{recruitment_ranges.announcement_display()}】",
+            "‼️ 只會覆蓋上述目前主範圍；Final 範圍外的既有資料不會清除。",
+            "⚠️ 若本次班表較短，主範圍以外的舊資料會保留，請先備份並自行確認。",
+        ]
+    )
+
+
+def _format_final_report(
+    result: FinalGenerationResult,
+    final_sheet_url: str,
+    recruitment_ranges: RecruitmentTimeRanges,
+) -> str:
+    runners = tuple(_format_display_name(runner) for runner in result.schedule.runners)
+    lines = [
+        "### ✅ 確定班表已產生",
+        f"- Runner（ランナー）：{'、'.join(runners) if runners else 'なし'}",
+        f"- 募集時間【{recruitment_ranges.announcement_display()}】",
+        f"‼️ 已寫入 [Final Schedule]({final_sheet_url})",
+        f"  - 主範圍：`{result.request.main_range.a1}`",
+    ]
+    event_day = result.request.event_day
+    if (
+        event_day.status is EventDayWriteStatus.READY
+        and event_day.anchor is not None
+        and event_day.value is not None
+    ):
+        lines.append(f"  - 活動日期：`{event_day.anchor.a1}` = `{event_day.value}`")
+    else:
+        message = _event_day_status_message(result.request)
+        if message is not None:
+            lines.append(f"⚠️ 警告：{message}")
+    assignments = [
+        ShiftReportAssignment(
+            hour=row.hour,
+            encore=_format_display_name(row.encore) if row.encore else None,
+            honso=tuple(_format_display_name(name) for name in row.honso if name),
+            standby=(_format_display_name(row.standby) if row.standby else None),
+        )
+        for row in result.schedule.rows
+        if row.is_recruitment
+    ]
+    lines.extend(
+        _format_shift_assignment_section(
+            assignments,
+            empty=not any(
+                row.encore or any(row.honso) or row.standby
+                for row in result.schedule.rows
+                if row.is_recruitment
+            ),
+        )
+    )
+    return "\n".join(lines)
+
+
+def _format_final_contract_error(error: FinalScheduleValidationError) -> str:
+    location = (
+        f"（第 {error.row} 列、第 {error.column} 欄）"
+        if error.row is not None and error.column is not None
+        else ""
+    )
+    problem = {
+        FinalScheduleValidationKind.EMPTY: "Draft 沒有可讀取的內容",
+        FinalScheduleValidationKind.HEADER: "Draft 標題列不符合契約",
+        FinalScheduleValidationKind.AXIS: "Draft 時段軸不符合契約",
+        FinalScheduleValidationKind.EXTRA_AXIS: "Draft 出現契約外的額外時段",
+        FinalScheduleValidationKind.ROLE_VALUE: "Draft 崗位值不是文字或空白",
+    }[error.kind]
+    return (
+        "### ⚠️📏 確定班表未產生\n"
+        f"{problem}{location}。\n"
+        f"- 預期：{_format_final_contract_value(error.expected)}\n"
+        f"- 實際：{_format_final_contract_value(error.detected)}\n"
+        "未寫入 Final；請修正 Draft 後重新執行 command。"
+    )
+
+
+def _format_final_contract_value(value: object) -> str:
+    if value is None:
+        return "缺少"
+    if value == "":
+        return "空白"
+    if value is str:
+        return "文字或空白"
+    if isinstance(value, (tuple, list)):
+        text = "｜".join("空白" if item == "" else str(item) for item in value)
+    else:
+        text = str(value)
+    safe = escape_markdown(escape_mentions(text))
+    return (
+        f"{safe[:_FINAL_CONTRACT_VALUE_LIMIT]}"
+        f"{'…' if len(safe) > _FINAL_CONTRACT_VALUE_LIMIT else ''}"
+    )
+
+
+def _format_final_conflict_report(error: FinalScheduleConflictError) -> str:
+    lines = [
+        "### ⚠️📏 確定班表未產生",
+        "同一時段同一人被排入多個崗位，未寫入 Final：",
+    ]
+    lines.extend(
+        f"  - -# `{hour_label(conflict.hour)}`："
+        f"{_format_display_name(conflict.name)}（{'、'.join(conflict.roles)}）"
+        for conflict in error.conflicts
+    )
+    lines.append("請修正 Draft 後重新執行 command。")
+    return "\n".join(lines)
+
+
+def _format_final_partial_success(
+    request: FinalGenerationRequest,
+    final_sheet_url: str,
+) -> str:
+    event_day = request.event_day
+    date_outcome = (
+        f"活動日期 `{event_day.anchor.a1}` 已寫入為 `{event_day.value}`。"
+        if event_day.status is EventDayWriteStatus.READY
+        and event_day.anchor is not None
+        and event_day.value is not None
+        else "活動日期未寫入。"
+    )
+    return "\n".join(
+        [
+            "### ⚠️🛠️ 確定班表部分完成",
+            f"Final Schedule 的主範圍 `{request.main_range.a1}` 已寫入："
+            f"[Final Schedule]({final_sheet_url})。",
+            date_outcome,
+            "DB 的 Final Schedule Anchor Cell 尚未更新；請確認工作表後，"
+            f"使用相同的明確 anchor `{request.main_anchor.a1}` 重試。",
+        ]
+    )
+
+
+async def _replace_with_shift_report(
+    interaction: Interaction,
+    report: str,
+) -> None:
+    messages = _split_shift_report(report)
+    await interaction.edit_original_response(content=messages[0], view=None)
+    for message in messages[1:]:
+        await interaction.followup.send(message, ephemeral=True)
 
 
 def _format_draft_username(
@@ -228,31 +461,19 @@ class ShiftRegister(
         language: str,
     ) -> dict[str, object]:
         values = super()._auto_guide_template_values(context, language)
-        feature_config = context.feature_config
+        feature_config = cast("ShiftRegisterConfig", context.feature_config)
         recruitment_ranges = RecruitmentTimeRanges.from_json(
-            getattr(feature_config, "recruitment_time_ranges", None)
+            feature_config.recruitment_time_ranges
         )
         values.update(
             build_shift_timeline_template_values(
                 language,
-                day_number=getattr(feature_config, "day_number", None),
-                event_date=getattr(feature_config, "event_date", None),
+                day_number=feature_config.day_number,
+                event_date=feature_config.event_date,
                 recruitment_time_range=recruitment_ranges.announcement_display(),
-                submission_deadline_at=getattr(
-                    feature_config,
-                    "submission_deadline_at",
-                    None,
-                ),
-                draft_shift_proposal_at=getattr(
-                    feature_config,
-                    "draft_shift_proposal_at",
-                    None,
-                ),
-                final_shift_notice_at=getattr(
-                    feature_config,
-                    "final_shift_notice_at",
-                    None,
-                ),
+                submission_deadline_at=feature_config.submission_deadline_at,
+                draft_shift_proposal_at=feature_config.draft_shift_proposal_at,
+                final_shift_notice_at=feature_config.final_shift_notice_at,
             )
         )
         return values
@@ -343,7 +564,7 @@ class ShiftRegister(
             channel_id=message.channel.id,
         ) as fresh_config:
             recruitment_ranges = RecruitmentTimeRanges.from_json(
-                getattr(fresh_config, "recruitment_time_ranges", None)
+                fresh_config.recruitment_time_ranges
             )
             invalid = not recruitment_ranges.contains_slots(set(shift))
             if not invalid:
@@ -434,31 +655,20 @@ class ShiftRegister(
                 await self._send_missing_config_followup(interaction)
                 return
 
+            feature_config = cast("ShiftRegisterConfig", context.feature_config)
             recruitment_ranges = RecruitmentTimeRanges.from_json(
-                getattr(context.feature_config, "recruitment_time_ranges", None)
+                feature_config.recruitment_time_ranges
             )
             announcements = await render_shift_timeline_announcement_messages(
                 self.timeline_template_key,
                 context.guild_id,
                 self.logger,
-                day_number=getattr(context.feature_config, "day_number", None),
-                event_date=getattr(context.feature_config, "event_date", None),
+                day_number=feature_config.day_number,
+                event_date=feature_config.event_date,
                 recruitment_time_range=recruitment_ranges.announcement_display(),
-                submission_deadline_at=getattr(
-                    context.feature_config,
-                    "submission_deadline_at",
-                    None,
-                ),
-                draft_shift_proposal_at=getattr(
-                    context.feature_config,
-                    "draft_shift_proposal_at",
-                    None,
-                ),
-                final_shift_notice_at=getattr(
-                    context.feature_config,
-                    "final_shift_notice_at",
-                    None,
-                ),
+                submission_deadline_at=feature_config.submission_deadline_at,
+                draft_shift_proposal_at=feature_config.draft_shift_proposal_at,
+                final_shift_notice_at=feature_config.final_shift_notice_at,
             )
         except Exception as exc:  # noqa: BLE001
             await self._send_interaction_storage_error_or_raise(
@@ -485,6 +695,224 @@ class ShiftRegister(
     )
     async def announce_guide(self, interaction: Interaction) -> None:
         await self.send_guide_message(interaction)
+
+    @app_commands.command(
+        name="generate_final",
+        description=(
+            "Generate the final shift schedule from the confirmed Shift Draft."
+        ),
+    )
+    @app_commands.describe(
+        final_schedule_anchor_cell=(
+            "Top-left cell of the Final Schedule overwrite range."
+        ),
+        event_day_anchor_cell=(
+            "Optional cell where the formatted event date is written."
+        ),
+        event_day_format=(f"Event date format. Default: {DEFAULT_EVENT_DAY_FORMAT}"),
+    )
+    @app_commands.check(
+        FeatureChannelBase.feature_enabled_app_command_predicate(
+            feature_name,
+            feature_display_name,
+        )
+    )
+    async def generate_final(  # noqa: C901, PLR0911, PLR0912, PLR0915
+        self,
+        interaction: Interaction,
+        final_schedule_anchor_cell: str | None = None,
+        event_day_anchor_cell: str | None = None,
+        event_day_format: app_commands.Range[str, 1, 512] | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        source = require_guild_channel_source(
+            interaction,
+            action="generate final shift schedule",
+        )
+        request: FinalGenerationRequest | None = None
+        final_sheet_url = ""
+        try:
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+
+            feature_config = cast("ShiftRegisterConfig", context.feature_config)
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                feature_config.recruitment_time_ranges
+            )
+            request = build_final_generation_request(
+                recruitment_ranges=recruitment_ranges,
+                saved_anchor=feature_config.final_schedule_anchor_cell,
+                supplied_anchor=final_schedule_anchor_cell,
+                event_date=feature_config.event_date,
+                event_day_anchor=event_day_anchor_cell,
+                event_day_format=event_day_format,
+            )
+            draft_sheet_url = google_sheet_url_with_gid(
+                feature_config.sheet_url,
+                feature_config.draft_worksheet_id,
+            )
+            final_sheet_url = google_sheet_url_with_gid(
+                feature_config.sheet_url,
+                feature_config.final_schedule_worksheet_id,
+            )
+            confirmation_content = _format_generate_final_confirmation(
+                recruitment_ranges,
+                draft_sheet_url,
+                final_sheet_url,
+                request,
+            )
+            fingerprint = (
+                feature_config.sheet_url,
+                feature_config.draft_worksheet_id,
+                feature_config.final_schedule_worksheet_id,
+                feature_config.final_schedule_anchor_cell,
+                request,
+            )
+            view = GenerateShiftScheduleConfirmView(
+                requesting_user_id=interaction.user.id,
+                destination_label="Final Schedule",
+                destination_url=final_sheet_url,
+            )
+            await interaction.edit_original_response(
+                content=confirmation_content,
+                view=view,
+            )
+            await view.wait()
+            if view.value is False:
+                await interaction.edit_original_response(view=None)
+                return
+            if view.value is None:
+                await interaction.edit_original_response(
+                    content="✖️ 確認逾時，未變更 Final Schedule。",
+                    view=None,
+                )
+                return
+
+            feature_channel_context = await self._get_feature_channel_context(source)
+            context = await self._get_configured_feature_channel_context(
+                feature_channel_context
+            )
+            if context is None:
+                await self._send_missing_config_followup(interaction)
+                return
+            async with fresh_shift_channel_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ) as fresh_config:
+                fresh_ranges = RecruitmentTimeRanges.from_json(
+                    fresh_config.recruitment_time_ranges
+                )
+                fresh_request = build_final_generation_request(
+                    recruitment_ranges=fresh_ranges,
+                    saved_anchor=fresh_config.final_schedule_anchor_cell,
+                    supplied_anchor=final_schedule_anchor_cell,
+                    event_date=fresh_config.event_date,
+                    event_day_anchor=event_day_anchor_cell,
+                    event_day_format=event_day_format,
+                )
+                fresh_fingerprint = (
+                    fresh_config.sheet_url,
+                    fresh_config.draft_worksheet_id,
+                    fresh_config.final_schedule_worksheet_id,
+                    fresh_config.final_schedule_anchor_cell,
+                    fresh_request,
+                )
+                if fresh_fingerprint != fingerprint:
+                    await interaction.edit_original_response(
+                        content=(
+                            "⚠️ 設定或覆蓋目標已變更，未變更 Final Schedule；"
+                            "請重新執行 command。"
+                        ),
+                        view=None,
+                    )
+                    return
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                context.manager.log_missing_worksheet_warnings(metadata)
+                result = await context.manager.generate_final(
+                    metadata,
+                    request=fresh_request,
+                )
+                final_sheet_url = google_sheet_url_with_gid(
+                    fresh_config.sheet_url,
+                    fresh_config.final_schedule_worksheet_id,
+                )
+        except FinalScheduleInputError:
+            await interaction.edit_original_response(
+                content=(
+                    f"⚠️ {config.CONFUSED_EMOJI} Final Schedule Anchor Cell "
+                    "格式無效，未變更任何內容。"
+                ),
+                view=None,
+            )
+            return
+        except SheetConfigNotFoundError:
+            await interaction.edit_original_response(
+                content=(
+                    "⚠️ Shift Register 設定已不存在，未變更 Final Schedule；"
+                    "請重新設定後再試。"
+                ),
+                view=None,
+            )
+            return
+        except FinalScheduleReconfirmationRequired:
+            await interaction.edit_original_response(
+                content=(
+                    "⚠️📏 Draft 或 Final worksheet 設定已修復或變更，"
+                    "未讀取或寫入任何內容；請重新執行 command。"
+                ),
+                view=None,
+            )
+            return
+        except FinalScheduleValidationError as exc:
+            await _replace_with_shift_report(
+                interaction,
+                _format_final_contract_error(exc),
+            )
+            return
+        except FinalScheduleConflictError as exc:
+            await _replace_with_shift_report(
+                interaction,
+                _format_final_conflict_report(exc),
+            )
+            return
+        except StorageError as exc:
+            if (
+                exc.kind is StorageErrorKind.PARTIAL_SUCCESS
+                and exc.log_hint == "final_schedule_written_anchor_not_persisted"
+                and request is not None
+            ):
+                await _replace_with_shift_report(
+                    interaction,
+                    _format_final_partial_success(request, final_sheet_url),
+                )
+                return
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_generate_final",
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_generate_final",
+            )
+            return
+
+        await _replace_with_shift_report(
+            interaction,
+            _format_final_report(result, final_sheet_url, fresh_ranges),
+        )
 
     @app_commands.command(
         name="generate_draft",
@@ -542,9 +970,10 @@ class ShiftRegister(
                 team_source_status,
                 team_summary_url,
             )
-            view = GenerateDraftConfirmView(
+            view = GenerateShiftScheduleConfirmView(
                 requesting_user_id=interaction.user.id,
-                draft_sheet_url=draft_sheet_url,
+                destination_label="Shift Draft",
+                destination_url=draft_sheet_url,
             )
             await interaction.edit_original_response(
                 content=confirmation_content,
@@ -556,7 +985,7 @@ class ShiftRegister(
                 return
             if view.value is None:
                 await interaction.edit_original_response(
-                    content="✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+                    content="✖️ 確認逾時，未變更 Shift Draft。",
                     view=None,
                 )
                 return
@@ -595,7 +1024,7 @@ class ShiftRegister(
                 ):
                     await interaction.edit_original_response(
                         content=(
-                            "⚠️ 募集時段設定已變更，未變更 Shift Draft；"  # noqa: RUF001
+                            "⚠️ 募集時段設定已變更，未變更 Shift Draft；"
                             "請重新執行 command。"
                         ),
                         view=None,
@@ -640,7 +1069,7 @@ class ShiftRegister(
             )
             return
 
-        report_messages = _split_draft_report(
+        report_messages = _split_shift_report(
             self._format_draft_report(
                 schedule,
                 draft_sheet_url,
@@ -685,81 +1114,93 @@ class ShiftRegister(
         ]
         lines = [
             "### ✅ 班表草稿已產生",
-            f"- Runner（ランナー）：{schedule.runner or '`Not set`'}",  # noqa: RUF001
-            f"- 安可綜合力閾值：{encore_power_threshold:g}",  # noqa: RUF001
+            f"- Runner（ランナー）：{schedule.runner or '`Not set`'}",
+            f"- 安可綜合力閾值：{encore_power_threshold:g}",
         ]
         if team_summary_url is not None:
             lines.append(f"🔄 已同步 [Team Summary]({team_summary_url})")
         lines.append(
-            f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"  # noqa: RUF001
+            f"‼️ 已將班表寫入 [Shift Draft]({draft_sheet_url})，並覆蓋原有內容。"
         )
         if team_source_warning is not None:
             lines.append(team_source_warning)
         if unregistered_usernames:
             lines.append(
-                "⚠️ 編成未登録："  # noqa: RUF001
+                "⚠️ 編成未登録："
                 + "、".join(
                     _format_draft_username(username, schedule, member_mentions)
                     for username in unregistered_usernames
                 )
             )
         lines.append(f"- 募集時間【{recruitment_ranges.announcement_display()}】")
-        lines.append("- 已排入（安可｜本走；待機）：")  # noqa: RUF001
-        if not schedule.display_names:
-            lines[-1] += "なし"
-            report_assignments = []
-        for assignment in report_assignments:
-            encore_username = assignment.supporter_usernames_by_slot.get(
-                ENCORE_SUPPORTER_SLOT
-            )
-            encore_name = (
-                _format_draft_username(encore_username, schedule, member_mentions)
-                if encore_username is not None
-                else None
-            )
-            main_name_parts = [
-                _format_draft_username(
-                    assignment.supporter_usernames_by_slot[supporter_slot],
-                    schedule,
-                    member_mentions,
+        assignment_rows: list[ShiftReportAssignment] = []
+        if schedule.display_names:
+            for assignment in report_assignments:
+                encore_username = assignment.supporter_usernames_by_slot.get(
+                    ENCORE_SUPPORTER_SLOT
                 )
-                for supporter_slot in HONSO_SUPPORTER_SLOTS
-                if supporter_slot in assignment.supporter_usernames_by_slot
-            ]
-            missing_main_count = len(HONSO_SUPPORTER_SLOTS) - len(main_name_parts)
-            if missing_main_count:
-                main_name_parts.append(f"缺 `{missing_main_count}`")
-            main_names = "、".join(main_name_parts)
-            standby_username = assignment.supporter_usernames_by_slot.get(
-                STANDBY_SUPPORTER_SLOT
+                encore_name = (
+                    _format_draft_username(
+                        encore_username,
+                        schedule,
+                        member_mentions,
+                    )
+                    if encore_username is not None
+                    else None
+                )
+                main_names = tuple(
+                    _format_draft_username(
+                        assignment.supporter_usernames_by_slot[supporter_slot],
+                        schedule,
+                        member_mentions,
+                    )
+                    for supporter_slot in HONSO_SUPPORTER_SLOTS
+                    if supporter_slot in assignment.supporter_usernames_by_slot
+                )
+                standby_username = assignment.supporter_usernames_by_slot.get(
+                    STANDBY_SUPPORTER_SLOT
+                )
+                standby_name = (
+                    _format_draft_username(
+                        standby_username,
+                        schedule,
+                        member_mentions,
+                    )
+                    if standby_username is not None
+                    else None
+                )
+                assignment_rows.append(
+                    ShiftReportAssignment(
+                        hour=assignment.hour,
+                        encore=encore_name,
+                        honso=main_names,
+                        standby=standby_name,
+                    )
+                )
+        else:
+            report_assignments = []
+        lines.extend(
+            _format_shift_assignment_section(
+                assignment_rows,
+                empty=not schedule.display_names,
             )
-            standby_name = (
-                _format_draft_username(standby_username, schedule, member_mentions)
-                if standby_username is not None
-                else None
-            )
-            names = f"{encore_name or '缺'}｜{main_names}；{standby_name or '缺'}"  # noqa: RUF001
-            lines.append(
-                f"  - -# `{hour_label(assignment.hour)}`：{names}"  # noqa: RUF001
-            )
+        )
         unassigned_assignments = [
             assignment
             for assignment in report_assignments
             if assignment.unassigned_usernames
         ]
         if unassigned_assignments:
-            lines.append("- 未排入（位置已滿）：")  # noqa: RUF001
+            lines.append("- 未排入（位置已滿）：")
             lines.extend(
-                f"  - -# `{hour_label(assignment.hour)}`："  # noqa: RUF001
+                f"  - -# `{hour_label(assignment.hour)}`："
                 + "、".join(
                     _format_draft_username(username, schedule, member_mentions)
                     for username in assignment.unassigned_usernames
                 )
                 for assignment in unassigned_assignments
             )
-        lines.append(
-            "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
-        )
+        lines.append("附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。")
         return "\n".join(lines)
 
 

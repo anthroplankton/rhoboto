@@ -65,6 +65,7 @@ from utils.structs_base import WorksheetContractError
 if TYPE_CHECKING:
     from datetime import date, datetime
 
+    from models.shift_register import ShiftRegisterConfig
     from utils.shift_register_manager import ShiftRegisterManager
 
 
@@ -83,22 +84,24 @@ SHIFT_REGISTER_FEATURE_NAME = "shift_register"
 logger = logging.getLogger(__name__)
 
 
-class GenerateDraftConfirmView(View):
-    """Confirm one administrator's Shift Draft generation request."""
+class GenerateShiftScheduleConfirmView(View):
+    """Confirm one administrator's destructive Shift Schedule generation request."""
 
     def __init__(
         self,
         *,
         requesting_user_id: int,
-        draft_sheet_url: str,
+        destination_label: str,
+        destination_url: str,
         timeout: float = 20.0,
     ) -> None:
         super().__init__(timeout=timeout)
         self.requesting_user_id = requesting_user_id
-        self.draft_sheet_url = draft_sheet_url
+        self.destination_label = destination_label
+        self.destination_url = destination_url
         self.value: bool | None = None
-        self.add_item(GenerateDraftConfirmButton())
-        self.add_item(GenerateDraftCancelButton())
+        self.add_item(GenerateShiftScheduleConfirmButton())
+        self.add_item(GenerateShiftScheduleCancelButton())
 
     async def authorize(self, interaction: Interaction) -> bool:
         if interaction.user.id != self.requesting_user_id:
@@ -114,40 +117,42 @@ class GenerateDraftConfirmView(View):
         return False
 
 
-class GenerateDraftConfirmButton(Button):
+class GenerateShiftScheduleConfirmButton(Button):
     def __init__(self) -> None:
         super().__init__(label="確認生成", style=ButtonStyle.danger)
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
-            interaction
-        ):
+        if not isinstance(
+            view, GenerateShiftScheduleConfirmView
+        ) or not await view.authorize(interaction):
             return
         view.value = True
         await interaction.response.edit_message(
             content=(
                 "已確認生成，正在處理 "  # noqa: RUF001
-                f"[Shift Draft]({view.draft_sheet_url})。"
+                f"[{view.destination_label}]({view.destination_url})。"
             ),
             view=None,
         )
         view.stop()
 
 
-class GenerateDraftCancelButton(Button):
+class GenerateShiftScheduleCancelButton(Button):
     def __init__(self) -> None:
         super().__init__(label="取消", style=ButtonStyle.secondary)
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
-        if not isinstance(view, GenerateDraftConfirmView) or not await view.authorize(
-            interaction
-        ):
+        if not isinstance(
+            view, GenerateShiftScheduleConfirmView
+        ) or not await view.authorize(interaction):
             return
         view.value = False
         await interaction.response.edit_message(
-            content="✖️ 已取消生成，未變更 Shift Draft。",  # noqa: RUF001
+            content=(
+                f"✖️ 已取消生成，未變更 {view.destination_label}。"  # noqa: RUF001
+            ),
             view=None,
         )
         view.stop()
@@ -169,7 +174,7 @@ async def send_shift_settings_missing(interaction: Interaction) -> None:
 async def get_fresh_shift_register_config_or_respond(
     shift_register_manager: ShiftRegisterManager,
     interaction: Interaction,
-) -> object | None:
+) -> ShiftRegisterConfig | None:
     try:
         shift_register = await shift_register_manager.get_fresh_sheet_config()
     except SETTINGS_STORAGE_EXCEPTIONS as exc:
@@ -189,7 +194,7 @@ async def get_fresh_shift_register_config_or_respond(
 
 async def build_shift_register_settings_panel(
     shift_register_manager: ShiftRegisterManager,
-    shift_register: object,
+    shift_register: ShiftRegisterConfig,
     *,
     is_save_action: bool = False,
     metadata: ShiftRegisterGoogleSheetsMetadata | None = None,
@@ -201,11 +206,7 @@ async def build_shift_register_settings_panel(
     active_metadata = (
         metadata or await shift_register_manager.fetch_google_sheets_metadata()
     )
-    final_schedule_anchor_cell = getattr(
-        shift_register,
-        "final_schedule_anchor_cell",
-        "A1",
-    )
+    final_schedule_anchor_cell = shift_register.final_schedule_anchor_cell
     latest_guide_enabled = await resolve_latest_guide_enabled(
         enabled=latest_guide_enabled,
         state_resolver=latest_guide_state_resolver,
@@ -319,19 +320,21 @@ def _format_team_source(  # noqa: PLR0911
     return "- The Team source could not be read at this time."
 
 
-def _timeline_defaults_from_config(shift_register: object) -> dict[str, str]:
-    day_number = getattr(shift_register, "day_number", None)
+def _timeline_defaults_from_config(
+    shift_register: ShiftRegisterConfig,
+) -> dict[str, str]:
+    day_number = shift_register.day_number
     return {
         "day_number": "" if day_number is None else str(day_number),
-        "event_date": _format_modal_date(getattr(shift_register, "event_date", None)),
+        "event_date": _format_modal_date(shift_register.event_date),
         "submission_deadline_at": _format_modal_datetime(
-            getattr(shift_register, "submission_deadline_at", None)
+            shift_register.submission_deadline_at
         ),
         "draft_shift_proposal_at": _format_modal_datetime(
-            getattr(shift_register, "draft_shift_proposal_at", None)
+            shift_register.draft_shift_proposal_at
         ),
         "final_shift_notice_at": _format_modal_datetime(
-            getattr(shift_register, "final_shift_notice_at", None)
+            shift_register.final_shift_notice_at
         ),
     }
 
@@ -695,7 +698,9 @@ class ShiftTimelineModal(Modal):
         try:
             values = parse_shift_timeline_input(
                 _timeline_values_from_modal(self),
-                existing_event_date=getattr(shift_register, "event_date", None),
+                existing_event_date=(
+                    shift_register.event_date if shift_register is not None else None
+                ),
             )
         except ShiftTimelineParseError as exc:
             await _send_modal_validation_error(
@@ -910,11 +915,7 @@ class ShiftRegisterButton(Button):
             entry_worksheet_title = self.entry_worksheet_title
             draft_worksheet_title = self.draft_worksheet_title
             final_schedule_worksheet_title = self.final_schedule_worksheet_title
-            final_schedule_anchor_cell = getattr(
-                shift_register,
-                "final_schedule_anchor_cell",
-                self.final_schedule_anchor_cell,
-            )
+            final_schedule_anchor_cell = shift_register.final_schedule_anchor_cell
         else:
             sheet_url = self.sheet_url
             entry_worksheet_title = self.entry_worksheet_title
@@ -1014,9 +1015,7 @@ class ShiftRecruitmentRangeButton(Button):
         if shift_register is None:
             return
 
-        ranges = RecruitmentTimeRanges.from_json(
-            getattr(shift_register, "recruitment_time_ranges", None)
-        )
+        ranges = RecruitmentTimeRanges.from_json(shift_register.recruitment_time_ranges)
         await interaction.response.send_modal(
             ShiftRecruitmentRangeModal(
                 self.shift_register_manager,
@@ -1548,7 +1547,7 @@ def build_current_settings_embed(
     sheet_url: str,
     metadata: ShiftRegisterGoogleSheetsMetadata,
     final_schedule_anchor_cell: str,
-    shift_register: object,
+    shift_register: ShiftRegisterConfig,
     color: int,
     *,
     is_save_action: bool = False,
@@ -1564,7 +1563,7 @@ def build_current_settings_embed(
             The shift register metadata object.
         final_schedule_anchor_cell (str):
             The anchor cell for the final schedule worksheet.
-        shift_register (object):
+        shift_register (ShiftRegisterConfig):
             The saved Shift Register configuration.
         color (int): Embed color.
         is_save_action (bool):
@@ -1627,26 +1626,12 @@ def build_current_settings_embed(
         inline=False,
     )
 
-    submission_deadline_at = getattr(
-        shift_register,
-        "submission_deadline_at",
-        None,
-    )
-    draft_shift_proposal_at = getattr(
-        shift_register,
-        "draft_shift_proposal_at",
-        None,
-    )
-    final_shift_notice_at = getattr(
-        shift_register,
-        "final_shift_notice_at",
-        None,
-    )
+    submission_deadline_at = shift_register.submission_deadline_at
+    draft_shift_proposal_at = shift_register.draft_shift_proposal_at
+    final_shift_notice_at = shift_register.final_shift_notice_at
     timeline_rows = [
-        f"- **Day Number** = "
-        f"`{_format_optional_value(getattr(shift_register, 'day_number', None))}`",
-        f"- **Event Date** = "
-        f"`{_format_settings_date(getattr(shift_register, 'event_date', None))}`",
+        f"- **Day Number** = `{_format_optional_value(shift_register.day_number)}`",
+        f"- **Event Date** = `{_format_settings_date(shift_register.event_date)}`",
         f"- **Submission Deadline** = "
         f"`{_format_settings_datetime(submission_deadline_at)}`",
         f"- **Draft Shift Proposal** = "
@@ -1661,7 +1646,7 @@ def build_current_settings_embed(
     )
 
     recruitment_ranges = RecruitmentTimeRanges.from_json(
-        getattr(shift_register, "recruitment_time_ranges", None)
+        shift_register.recruitment_time_ranges
     )
     embed.add_field(
         name="Recruitment Time Range",

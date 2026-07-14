@@ -36,7 +36,7 @@ from components.ui_settings_flow import (
 )
 from components.ui_shift_register import (
     ApplyTeamSourceButton,
-    GenerateDraftConfirmView,
+    GenerateShiftScheduleConfirmView,
     ManageTeamSourceButton,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
@@ -3641,9 +3641,10 @@ async def test_disable_and_clear_confirm_denies_unauthorized_user() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("label", ["確認生成", "取消"])
 async def test_generate_draft_confirm_rejects_other_user(label: str) -> None:
-    view = GenerateDraftConfirmView(
+    view = GenerateShiftScheduleConfirmView(
         requesting_user_id=333,
-        draft_sheet_url="https://sheet.example#gid=222",
+        destination_label="Shift Draft",
+        destination_url="https://sheet.example#gid=222",
     )
     interaction = FakeInteraction(user_id=444)
 
@@ -3659,9 +3660,10 @@ async def test_generate_draft_confirm_rejects_other_user(label: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("label", ["確認生成", "取消"])
 async def test_generate_draft_confirm_stops_after_permission_loss(label: str) -> None:
-    view = GenerateDraftConfirmView(
+    view = GenerateShiftScheduleConfirmView(
         requesting_user_id=333,
-        draft_sheet_url="https://sheet.example#gid=222",
+        destination_label="Shift Draft",
+        destination_url="https://sheet.example#gid=222",
     )
     interaction = FakeInteraction(user_id=333, manage_channels=False)
 
@@ -3676,9 +3678,10 @@ async def test_generate_draft_confirm_stops_after_permission_loss(label: str) ->
 
 @pytest.mark.asyncio
 async def test_generate_draft_confirm_allows_requester() -> None:
-    view = GenerateDraftConfirmView(
+    view = GenerateShiftScheduleConfirmView(
         requesting_user_id=333,
-        draft_sheet_url="https://sheet.example#gid=222",
+        destination_label="Shift Draft",
+        destination_url="https://sheet.example#gid=222",
     )
     interaction = FakeInteraction(user_id=333)
 
@@ -3697,9 +3700,10 @@ async def test_generate_draft_confirm_allows_requester() -> None:
 
 @pytest.mark.asyncio
 async def test_generate_draft_cancel_allows_requester() -> None:
-    view = GenerateDraftConfirmView(
+    view = GenerateShiftScheduleConfirmView(
         requesting_user_id=333,
-        draft_sheet_url="https://sheet.example#gid=222",
+        destination_label="Shift Draft",
+        destination_url="https://sheet.example#gid=222",
     )
     interaction = FakeInteraction(user_id=333)
 

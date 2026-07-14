@@ -857,8 +857,9 @@ def _draft_identity_bindings(
 class DraftWorksheetContent:
     """Builds the Shift Draft worksheet grid from a DraftSchedule.
 
-    The draft worksheet is regenerated in full on each run, so it only renders
-    values; unlike the entry worksheet it is never read back or header-validated.
+    Draft generation owns the worksheet's write footprint. Final schedule
+    generation later reads and validates only the ``A:G`` contract; columns
+    ``H`` and beyond remain outside Final consumption.
     """
 
     JST_COLUMN: ClassVar[str] = "JST"

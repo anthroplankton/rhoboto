@@ -892,8 +892,11 @@ Implementation must add corresponding cases to
 
 ## Future Compatibility
 
-Draft-to-Final must validate every nonblank schedule cell against the canonical
-name mapping before producing a Final schedule. Final-to-Discord handoff messages
-must resolve the resulting username to exactly one current guild member and use the
-member mention. Failure to resolve or ambiguity must be reported rather than
+Draft-to-Final preserves and compares every canonical schedule label as exact
+text; it does not parse the label or require Discord identity resolution before
+producing the static Final snapshot. See
+`docs/shift_register_final_schedule_generation_design.md` for the Final worksheet
+contract. A future shift-reminder flow will own canonical-name-to-identity
+resolution. That resolver must return exactly one current guild member before
+using a mention, and must report unresolved or ambiguous identities rather than
 guessing.

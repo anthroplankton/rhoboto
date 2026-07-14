@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# ruff: noqa: SLF001
+# ruff: noqa: RUF001, SLF001
 import asyncio
 import datetime as dt
 import logging
@@ -28,10 +28,12 @@ from cogs.base.feature_channel_context import (
 )
 from cogs.shift import Shift
 from cogs.shift_register import (
-    _DRAFT_REPORT_SECTION_PREFIXES,
+    _SHIFT_REPORT_SECTION_PREFIXES,
     ShiftRegister,
+    ShiftReportAssignment,
     _format_generate_draft_confirmation,
-    _split_draft_report,
+    _format_shift_assignment_section,
+    _split_shift_report,
 )
 from cogs.team import Team
 from cogs.team_register import TeamRegister
@@ -91,34 +93,65 @@ def test_generate_draft_requires_non_negative_power_threshold() -> None:
     assert parameters["runner"].type.value == 6
 
 
-def test_split_draft_report_uses_semantic_boundaries_with_unicode_limit() -> None:
+def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> None:
     report = "\n".join(
         [
             "draft generated",
-            _DRAFT_REPORT_SECTION_PREFIXES[0]
+            _SHIFT_REPORT_SECTION_PREFIXES[0]
             + "、".join(f"😀user{index}" for index in range(8)),
-            _DRAFT_REPORT_SECTION_PREFIXES[1] + "assigned",
+            _SHIFT_REPORT_SECTION_PREFIXES[1] + "assigned",
             "hour 4: 😀alice, 😀bob, 😀carol",
-            _DRAFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
+            _SHIFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
             "hour 4: 😀dave, 😀eve",
             "notes attached",
         ]
     )
 
-    messages = _split_draft_report(report, limit=80)
+    messages = _split_shift_report(report, limit=80)
 
     assert len(messages) > 1
     assert all(len(message.encode("utf-16-le")) // 2 <= 80 for message in messages)
     assert any(
-        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[0]) for message in messages
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[0]) for message in messages
     )
     assert any(
-        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[1]) for message in messages
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[1]) for message in messages
     )
     assert any(
-        message.startswith(_DRAFT_REPORT_SECTION_PREFIXES[2]) for message in messages
+        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[2]) for message in messages
     )
     assert "".join(messages).replace("\n", "") == report.replace("\n", "")
+
+
+def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
+    report = "\n".join(
+        [
+            "### ✅ 班表草稿已產生",
+            "⚠️ 編成未登録：`Alice`",
+            "- 募集時間【4-12】",
+            "- 已排入（安可｜本走；待機）：",
+            *[f"  - row {index} " + "x" * 40 for index in range(30)],
+        ]
+    )
+
+    messages = _split_shift_report(report, limit=200)
+
+    assert messages[0] == "\n".join(report.splitlines()[:3])
+    assert messages[1].startswith("- 已排入（安可｜本走；待機）：")
+    assert all(len(message.encode("utf-16-le")) // 2 <= 200 for message in messages)
+
+
+def test_format_shift_assignment_section_uses_shared_draft_grammar() -> None:
+    assert _format_shift_assignment_section(
+        [ShiftReportAssignment(15, "`A`", ("`B`", "`C`"), None)],
+        empty=False,
+    ) == [
+        "- 已排入（安可｜本走；待機）：",
+        "  - -# `15-16`：`A`｜`B`、`C`、缺 `1`；缺",
+    ]
+    assert _format_shift_assignment_section([], empty=True) == [
+        "- 已排入（安可｜本走；待機）：なし"
+    ]
 
 
 def test_generate_draft_confirmation_formats_new_destinations() -> None:
@@ -141,7 +174,7 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
         "### ‼️ 確認產生班表草稿\n"
         "請先備份需要保留的內容。確認後將覆蓋 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
-        " 的以下位置："  # noqa: RUF001
+        " 的以下位置："
     )
     assert (
         content.count(
@@ -152,11 +185,11 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     assert "`A1:G31`" in content
     assert "`A27`" in content
     assert "`I1`" in content
-    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content  # noqa: RUF001
+    assert "候補：`I1`、閾值・圖例 `I26:M26`" in content
     assert "`J28:L30`" in content
     assert "`J31`" in content
     assert (
-        "Team Source 同步：\n"  # noqa: RUF001
+        "Team Source 同步：\n"
         "- 確認後會以目前 Discord 成員與 Team 資料更新 "
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)"
         in content
@@ -169,11 +202,11 @@ def test_generate_draft_confirmation_formats_new_destinations() -> None:
     [
         (
             TeamSourceStatus.UNSET,
-            "Team Source 同步：\n⚠️ 未設定，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 未設定，本次不會同步",
         ),
         (
             TeamSourceStatus.INVALID,
-            "Team Source 同步：\n⚠️ 設定無效，本次不會同步",  # noqa: RUF001
+            "Team Source 同步：\n⚠️ 設定無效，本次不會同步",
         ),
     ],
 )
@@ -260,26 +293,26 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
 
     assert report == (
         "### ✅ 班表草稿已產生\n"
-        "- Runner（ランナー）：`Not set`\n"  # noqa: RUF001
-        "- 安可綜合力閾值：35\n"  # noqa: RUF001
+        "- Runner（ランナー）：`Not set`\n"
+        "- 安可綜合力閾值：35\n"
         "🔄 已同步 "
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit#gid=333)\n"
         "‼️ 已將班表寫入 "
         "[Shift Draft](https://docs.google.com/spreadsheets/d/abc/edit#gid=222)"
-        "，並覆蓋原有內容。\n"  # noqa: RUF001
-        "⚠️ 編成未登録：<@333>、E\\`ve\n"  # noqa: RUF001
+        "，並覆蓋原有內容。\n"
+        "⚠️ 編成未登録：<@333>、E\\`ve\n"
         "- 募集時間【4-8・9-12】\n"
-        "- 已排入（安可｜本走；待機）：\n"  # noqa: RUF001
-        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"  # noqa: RUF001
-        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
-        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"  # noqa: RUF001
-        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"  # noqa: RUF001
-        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"  # noqa: RUF001
-        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"  # noqa: RUF001
-        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"  # noqa: RUF001
-        "- 未排入（位置已滿）：\n"  # noqa: RUF001
-        "  - -# `4-5`：<@333>、`Dave`\n"  # noqa: RUF001
-        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"  # noqa: RUF001
+        "- 已排入（安可｜本走；待機）：\n"
+        "  - -# `4-5`：<@111>｜缺 `3`；缺\n"
+        "  - -# `5-6`：<@111>｜<@222>、缺 `2`；缺\n"
+        "  - -# `6-7`：<@111>｜<@222>、E\\`ve、`Frank`；`Grace`\n"
+        "  - -# `7-8`：缺｜<@222>、缺 `2`；缺\n"
+        "  - -# `9-10`：<@111>｜缺 `3`；`Grace`\n"
+        "  - -# `10-11`：缺｜<@222>、缺 `2`；`Grace`\n"
+        "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"
+        "- 未排入（位置已滿）：\n"
+        "  - -# `4-5`：<@333>、`Dave`\n"
+        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"
     )
     assert "`8-9`" not in report
     assert "`7-8`" in report
@@ -303,7 +336,7 @@ def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
         team_source_warning=None,
     )
 
-    assert "- 已排入（安可｜本走；待機）：なし" in report  # noqa: RUF001
+    assert "- 已排入（安可｜本走；待機）：なし" in report
     assert "`4-5`" not in report
     assert "`5-6`" not in report
     assert "募集時間【4-6】" in report
@@ -356,7 +389,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         ],
     )
     ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
-    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"  # noqa: RUF001
+    notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"
 
     class Manager:
         async def get_saved_team_summary_destination(
@@ -429,9 +462,16 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             events.append("wait")
@@ -445,7 +485,9 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
             id=111,
@@ -484,7 +526,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         "[Team Summary](https://docs.google.com/spreadsheets/d/team/edit?gid=333#gid=333)"
         in (content or "")
     )
-    assert "⚠️ 編成未登録：<@333>" in (content or "")  # noqa: RUF001
+    assert "⚠️ 編成未登録：<@333>" in (content or "")
     kwargs = interaction.followup.messages[0][1]
     attachment = kwargs["file"]
     assert isinstance(attachment, File)
@@ -553,9 +595,16 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -568,7 +617,9 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -656,9 +707,16 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -671,7 +729,9 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -720,9 +780,16 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     class ConfirmView:
         value = confirmation
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -730,7 +797,9 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -741,7 +810,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
         assert interaction.original_response_edits[-1][1] == {"view": None}
     else:
         assert interaction.original_response_edits[-1] == (
-            "✖️ 確認逾時，未變更 Shift Draft。",  # noqa: RUF001
+            "✖️ 確認逾時，未變更 Shift Draft。",
             {"view": None},
         )
 
@@ -798,9 +867,16 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     class ConfirmView:
         value = True
 
-        def __init__(self, *, requesting_user_id: int, draft_sheet_url: str) -> None:
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+        ) -> None:
             assert requesting_user_id == 333
-            assert draft_sheet_url.endswith("#gid=222")
+            assert destination_label == "Shift Draft"
+            assert destination_url.endswith("#gid=222")
 
         async def wait(self) -> None:
             pass
@@ -808,7 +884,9 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     subject = ShiftRegister(fake_bot())
     subject._get_feature_channel_context = get_feature_channel_context
     subject._get_configured_feature_channel_context = get_configured_context
-    monkeypatch.setattr("cogs.shift_register.GenerateDraftConfirmView", ConfirmView)
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+    )
     interaction = FakeInteraction()
 
     await ShiftRegister.generate_draft.callback(subject, interaction, 35)
@@ -816,7 +894,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     assert feature_context_calls == 2
     assert interaction.followup.messages == []
     assert interaction.original_response_edits[-1] == (
-        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",  # noqa: RUF001
+        "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",
         {"view": None},
     )
 
@@ -1391,7 +1469,10 @@ class OrderedShiftUpsertManager(ConfiguredManager):
 
     async def get_fresh_sheet_config(self) -> SimpleNamespace:
         self.fresh_sheet_urls.append(self.current_sheet_url)
-        return SimpleNamespace(sheet_url=self.current_sheet_url)
+        return SimpleNamespace(
+            sheet_url=self.current_sheet_url,
+            recruitment_time_ranges=[{"start": 4, "end": 28}],
+        )
 
     async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
         self.events.append("fetch_metadata")
@@ -5503,7 +5584,7 @@ async def test_delete_callback_uses_feature_catalog_in_zh_copy(
 
     assert result == (
         "✅ 已成功刪除您在 Google Sheets 中的隊伍編成登記資料。"
-        "若也想移除 Discord 上的原始登記訊息，"  # noqa: RUF001
+        "若也想移除 Discord 上的原始登記訊息，"
         "請記得自行刪除。"
     )
     assert interaction.followup.messages == []
