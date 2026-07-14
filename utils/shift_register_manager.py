@@ -2292,10 +2292,16 @@ def _draft_format_updates(  # noqa: PLR0913
                 f"I{threshold_row}:M{threshold_row}",
                 "#000000",
                 "SOLID",
-                ("bottom",),
+                OUTER_BORDER_SIDES,
             ),
             (
                 f"L{threshold_row}",
+                "#FF0000",
+                "SOLID_MEDIUM",
+                OUTER_BORDER_SIDES,
+            ),
+            (
+                f"B2:G{new_last_row}",
                 "#FF0000",
                 "SOLID_MEDIUM",
                 OUTER_BORDER_SIDES,
