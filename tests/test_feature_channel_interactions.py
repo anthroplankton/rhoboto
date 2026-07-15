@@ -6451,6 +6451,21 @@ def test_register_context_menu_names_use_feature_display_name() -> None:
     ]
 
 
+def test_message_context_menu_name_can_be_overridden_without_changing_defaults() -> (
+    None
+):
+    class NamedRecordingMessageSubject(RecordingMessageSubject):
+        context_menu_name = "部屋番号を設定"
+
+    custom = NamedRecordingMessageSubject(MessageParseResult.ignored())
+    team_register = TeamRegister(fake_bot())
+    shift_register = ShiftRegister(fake_bot())
+
+    assert custom.context_menu.name == "部屋番号を設定"
+    assert team_register.context_menu.name == "Team Register Upsert"
+    assert shift_register.context_menu.name == "Shift Register Upsert"
+
+
 def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
     assert not hasattr(FeatureChannelBase, "process_upsert_from_message")
     assert not hasattr(FeatureChannelBase, "_process_upsert_from_message_with_outcome")

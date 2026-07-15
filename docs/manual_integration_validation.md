@@ -264,6 +264,76 @@ Use the shift test channel.
 | Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
 | Delete own data confirmation | Run `/shift delete`, confirm the localized `‼️` prompt appears, click Cancel, and verify the current user's Shift entry row remains. Run `/shift delete` again and click Confirm. | Cancel shows `✖️` cancellation copy and leaves data unchanged. Confirm shows processing copy with `config.PROCESSING_EMOJI`, then physically deletes the current user's whole row so every later row's values, formulas, formatting, validation, and notes move together. |  |  |
 
+## Room Number
+
+Use ordinary development-guild text channels named `<source-channel>`,
+`<target-channel>`, and `<old-target-channel>`. Use disposable messages such as
+`<template-message>` and do not record real guild, channel, message, or user IDs.
+
+### Setup, Permissions, and Room Capture
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Unsupported source and incomplete setup | Try `/room_number enable` in a thread, forum/media post, announcement, voice/stage, or category channel. Then enable it in `<source-channel>` without selecting a target and send valid room and template messages. | Unsupported channels receive an ephemeral rejection and create no membership. The ordinary text channel opens settings, but listeners remain silent and no channel is renamed until target selection completes. |  |  |
+| Self and distinct targets | In separate clean configurations, explicitly select `<source-channel>` itself and `<target-channel>`. | Self-target uses one enabled Room membership. A distinct target uses two enabled memberships and settings show the correct Source and Target mentions. |  |  |
+| Target permission preflight | Remove several bot permissions from a prospective target, including View Channel, Send Messages, Embed Links, Read Message History, and Manage Channels, then select it. | The ephemeral response lists every missing permission in that order and changes neither settings nor memberships. Restoring all five permits setup. |  |  |
+| Administrator callback recheck | Open settings as the administrator, remove either `administrator` or `manage_channels`, then use the target select, format modal, and template toggle. Repeat with both context menus. | Every stale control returns the ephemeral permission error and performs no mutation, output, rename, or reaction. |  |  |
+| Automatic room roles | Send `12345` and `123456` from both `<source-channel>` and `<target-channel>`. Repeat with source equal to target. | Each complete message persists the room once, publishes one target output, and applies the target name. Self-target does not process the same event twice. |  |  |
+| Manual room roles and attribution | Use `部屋番号を設定` on valid messages in source and target. Compare with automatic capture by another user. | Both roles are accepted. Automatic output names the message author in the footer; manual output names the invoking administrator. Display names have no honorific. |  |  |
+| Whole-message room grammar | Try full-width `１２３４５６`, outer whitespace around `12345`, four and seven digits, `部屋番号【12345】`, internal spaces, and `12345` followed by another nonblank line. | NFKC full-width and outer-whitespace cases succeed. Only a complete five- or six-digit message succeeds; automatic nonmatches are silent and manual nonmatches return the explicit validation response. |  |  |
+
+### Formats and Recruitment Templates
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Channel-name format grammar | Save formats containing repeated `{room_number}`, `{{`, `}}`, and `{{}}`; then try `{}`, unknown/numeric fields, traversal, conversion, format specifications, unmatched braces, and rendered names at 100 and 101 characters. | Escaped braces and repeated room fields render literally/correctly without NFKC-changing authored text. Unsupported grammar and 101 characters are rejected before persistence; 100 characters is accepted. |  |  |
+| Immediate format application | With a saved room, change the format once to a new rendered name and once to the already-current name. Repeat while the bot lacks Manage Channels. | A changed name is applied without a public Room embed; an unchanged name skips the rename API. Rename failure retains the saved format and reports ephemeral partial success. |  |  |
+| Automatic template permissions and target | Post a template from current target as an author with both administrator permissions, then retry from source, from a non-admin author, with one permission removed, and while automatic handling is disabled. | Only the authorized current-target message while enabled replaces the pointer and receives `🔄`; all other attempts are silent. |  |  |
+| Manual template staging | Disable template handling, then use `募集テンプレに設定` on a current-target message authored by another user. Repeat from source and after removing an invoker permission. | The authorized target action succeeds ephemerally and preserves disabled state. Wrong-role and unauthorized actions do not replace the pointer. |  |  |
+| Hashtag final-line boundary | Try templates whose final nonblank line contains `#プロセカ協力` or `#プロセカ募集`, punctuation afterward, a prefix immediately before `#`, a following letter/number/underscore, and a hashtag followed by a later nonblank line. | The two hashtags, punctuation, and a prefix before `#` are accepted. A following Unicode word character or a later nonblank line is rejected. Automatic format failure receives `⚠️` then `📏`; manual failure gives the detailed ephemeral error. |  |  |
+| Placeholders and five links | Use repeated `{room_number}`, omitted `{people}`, and repeated `{people}` surrounded by custom symbols. Open all `Xに投稿`, `1`, `2`, `3`, and `4` links on desktop and mobile. | Every room field uses the current room. Each people field uses the same empty value or bare selected digit; the bot adds no symbol. The preview uses the empty value and all five X intents contain the expected decoded text. |  |  |
+| Emoji and length limits | Include emoji, variation selectors, and ZWJ sequences. Exercise the 1024-character preview, conservative 280-weight X text, and 512-character encoded URL boundaries immediately below/at and above each limit. | Accepted Unicode is unchanged in the embed and decoded intent. Boundary values pass and over-limit values fail without replacing the prior pointer. |  |  |
+| Pointer retention and live source | Capture `<template-message>`, relink target, edit the original message, delete it, remove read permission, restore it, and finally post another room. | Settings retain the original channel/message link across relink. Each room output fetches once and reflects a valid live edit. Deletion, permission loss, or invalid content shows the safe unreadable text without clearing the pointer; restoration recovers on a later room. |  |  |
+| Disabled and missing templates | Submit rooms with template handling disabled, enabled with no pointer, and re-enabled with a retained pointer. | Disabled output has no template field or buttons. Missing pointer shows the configured-missing text without buttons. Re-enabling resumes live use of the retained pointer. |  |  |
+
+### Delivery, Lifecycle, and Recovery
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Pending and successful rename | Submit a room that requires rename, including while Discord is delaying channel edits for rate limiting. | The target embed appears first with the pending/rate-limit description. The same message is edited to remove it after rename, then `✅` is added before processing is removed. No custom cooldown timer is used. |  |  |
+| Rename failure | Remove Manage Channels after setup and submit a room whose target name must change. | The room remains persisted. The same output embed retains valid template/buttons and changes to the dynamic-bot rename error. Processing is removed with no `✅`, `⚠️`, or `🛠️`. |  |  |
+| Same-room and rapid latest-wins | Resubmit a completed room, then rapidly submit two equal rooms and `12345`, `67890`, `12345` while a rename is delayed. | A completed same-room submission sends a fresh output and skips an unchanged rename. Queued stale work performs no output; in-flight stale output is edited to the invalid notice with fields/buttons removed. Only the latest trigger receives `✅`, and the final name matches the latest persisted room, including ABA. |  |  |
+| Target output fallback | Remove target View/Send/Embed permission or delete target after setup, while leaving a distinct source writable. Repeat with source equal to target and with source delivery also unavailable. | The room persists and any possible rename is still attempted. A distinct usable source receives only the approved error embed with the bot mention. Self-target or failed fallback logs only and adds no room error reaction. |  |  |
+| Room storage failure | Use an approved development-only database-write failure while submitting a room, then compare the safe trigger-channel embed and logs. Also make that embed send fail. | Processing is removed with no terminal/error reaction. No template fetch, target output, or rename occurs. UI and logs share one safe reference without raw message text; failure to send the safe embed is log-only. |  |  |
+| Relink behavior | With a current room and captured pointer, relink from `<target-channel>` to a new target, including back to source. | Room, format, toggle, and pointer are preserved. The new deduplicated membership is enabled, the old target-only membership is removed, and the current name is applied without public output or old-name restoration. Rename failure retains the new link and reports partial success. |  |  |
+| Soft disable and re-enable | Soft-disable from source, try listeners/menus in both channels, then re-enable from source. | Both memberships become inactive while all config and pointer values remain. Both channels are inert while disabled. Re-enable restores both memberships and current settings without target reselection. Target-only lifecycle commands are rejected. |  |  |
+| Hard clear | Confirm `disable_and_clear` from source after creating output and capturing a user template. | Config and both deduplicated memberships are deleted. Existing bot output, the authored template, and target channel name are left unchanged. |  |  |
+| Restart and reload repair | Stop after persisting a room but before rename through approved failure injection, restart, then resubmit the same room or save target/format. Unload/reload during queued delivery as a separate run. | No startup worker is created. Resubmission or settings repairs the name. Unload clears transient generations/locks; old queued work cannot complete as current after unload. |  |  |
+
+### Database Schema Rollout and Rollback
+
+Fresh disposable databases create `room_number_config` through model discovery.
+Existing deployments require a reviewed migration written for the actual
+`DATABASE_URL`; `generate_schemas()` is not a production migration and no one
+SQL dialect should be treated as portable.
+
+1. Stop the worker and back up the existing database using the deployment's
+   approved procedure.
+2. Create `room_number_config` with the cascading unique source foreign key,
+   unique target snowflake, paired-null template channel/message check,
+   approved defaults and nullability, field lengths, and timestamps.
+3. In a disposable transaction, verify the table starts empty and that source
+   uniqueness, target uniqueness, pointer pairing, and source cascade behave as
+   designed.
+4. Compare every existing config table and confirm its schema and rows are
+   unchanged.
+5. Deploy, start one worker, and complete the Room checks above before enabling
+   it in other guild channels.
+
+For rollback, deploy code that does not load the Room model before restarting
+the worker. Removing the table or deleting Room `FeatureChannel` memberships is
+separately approved destructive work; do neither as an implicit rollback step.
+
 ## Admin Notifications
 
 Use a dedicated administrator text channel and the same disposable Shift

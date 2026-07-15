@@ -12,6 +12,14 @@ class Translator(app_commands.Translator):
         _: app_commands.TranslationContext,
     ) -> str:
         translations = {
+            "room_number": {
+                "ja": "部屋番号",
+                "zh-TW": "房號",
+            },
+            "Configure and update the current room number.": {
+                "ja": "現在の部屋番号を設定・更新します。",
+                "zh-TW": "設定及更新目前房號。",
+            },
             "shift": {
                 "ja": "シフト",
                 "zh-TW": "班表",

@@ -8,6 +8,12 @@ from discord.app_commands import locale_str
 from bot.translator import Translator
 
 TRANSLATIONS = [
+    ("room_number", "部屋番号", "房號"),
+    (
+        "Configure and update the current room number.",
+        "現在の部屋番号を設定・更新します。",
+        "設定及更新目前房號。",
+    ),
     ("post_schedule_image", "現行シフト画像投稿", "發布班表圖片"),
     (
         "Post the current Final Schedule as an image.",

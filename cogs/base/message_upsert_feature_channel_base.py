@@ -129,12 +129,13 @@ class MessageUpsertFeatureChannelBase[
     """Shared message parsing, gating, and typed upsert orchestration."""
 
     ParserType: type[MessageSubmissionParser[SubmissionT]]
+    context_menu_name: str | None = None
 
     @override
     def __init__(self, bot: Rhoboto) -> None:
         super().__init__(bot)
         self.context_menu = app_commands.ContextMenu(
-            name=f"{self.feature_display_name} Upsert",
+            name=self.context_menu_name or f"{self.feature_display_name} Upsert",
             callback=self.upsert_from_content_menu,
         )
         self.context_menu.add_check(

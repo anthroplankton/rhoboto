@@ -24,6 +24,7 @@ from models.feature_channel_message_state import (
     save_manual_guide_anchor,
 )
 from models.guild_language_settings import GuildLanguageSettings
+from models.room_number import RoomNumberConfig
 from models.shift_register import ShiftRegisterConfig
 from models.shift_timeline_event_state import (
     ShiftTimelineEventKind,
@@ -68,6 +69,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
             "FeatureChannel",
             "FeatureChannelMessageState",
             "GuildLanguageSettings",
+            "RoomNumberConfig",
             "ShiftRegisterConfig",
             "ShiftTimelineEventState",
             "TeamRegisterConfig",
@@ -77,6 +79,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         language_description = GuildLanguageSettings.describe(serializable=True)
         team_description = TeamRegisterConfig.describe(serializable=True)
         shift_description = ShiftRegisterConfig.describe(serializable=True)
+        room_description = RoomNumberConfig.describe(serializable=True)
         event_description = ShiftTimelineEventState.describe(serializable=True)
         notification_config_description = AdminNotificationsConfig.describe(
             serializable=True
@@ -93,6 +96,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert language_description["pk_field"]["generated"] is True
         assert team_description["table"] == "team_register"
         assert shift_description["table"] == "shift_register"
+        assert room_description["table"] == "room_number_config"
         assert event_description["table"] == "shift_timeline_event_state"
         fields_by_name = {
             field["name"]: field for field in event_description["data_fields"]
@@ -132,6 +136,81 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert shift_config.team_source_feature_channel_id is None
     finally:
         await Tortoise.close_connections()
+
+
+@pytest.mark.asyncio
+async def test_room_number_config_defaults_constraints_and_cascade() -> None:
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        source = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="room_number",
+        )
+        config = await RoomNumberConfig.create(
+            feature_channel=source,
+            target_channel_id=2002,
+        )
+
+        assert config.room_number is None
+        assert config.channel_name_format == "部屋番号【{room_number}】"
+        assert config.recruitment_template_enabled is True
+        assert config.recruitment_template_channel_id is None
+        assert config.recruitment_template_message_id is None
+
+        with pytest.raises(IntegrityError):
+            await RoomNumberConfig.create(
+                feature_channel=source,
+                target_channel_id=2003,
+            )
+
+        other_source = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2004,
+            feature_name="room_number",
+        )
+        with pytest.raises(IntegrityError):
+            await RoomNumberConfig.create(
+                feature_channel=other_source,
+                target_channel_id=2002,
+            )
+
+        with pytest.raises(ValueError, match="must be paired"):
+            await RoomNumberConfig.create(
+                feature_channel=other_source,
+                target_channel_id=2005,
+                recruitment_template_channel_id=2005,
+            )
+
+        with pytest.raises(ValueError, match="canonical"):
+            await RoomNumberConfig.create(
+                feature_channel=other_source,
+                target_channel_id=2005,
+                room_number="１２３４５",  # noqa: RUF001
+            )
+
+        config.room_number = "123456"
+        config.recruitment_template_channel_id = 2002
+        config.recruitment_template_message_id = 3001
+        await config.save(
+            update_fields=[
+                "room_number",
+                "recruitment_template_channel_id",
+                "recruitment_template_message_id",
+                "updated_at",
+            ]
+        )
+        await config.refresh_from_db()
+
+        assert config.room_number == "123456"
+        assert config.recruitment_template_channel_id == 2002
+        assert config.recruitment_template_message_id == 3001
+
+        await source.delete()
+        assert await RoomNumberConfig.all().count() == 0
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio
