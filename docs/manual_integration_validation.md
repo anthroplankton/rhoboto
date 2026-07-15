@@ -264,6 +264,40 @@ Use the shift test channel.
 | Shift context menu invalid attempt | Use the `shift_register upsert` context menu on `18:00-20:00`. | `⚠️` then the confused reaction appear on the selected message, and the context menu returns an ephemeral failed-upsert follow-up. |  |  |
 | Delete own data confirmation | Run `/shift delete`, confirm the localized `‼️` prompt appears, click Cancel, and verify the current user's Shift entry row remains. Run `/shift delete` again and click Confirm. | Cancel shows `✖️` cancellation copy and leaves data unchanged. Confirm shows processing copy with `config.PROCESSING_EMOJI`, then physically deletes the current user's whole row so every later row's values, formulas, formatting, validation, and notes move together. |  |  |
 
+## Admin Notifications
+
+Use a dedicated administrator text channel and the same disposable Shift
+spreadsheet used by the development guild. Configure at least two Shift Register
+channels, including one that is soft-disabled after its timeline is saved.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Enable destination | Run `/admin_notifications enable` in a normal text channel. | The feature is enabled once per guild and the setup follow-up contains `Set Up Admin Notifications`. A thread, forum post, voice text channel, or channel without bot view/send permission is rejected. |  |  |
+| Setup modal | Click setup as the administrator who opened it. | The callback rechecks permissions and stale state, opens `Set Up Admin Notifications`, and pre-fills `Lead Time (minutes)` with `10`. |  |  |
+| Save lead time | Submit `5`, then reopen settings. Also test full-width digits and invalid values such as `0`, `1441`, signs, decimals, and unit suffixes. | Valid NFKC whole minutes save; invalid input returns the confused-marker error and makes no change. Mentions remain empty, the toggle remains `⚫ Disabled`, and no reminder is scheduled yet. |  |  |
+| Destination singleton | Try enabling another usable channel in the same guild. | The existing destination remains authoritative and the response names it with `Use \`/admin_notifications settings\``. A soft-disabled destination is still the singleton owner. |  |  |
+| Unavailable replacement | Delete the stored channel or remove bot view/send permission, then enable in a new valid channel. | The destructive confirmation is requester-bound. Replace moves the existing reservation, preserves lead, mentions, toggle, delivery history, and nonce, then shows current settings; Cancel changes nothing. |  |  |
+| Settings permissions | Open settings, mention selector, lead modal, toggle, and replacement confirmation as a user lacking either `administrator` or `manage_channels`. | Each command/callback returns the ephemeral permission error and makes no database or scheduler change. |  |  |
+| Mention selection | Select mentionable roles/users, include `@everyone`, an unmentionable role, a missing saved ID, and more than 25 targets across repeated edits. | `@everyone` and unusable roles are rejected without mutation; retained missing IDs remain visible until explicitly removed; typed defaults show on reopen. |  |  |
+| Toggle with no milestones | Enable Shift Timeline Reminders before any future milestone exists. | The saved panel reports `🟢 Enabled` and `Scheduled Reminders: 0`; no warning or Sheets request is shown. |  |  |
+| Three milestone sources | Save Submission Deadline, Draft Shift Proposal, and Final Shift Notice in one or more Shift configs, then enable the toggle. | One independent occurrence is created for each non-null milestone. Messages use the Entry, Draft, and Final Schedule worksheet links respectively. |  |  |
+| Soft-disabled Shift source | Soft-disable one Shift Register after saving its timeline. | It remains a reminder source and still receives all three applicable reminders. Shift soft disable itself does not trigger an extra reconciliation request. |  |  |
+| Future and catch-up | Use one future reminder and one milestone whose lead time has already passed but whose milestone is still future. | The future occurrence waits until its lead time; the catch-up occurrence sends once immediately. A milestone at or before now becomes `expired` (or `failed` after an attempt) and never sends late. |  |  |
+| Latest-state reschedule | Change a milestone or lead time while an occurrence is pending; clear a milestone; and repeat after one occurrence is sent. | Unsent rows reschedule or disappear from active tasks, while sent history and its nonce remain immutable. A changed milestone gets a new occurrence. |  |  |
+| Message content and mentions | Configure announcement languages in a known order and active/missing/unmentionable targets. | Each occurrence sends one message containing the saved mention line plus one localized block per language in order. `AllowedMentions` contains only currently resolved roles/users; source-channel text does not ping. |  |  |
+| Permission loss and retry | Remove destination view/send permission before wake-up, restore it before the milestone cutoff, and inject transient storage/Discord failures. | Delivery retries after 60-second exponential backoff capped at one hour, revalidates persisted state each time, and sends after restoration without a late send. |  |  |
+| Ambiguous send recovery | Give the bot Read Message History, force a send result that prevents the sent marker, and restart or retry. Repeat without Read Message History. | The bot scans at most 100 messages from one minute before `attempted_at`, marks a matching bot nonce sent without duplication, and documents the possible duplicate resend when history is unavailable. |  |  |
+| Shift timeline callback | Save Draft/Final-only changes, then save a deadline change. | Every successful timeline save requests one guild reconciliation; deadline changes also preserve the existing Auto Close schedule callback. Validation, permission, and storage failures request none. |  |  |
+| Shift hard clear | Hard-clear a Shift Register and then an Admin Notifications destination. | The Shift request occurs only after its database deletion succeeds. Notification hard clear cancels/awaits workers and cascades its config/delivery rows; sent history is gone only after that explicit clear. |  |  |
+| Restart and unload | Restart the bot with configured rows and unload the cog during bootstrap, backoff, and delivery tasks. | Startup waits for readiness, requests each distinct configured guild once, recovers persisted occurrences/nonces, and unload leaves no pending worker or delivery task. |  |  |
+
+Schema rollout: fresh databases create `admin_notifications_config` and
+`admin_notification_delivery` through the current Tortoise model registry. Existing
+deployments require a reviewed database-specific migration before enabling the cog;
+do not use `generate_schemas()` as a production migration. Verify the guild
+singleton, occurrence uniqueness, both cascading foreign keys, positive nonce,
+and unchanged existing `feature_channel`/`shift_register` tables before startup.
+
 ## Announcement Languages
 
 Run these checks after Team Register and Shift Register settings exist in the
