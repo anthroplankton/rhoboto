@@ -4,7 +4,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from string import Formatter
-from urllib.parse import urlencode
+from urllib.parse import quote_plus
 
 from utils.structs_base import SubmissionParseResult, UserInfo
 
@@ -146,7 +146,11 @@ def x_text_weight(content: str) -> int:
 
 
 def _x_intent_url(content: str) -> str:
-    return f"{X_INTENT_URL}?{urlencode({'text': content})}"
+    query_value = "".join(
+        character if not character.isascii() else quote_plus(character, safe="")
+        for character in content
+    )
+    return f"{X_INTENT_URL}?text={query_value}"
 
 
 def render_recruitment_template(

@@ -527,15 +527,19 @@ Build five renderings from one fetched template:
 The empty rendering is also the `ツイ募テンプレ` field preview. All buttons are
 link buttons in one row and require no callback or persistent view state.
 
-Build intent URLs with standard-library UTF-8 percent encoding:
+Build intent URLs as Unicode IRIs. Keep non-ASCII template code points literal
+in the Discord button URL, and encode the ASCII query value with
+`application/x-www-form-urlencoded` rules: spaces become `+`, while other
+reserved or control characters such as line breaks, `#`, `%`, `&`, and `=` are
+percent-encoded:
 
 ```text
 https://x.com/intent/tweet?text=<encoded rendered template>
 ```
 
-Emoji, variation selectors, and ZWJ sequences remain unchanged in source and
-preview text. Percent encoding is transport encoding only; X receives the
-decoded Unicode text.
+Emoji, variation selectors, ZWJ sequences, and CJK text remain unchanged in the
+Discord URL field. The Discord client or browser maps the IRI to a UTF-8
+percent-encoded URI when opening it, and X receives the decoded Unicode text.
 
 ### Length Validation
 
@@ -548,12 +552,14 @@ For every relevant rendering:
 - the empty-people embed preview must fit the 1024-character embed-field limit;
 - conservative X weight must not exceed 280, counting ASCII code points as 1
   and every other Unicode code point as 2; and
-- every actual encoded intent URL must fit Discord's 512-character link-button
-  URL limit.
+- every actual IRI string supplied as a Discord link-button URL must fit the
+  512-character limit.
 
 This deliberately conservative X count may reject a small set of text that X's
 full URL/Unicode algorithm would accept. It avoids a new dependency and never
-alters accepted content.
+alters accepted content. Because Discord does not document client-side IRI
+normalization, desktop and mobile validation must confirm that Unicode intent
+links open X with the complete decoded template.
 
 ## Room Update Flow
 

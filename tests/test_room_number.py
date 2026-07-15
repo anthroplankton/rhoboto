@@ -139,6 +139,35 @@ def test_recruitment_render_allows_missing_people_and_preserves_emoji() -> None:
     )
 
 
+def test_recruitment_intent_preserves_unicode_iri_and_round_trips() -> None:
+    template = """ベテラン 高速:shrimp:周回
+@ {people}
+
+:key:{room_number}
+支援者様、アンコ枠様います。
+
+主\uff1a
+募\uff1a
+
+いじぺち、SF後放置OK
+SF気にしません、謝罪不要です
+主のおつさきで解散
+
+#プロセカ協力 #プロセカ募集"""
+
+    rendered = render_recruitment_template(template, "123456")
+
+    assert max(map(len, rendered.intent_urls)) == 185
+    assert all("ベテラン" in url for url in rendered.intent_urls)
+    assert all("%23プロセカ協力" in url for url in rendered.intent_urls)
+    assert [
+        parse_qs(urlsplit(url).query)["text"][0] for url in rendered.intent_urls
+    ] == [
+        template.strip().replace("{people}", people).replace("{room_number}", "123456")
+        for people in ("", "1", "2", "3", "4")
+    ]
+
+
 @pytest.mark.parametrize(
     "template",
     [
@@ -186,15 +215,15 @@ def test_recruitment_render_enforces_preview_before_x_weight() -> None:
         )
 
 
-def test_recruitment_render_enforces_encoded_url_boundary() -> None:
+def test_recruitment_render_enforces_iri_url_boundary() -> None:
     accepted = render_recruitment_template(
-        "a" * 9 + "あ" * 45 + "{room_number}\n#プロセカ募集",
+        "%" * 154 + "{room_number}\n#プロセカ募集",
         "123456",
     )
     assert len(accepted.intent_urls[0]) == 512
 
     with pytest.raises(RoomNumberFormatError, match="投稿リンク"):
         render_recruitment_template(
-            "a" * 10 + "あ" * 45 + "{room_number}\n#プロセカ募集",
+            "%" * 155 + "{room_number}\n#プロセカ募集",
             "123456",
         )
