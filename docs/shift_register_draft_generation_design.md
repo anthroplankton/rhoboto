@@ -507,8 +507,8 @@ spill returns its complete current header and matching row. A participant missin
 from Team Summary receives the headers and a blank data row. Without Team Source,
 Shift lookup still works but the Team Summary spill is not written.
 
-The three-row lookup control has only a thin black top border over `J:L` and a thin
-black left border down `J{R+3}:J{R+5}`. Its label cells in column `J` use
+The six-row lookup block has only a thin black top border over `J:L` and a thin
+black left border down `J{R+3}:J{R+8}`. Its label cells in column `J` use
 `#A4C2F4`. The manual input cell `K{R+3}` uses `#FFF2CC` plus a medium solid
 `#FF0000` border on all four sides; result and status cells remain white.
 `編成一覧` occupies the row

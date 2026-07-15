@@ -2395,7 +2395,7 @@ def _draft_format_updates(  # noqa: PLR0913
     if old_lookup_row is not None:
         border_updates.append(
             (
-                f"J{old_lookup_row}:L{old_lookup_row + 2}",
+                f"J{old_lookup_row}:L{old_lookup_row + 5}",
                 None,
                 "NONE",
                 BORDER_NAMES,
@@ -2403,9 +2403,9 @@ def _draft_format_updates(  # noqa: PLR0913
         )
     border_updates.extend(
         [
-            (f"J{lookup_row}:L{lookup_row + 2}", None, "NONE", BORDER_NAMES),
+            (f"J{lookup_row}:L{lookup_row + 5}", None, "NONE", BORDER_NAMES),
             (f"J{lookup_row}:L{lookup_row}", "#000000", "SOLID", ("top",)),
-            (f"J{lookup_row}:J{lookup_row + 2}", "#000000", "SOLID", ("left",)),
+            (f"J{lookup_row}:J{lookup_row + 5}", "#000000", "SOLID", ("left",)),
             (
                 f"K{lookup_row}",
                 "#FF0000",

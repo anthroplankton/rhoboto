@@ -1077,10 +1077,10 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
             "SOLID_MEDIUM",
             shift_register_manager.OUTER_BORDER_SIDES,
         ),
-        ("J25:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
-        ("J22:L24", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J25:L30", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J22:L27", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J22:L22", "#000000", "SOLID", ("top",)),
-        ("J22:J24", "#000000", "SOLID", ("left",)),
+        ("J22:J27", "#000000", "SOLID", ("left",)),
         (
             "K22",
             "#FF0000",
@@ -1660,9 +1660,9 @@ async def test_generate_draft_falls_back_without_team_profiles(
     ]
     assert ("J8:L8", "#A4C2F4") not in draft_worksheet.background_updates[-1]
     assert draft_worksheet.border_updates[-1][-4:] == [
-        ("J5:L7", None, "NONE", shift_register_manager.BORDER_NAMES),
+        ("J5:L10", None, "NONE", shift_register_manager.BORDER_NAMES),
         ("J5:L5", "#000000", "SOLID", ("top",)),
-        ("J5:J7", "#000000", "SOLID", ("left",)),
+        ("J5:J10", "#000000", "SOLID", ("left",)),
         (
             "K5",
             "#FF0000",
