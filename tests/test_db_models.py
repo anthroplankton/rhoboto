@@ -9,6 +9,12 @@ from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError
 
 import utils.shift_register_manager as shift_register_manager_module
+from models.admin_notifications import (
+    AdminNotificationDelivery,
+    AdminNotificationDeliveryStatus,
+    AdminNotificationMilestoneKind,
+    AdminNotificationsConfig,
+)
 from models.feature_channel import FeatureChannel
 from models.feature_channel_message_state import (
     FeatureChannelMessageKind,
@@ -57,6 +63,8 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         apps = Tortoise.apps
         assert apps is not None
         assert sorted(apps["models"]) == [
+            "AdminNotificationDelivery",
+            "AdminNotificationsConfig",
             "FeatureChannel",
             "FeatureChannelMessageState",
             "GuildLanguageSettings",
@@ -70,6 +78,12 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         team_description = TeamRegisterConfig.describe(serializable=True)
         shift_description = ShiftRegisterConfig.describe(serializable=True)
         event_description = ShiftTimelineEventState.describe(serializable=True)
+        notification_config_description = AdminNotificationsConfig.describe(
+            serializable=True
+        )
+        notification_delivery_description = AdminNotificationDelivery.describe(
+            serializable=True
+        )
 
         assert feature_description["table"] == "feature_channel"
         assert feature_description["pk_field"]["name"] == "id"
@@ -85,6 +99,10 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         }
         assert fields_by_name["event_kind"]["constraints"]["max_length"] == 32
         assert fields_by_name["status"]["constraints"]["max_length"] == 16
+        assert notification_config_description["table"] == "admin_notifications_config"
+        assert notification_delivery_description["table"] == (
+            "admin_notification_delivery"
+        )
 
         language_settings = GuildLanguageSettings(guild_id=1001)
         team_config = TeamRegisterConfig(
@@ -114,6 +132,157 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert shift_config.team_source_feature_channel_id is None
     finally:
         await Tortoise.close_connections()
+
+
+@pytest.mark.asyncio
+async def test_admin_notifications_config_singletons_defaults_and_feature_cascade() -> (
+    None
+):
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="admin_notifications",
+        )
+        config = await AdminNotificationsConfig.create(
+            feature_channel=feature_channel,
+            guild_id=1001,
+        )
+
+        assert config.reminder_lead_minutes is None
+        assert config.mention_role_ids == []
+        assert config.mention_user_ids == []
+        assert config.shift_timeline_reminders_enabled is False
+
+        with pytest.raises(IntegrityError):
+            await AdminNotificationsConfig.create(
+                feature_channel=await FeatureChannel.create(
+                    guild_id=1001,
+                    channel_id=2002,
+                    feature_name="admin_notifications",
+                ),
+                guild_id=1001,
+            )
+
+        with pytest.raises(IntegrityError):
+            await AdminNotificationsConfig.create(
+                feature_channel=feature_channel,
+                guild_id=1002,
+            )
+
+        assert await AdminNotificationsConfig.all().count() == 1
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_admin_notification_delivery_occurrence_unique_and_both_cascades() -> (
+    None
+):
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        notification_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="admin_notifications",
+        )
+        notification_config = await AdminNotificationsConfig.create(
+            feature_channel=notification_channel,
+            guild_id=1001,
+        )
+        shift_channel_one = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2002,
+            feature_name="shift_register",
+        )
+        shift_channel_two = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2003,
+            feature_name="shift_register",
+        )
+        shift_one = await ShiftRegisterConfig.create(
+            feature_channel=shift_channel_one,
+            sheet_url="https://shift-one.example",
+            entry_worksheet_id=1,
+            draft_worksheet_id=2,
+            final_schedule_worksheet_id=3,
+        )
+        shift_two = await ShiftRegisterConfig.create(
+            feature_channel=shift_channel_two,
+            sheet_url="https://shift-two.example",
+            entry_worksheet_id=4,
+            draft_worksheet_id=5,
+            final_schedule_worksheet_id=6,
+        )
+        milestone_at = dt.datetime(2026, 8, 14, 12, tzinfo=dt.UTC)
+        deliveries = [
+            await AdminNotificationDelivery.create(
+                admin_notifications_config=notification_config,
+                shift_register=shift_one,
+                milestone_kind=kind,
+                milestone_at=milestone_at,
+                reminder_at=milestone_at - dt.timedelta(minutes=10),
+                delivery_nonce=index,
+                status=status,
+            )
+            for index, (kind, status) in enumerate(
+                (
+                    (
+                        AdminNotificationMilestoneKind.SUBMISSION_DEADLINE,
+                        AdminNotificationDeliveryStatus.SCHEDULED,
+                    ),
+                    (
+                        AdminNotificationMilestoneKind.DRAFT_SHIFT_PROPOSAL,
+                        AdminNotificationDeliveryStatus.SENT,
+                    ),
+                    (
+                        AdminNotificationMilestoneKind.FINAL_SHIFT_NOTICE,
+                        AdminNotificationDeliveryStatus.EXPIRED,
+                    ),
+                ),
+                start=1,
+            )
+        ]
+        failed_delivery = await AdminNotificationDelivery.create(
+            admin_notifications_config=notification_config,
+            shift_register=shift_two,
+            milestone_kind=AdminNotificationMilestoneKind.SUBMISSION_DEADLINE,
+            milestone_at=milestone_at,
+            reminder_at=milestone_at - dt.timedelta(minutes=10),
+            delivery_nonce=4,
+            status=AdminNotificationDeliveryStatus.FAILED,
+        )
+
+        assert [delivery.status for delivery in deliveries] == [
+            AdminNotificationDeliveryStatus.SCHEDULED,
+            AdminNotificationDeliveryStatus.SENT,
+            AdminNotificationDeliveryStatus.EXPIRED,
+        ]
+        with pytest.raises(IntegrityError):
+            await AdminNotificationDelivery.create(
+                admin_notifications_config=notification_config,
+                shift_register=shift_one,
+                milestone_kind=AdminNotificationMilestoneKind.SUBMISSION_DEADLINE,
+                milestone_at=milestone_at,
+                reminder_at=milestone_at - dt.timedelta(minutes=10),
+                delivery_nonce=99,
+            )
+
+        await shift_one.delete()
+        assert (
+            await AdminNotificationDelivery.filter(id=deliveries[0].id).exists()
+            is False
+        )
+        assert await AdminNotificationDelivery.filter(id=failed_delivery.id).exists()
+
+        await notification_channel.delete()
+        assert await AdminNotificationsConfig.all().count() == 0
+        assert await AdminNotificationDelivery.all().count() == 0
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio

@@ -261,7 +261,7 @@ class RecordingShiftRegisterManager:
         self.timeline_updates: list[dict[str, object]] = []
         self.recruitment_range_updates: list[object] = []
         self.config_exists = True
-        self.feature_channel = SimpleNamespace(id=222, channel_id=222)
+        self.feature_channel = SimpleNamespace(id=222, channel_id=222, guild_id=111)
         self.sheet_url = SHIFT_SETTINGS_SHEET_URL
         self.final_schedule_anchor_cell = "B2"
         self.day_number = 2
@@ -528,6 +528,7 @@ class RecordingAutoCloseCallbacks:
     def __init__(self) -> None:
         self.toggle_calls: list[tuple[object, bool, object]] = []
         self.schedule_changes: list[ShiftTimelineScheduleChange] = []
+        self.notification_guild_ids: list[int] = []
 
     async def toggle(
         self,
@@ -541,6 +542,9 @@ class RecordingAutoCloseCallbacks:
     def schedule_changed(self, change: ShiftTimelineScheduleChange) -> None:
         self.schedule_changes.append(change)
 
+    def request_admin_notifications_reconcile(self, guild_id: int) -> None:
+        self.notification_guild_ids.append(guild_id)
+
 
 def auto_close_callbacks(
     recorder: RecordingAutoCloseCallbacks,
@@ -548,6 +552,9 @@ def auto_close_callbacks(
     return ShiftAutoCloseCallbacks(
         toggle=recorder.toggle,
         schedule_changed=recorder.schedule_changed,
+        request_admin_notifications_reconcile=(
+            recorder.request_admin_notifications_reconcile
+        ),
     )
 
 
@@ -3388,6 +3395,7 @@ async def test_shift_timeline_save_uses_lock_without_schedule_callback(
     assert sheet_lock.keys == [222]
     assert (sheet_lock.entered, sheet_lock.exited) == (1, 1)
     assert recorder.schedule_changes == []
+    assert recorder.notification_guild_ids == [111]
 
 
 @pytest.mark.asyncio
@@ -3422,6 +3430,7 @@ async def test_shift_timeline_save_notifies_future_schedule_change(
     await modal.on_submit(FakeInteraction())
 
     assert recorder.schedule_changes == [manager.timeline_result.schedule_change]
+    assert recorder.notification_guild_ids == [111]
 
 
 @pytest.mark.asyncio
@@ -3457,6 +3466,7 @@ async def test_shift_timeline_save_warns_when_auto_close_is_invalidated(
     await modal.on_submit(interaction)
 
     assert recorder.schedule_changes == [manager.timeline_result.schedule_change]
+    assert recorder.notification_guild_ids == [111]
     assert interaction.followup.messages[0][0] == AUTO_CLOSE_INVALIDATED_MESSAGE
 
 
@@ -3492,6 +3502,7 @@ async def test_shift_timeline_save_failure_does_not_notify_schedule(
     await modal.on_submit(FakeInteraction())
 
     assert recorder.schedule_changes == []
+    assert recorder.notification_guild_ids == []
 
 
 @pytest.mark.asyncio
@@ -3713,6 +3724,7 @@ async def test_shift_timeline_modal_submit_reports_storage_save_error() -> None:
 @pytest.mark.asyncio
 async def test_shift_timeline_modal_invalid_submit_sends_edit_again_view() -> None:
     manager = RecordingShiftRegisterManager()
+    recorder = RecordingAutoCloseCallbacks()
     interaction = FakeInteraction()
     modal = ShiftTimelineModal(
         manager,
@@ -3721,6 +3733,7 @@ async def test_shift_timeline_modal_invalid_submit_sends_edit_again_view() -> No
         submission_deadline_at="8/12 24",
         draft_shift_proposal_at="",
         final_shift_notice_at="",
+        auto_close_callbacks=auto_close_callbacks(recorder),
     )
 
     await modal.on_submit(interaction)
@@ -3741,6 +3754,9 @@ async def test_shift_timeline_modal_invalid_submit_sends_edit_again_view() -> No
     assert retry_interaction.response.modals[0].day_number.default == "0"
     assert (
         retry_interaction.response.modals[0].submission_deadline_at.default == "8/12 24"
+    )
+    assert retry_interaction.response.modals[0].auto_close_callbacks == (
+        modal.auto_close_callbacks
     )
 
 

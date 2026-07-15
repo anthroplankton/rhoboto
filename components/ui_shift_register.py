@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
@@ -112,10 +113,16 @@ class AutoCloseScheduleChangeCallback(Protocol):
     def __call__(self, change: ShiftTimelineScheduleChange) -> None: ...
 
 
+AdminNotificationsReconcileCallback = Callable[[int], None]
+
+
 @dataclass(frozen=True)
 class ShiftAutoCloseCallbacks:
     toggle: AutoCloseToggleCallback
     schedule_changed: AutoCloseScheduleChangeCallback
+    request_admin_notifications_reconcile: (
+        AdminNotificationsReconcileCallback | None
+    ) = None
 
 
 class ShiftDeadlineCloseView(View):
@@ -909,6 +916,21 @@ class ShiftTimelineModal(Modal):
             return
         if result.schedule_change is not None and self.auto_close_callbacks is not None:
             self.auto_close_callbacks.schedule_changed(result.schedule_change)
+        if (
+            self.auto_close_callbacks is not None
+            and self.auto_close_callbacks.request_admin_notifications_reconcile
+            is not None
+        ):
+            try:
+                self.auto_close_callbacks.request_admin_notifications_reconcile(
+                    self.shift_register_manager.feature_channel.guild_id
+                )
+            except Exception:
+                logger.exception(
+                    "Admin Notifications reconciliation request failed after "
+                    "Shift timeline save. Guild=%s",
+                    self.shift_register_manager.feature_channel.guild_id,
+                )
         await _send_saved_shift_register_panel(
             interaction,
             self.shift_register_manager,

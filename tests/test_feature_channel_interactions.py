@@ -8,6 +8,7 @@ import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import ClassVar, override
+from unittest.mock import Mock
 
 import pytest
 from discord import (
@@ -1411,6 +1412,8 @@ async def test_shift_auto_close_manual_hard_clear_auto_close_cancels_after_commi
     manager = _ManualLifecycleManager(feature_channel, "service.json", events=events)
     scheduler = SimpleNamespace(cancel=lambda *_args: events.append("cancel"))
     subject = ShiftRegister(fake_bot())
+    notification_request = Mock()
+    subject._request_admin_notifications_reconcile = notification_request
     subject.ManagerType = lambda *_args: manager  # type: ignore[method-assign]
     subject.sheet_write_lock = RecordingLock()
     subject._timeline_scheduler = scheduler  # type: ignore[assignment]
@@ -1443,6 +1446,7 @@ async def test_shift_auto_close_manual_hard_clear_auto_close_cancels_after_commi
     await subject._clear_feature_settings(111, 222)
     assert events == ["clear", "cancel"]
     assert key not in subject._pending_message_ids
+    notification_request.assert_called_once_with(111)
 
 
 @pytest.mark.asyncio
@@ -1489,6 +1493,21 @@ async def test_shift_auto_close_manual_lifecycle_missing_rows_are_idempotent(
 
     assert await subject._disable_channel(111, 222) is False
     await subject._clear_feature_settings(111, 222)
+
+
+def test_shift_register_requests_admin_notification_reconcile_from_loaded_cog() -> None:
+    request = Mock()
+    bot = fake_bot()
+    bot.get_cog = lambda name: (
+        SimpleNamespace(request_reconcile_guild=request)
+        if name == "AdminNotifications"
+        else None
+    )
+    subject = ShiftRegister(bot)
+
+    subject._request_admin_notifications_reconcile(111)
+
+    request.assert_called_once_with(111)
 
 
 class _RegistrationRaceManager:

@@ -885,7 +885,29 @@ class ShiftRegister(
         return ShiftAutoCloseCallbacks(
             toggle=self._toggle_shift_auto_close,
             schedule_changed=self._apply_timeline_schedule_change,
+            request_admin_notifications_reconcile=(
+                self._request_admin_notifications_reconcile
+            ),
         )
+
+    def _request_admin_notifications_reconcile(self, guild_id: int) -> None:
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return
+        notification_cog = get_cog("AdminNotifications")
+        request_reconcile = getattr(
+            notification_cog,
+            "request_reconcile_guild",
+            None,
+        )
+        if callable(request_reconcile):
+            try:
+                request_reconcile(guild_id)
+            except Exception:
+                self.logger.exception(
+                    "Admin Notifications reconciliation request failed. Guild=%s",
+                    guild_id,
+                )
 
     def _cancel_submission_deadline(self, shift_register_id: int | None) -> None:
         if shift_register_id is None:
@@ -970,6 +992,7 @@ class ShiftRegister(
         async with self.sheet_write_lock(channel_id):
             shift_register_id = await manager.clear_feature_settings()
         self._cancel_submission_deadline(shift_register_id)
+        self._request_admin_notifications_reconcile(guild_id)
         self.logger.info(
             "Cleared feature settings for Feature: `%s` in Guild: `%s` Channel: `%s`",
             self.feature_name,

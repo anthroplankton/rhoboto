@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# ruff: noqa: RUF001, E501, RUF100
+import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -621,3 +623,137 @@ def test_team_guide_describes_registration_reactions(
     )
 
     assert expected in content
+
+
+@pytest.mark.parametrize(
+    ("key", "locale", "expected"),
+    [
+        (
+            "admin_notifications.shift.submission_deadline",
+            "ja",
+            """## ⏰ 募集締切が近づいています
+
+シフト登録：<#222>
+募集締切：<t:1786660800:F>（<t:1786660800:R>）
+
+提出状況を確認し、締切後に `/shift_register generate_draft` で仮シフトを作成できるよう準備してください。
+""",
+        ),
+        (
+            "admin_notifications.shift.submission_deadline",
+            "zh_tw",
+            """## ⏰ 募集截止時間即將到來
+
+班表登記：<#222>
+募集截止：<t:1786660800:F>（<t:1786660800:R>）
+
+請確認登記狀況，並準備在截止後使用 `/shift_register generate_draft` 產生暫定班表。
+""",
+        ),
+        (
+            "admin_notifications.shift.submission_deadline",
+            "en",
+            """## ⏰ Submission deadline approaching
+
+Shift registration: <#222>
+Submission deadline: <t:1786660800:F> (<t:1786660800:R>)
+
+Review the submissions and prepare to create the draft shift schedule with `/shift_register generate_draft` after the deadline.
+""",
+        ),
+        (
+            "admin_notifications.shift.draft_shift_proposal",
+            "ja",
+            """## ⏰ 仮シフト提示が近づいています
+
+シフト登録：<#222>
+仮シフト提示：<t:1786660800:F>（<t:1786660800:R>）
+
+Shift Draft を確認し、必要に応じて `/shift_register generate_draft` で更新してください。
+確認後、`/shift_register update_schedule_from_draft` で現行シフトへ反映し、`/shift_register post_schedule_image`（シフト状態：仮）で投稿してください。
+""",
+        ),
+        (
+            "admin_notifications.shift.draft_shift_proposal",
+            "zh_tw",
+            """## ⏰ 暫定班表公布時間即將到來
+
+班表登記：<#222>
+暫定班表公布：<t:1786660800:F>（<t:1786660800:R>）
+
+請確認 Shift Draft，並視需要使用 `/shift_register generate_draft` 更新。
+確認後，使用 `/shift_register update_schedule_from_draft` 套用至現行班表，再以 `/shift_register post_schedule_image`（班表狀態：暫定）發布。
+""",
+        ),
+        (
+            "admin_notifications.shift.draft_shift_proposal",
+            "en",
+            """## ⏰ Draft shift proposal approaching
+
+Shift registration: <#222>
+Draft shift proposal: <t:1786660800:F> (<t:1786660800:R>)
+
+Review the Shift Draft and update it with `/shift_register generate_draft` if needed.
+After review, apply it to the current schedule with `/shift_register update_schedule_from_draft`, then publish it with `/shift_register post_schedule_image` (Schedule status: Tentative).
+""",
+        ),
+        (
+            "admin_notifications.shift.final_shift_notice",
+            "ja",
+            """## ⏰ 確定シフト提示が近づいています
+
+シフト登録：<#222>
+確定シフト提示：<t:1786660800:F>（<t:1786660800:R>）
+
+現行シフトを最終確認し、必要に応じて `/shift_register update_schedule_from_draft` で Shift Draft の変更を反映してください。
+確定後、`/shift_register assign_schedule_role` で対象ロールを更新し、`/shift_register post_schedule_image`（シフト状態：確定）で投稿してください。
+""",
+        ),
+        (
+            "admin_notifications.shift.final_shift_notice",
+            "zh_tw",
+            """## ⏰ 確定班表公布時間即將到來
+
+班表登記：<#222>
+確定班表公布：<t:1786660800:F>（<t:1786660800:R>）
+
+請最後確認現行班表，並視需要使用 `/shift_register update_schedule_from_draft` 套用 Shift Draft 的變更。
+確認後，使用 `/shift_register assign_schedule_role` 更新指定身分組，再以 `/shift_register post_schedule_image`（班表狀態：確定）發布。
+""",
+        ),
+        (
+            "admin_notifications.shift.final_shift_notice",
+            "en",
+            """## ⏰ Final shift notice approaching
+
+Shift registration: <#222>
+Final shift notice: <t:1786660800:F> (<t:1786660800:R>)
+
+Review the current schedule one last time and apply any Shift Draft changes with `/shift_register update_schedule_from_draft` if needed.
+Once confirmed, update the selected role with `/shift_register assign_schedule_role`, then publish it with `/shift_register post_schedule_image` (Schedule status: Confirmed).
+""",
+        ),
+    ],
+)
+def test_admin_notification_templates_render_exactly(
+    key: str,
+    locale: str,
+    expected: str,
+) -> None:
+    content = render_message_template(
+        key,
+        locale,
+        source_channel="<#222>",
+        milestone_full_timestamp="<t:1786660800:F>",
+        milestone_relative_timestamp="<t:1786660800:R>",
+    )
+
+    assert content == expected
+    template = load_message_template(key, locale)
+    assert "https://" not in template
+    assert "<@" not in template
+    assert set(re.findall(r"{{\s*([a-z_]+)\s*}}", template)) <= {
+        "source_channel",
+        "milestone_full_timestamp",
+        "milestone_relative_timestamp",
+    }
