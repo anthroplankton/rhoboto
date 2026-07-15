@@ -26,10 +26,29 @@ PENDING_RENAME_DESCRIPTION = (
     "Discord側のチャンネル名変更回数の制限により、反映まで時間がかかる場合があります。\n"
     "現在、チャンネル名を更新しています。"
 )
-RECRUITMENT_TEMPLATE_MISSING = "募集テンプレが設定されていません。"
+RENAME_SUCCEEDED_DESCRIPTION = "チャンネル名を更新しました。"
+INITIAL_SETUP_CONTENT = (
+    "部屋番号機能はまだ設定されていません。下のボタンから設定を開始してください。"
+)
+INITIAL_SETUP_BUTTON_LABEL = "設定を開始"
+INITIAL_SETUP_MODAL_TITLE = "チャンネル名形式を設定"
+INITIAL_SOURCE_SELECTION_CONTENT = (
+    "チャンネル名形式を受け付けました。Sourceチャンネルを選択してください。"
+)
+INITIAL_SETUP_STALE_MESSAGE = (
+    "設定画面が古くなっています。もう一度設定を開始してください。"
+)
+UNAUTHORIZED_SETUP_MESSAGE = "この設定画面を開いた管理者のみ操作できます。"
 RECRUITMENT_TEMPLATE_UNREADABLE = (
     "募集テンプレを読み込めませんでした。設定を確認してください。"
 )
+TEMPLATE_CLEAR_CONFIRM_CONTENT = (
+    "‼️ ツイ募テンプレの設定を解除しますか？\n"
+    "保存済みのテンプレ参照だけを解除します。元のメッセージは削除されません。\n"
+    "募集テンプレの自動処理が有効なら、次に有効なテンプレをTargetへ投稿すると自動で再設定されます。"
+)
+TEMPLATE_CLEAR_PROGRESS_MESSAGE = "ツイ募テンプレの設定を解除しています。"
+TEMPLATE_CLEAR_CANCELLED_MESSAGE = "✖️ 解除をキャンセルしました。"
 SUPERSEDED_DESCRIPTION = "新しい部屋番号が設定されたため、この募集情報は無効です。"
 
 
@@ -49,6 +68,15 @@ class RoomNumberSettingsSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class RoomNumberUIActions:
+    initial_setup_is_current: Callable[[int], Awaitable[bool]]
+    start_initial_setup: Callable[
+        [Interaction, int, int, str],
+        Awaitable[None],
+    ]
+    select_source: Callable[
+        [Interaction, int, int, str, int, View],
+        Awaitable[None],
+    ]
     select_target: Callable[
         [Interaction, int, int | None, datetime | None, int, View],
         Awaitable[None],
@@ -59,6 +87,10 @@ class RoomNumberUIActions:
     ]
     set_recruitment_template_enabled: Callable[
         [Interaction, int, datetime, bool, View],
+        Awaitable[None],
+    ]
+    clear_recruitment_template: Callable[
+        [Interaction, int, datetime, View],
         Awaitable[None],
     ]
 
@@ -93,6 +125,149 @@ class RoomNumberTargetSelect(ChannelSelect):
             self.values[0].id,
             view,
         )
+
+
+class RoomNumberInitialSetupView(SettingsTimeoutView):
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        target_channel_id: int,
+        target_feature_channel_id: int,
+        actions: RoomNumberUIActions,
+    ) -> None:
+        super().__init__()
+        self.requesting_user_id = requesting_user_id
+        self.target_channel_id = target_channel_id
+        self.target_feature_channel_id = target_feature_channel_id
+        self.actions = actions
+        self.add_item(RoomNumberInitialSetupButton())
+
+
+class RoomNumberInitialSetupButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label=INITIAL_SETUP_BUTTON_LABEL, style=ButtonStyle.primary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, RoomNumberInitialSetupView):
+            return
+        if interaction.user.id != view.requesting_user_id:
+            await interaction.response.send_message(
+                UNAUTHORIZED_SETUP_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        if not await require_settings_permissions(interaction):
+            return
+        if getattr(
+            interaction.channel, "id", None
+        ) != view.target_channel_id or not await view.actions.initial_setup_is_current(
+            view.target_feature_channel_id
+        ):
+            await interaction.response.send_message(
+                INITIAL_SETUP_STALE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            RoomNumberInitialFormatModal(
+                target_channel_id=view.target_channel_id,
+                target_feature_channel_id=view.target_feature_channel_id,
+                actions=view.actions,
+            )
+        )
+
+
+class RoomNumberInitialFormatModal(Modal):
+    def __init__(
+        self,
+        *,
+        target_channel_id: int,
+        target_feature_channel_id: int,
+        actions: RoomNumberUIActions,
+    ) -> None:
+        super().__init__(title=INITIAL_SETUP_MODAL_TITLE)
+        self.target_channel_id = target_channel_id
+        self.target_feature_channel_id = target_feature_channel_id
+        self.actions = actions
+        self.channel_name_format = TextInput(
+            label="チャンネル名形式",
+            default="部屋番号【{room_number}】",
+            max_length=CHANNEL_NAME_FORMAT_MAX_LENGTH,
+            required=True,
+            style=TextStyle.short,
+        )
+        self.add_item(self.channel_name_format)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        await self.actions.start_initial_setup(
+            interaction,
+            self.target_feature_channel_id,
+            self.target_channel_id,
+            self.channel_name_format.value,
+        )
+
+
+class RoomNumberSourceSelect(ChannelSelect):
+    def __init__(self) -> None:
+        super().__init__(
+            placeholder="Sourceチャンネルを選択",
+            min_values=1,
+            max_values=1,
+            channel_types=[ChannelType.text],
+            row=0,
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        view = self.view
+        if not isinstance(view, RoomNumberSourceSelectView):
+            return
+        if interaction.user.id != view.requesting_user_id:
+            await interaction.response.send_message(
+                UNAUTHORIZED_SETUP_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        if getattr(interaction.channel, "id", None) != view.target_channel_id:
+            await interaction.response.send_message(
+                INITIAL_SETUP_STALE_MESSAGE,
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True)
+        await view.actions.select_source(
+            interaction,
+            view.target_feature_channel_id,
+            view.target_channel_id,
+            view.channel_name_format,
+            self.values[0].id,
+            view,
+        )
+
+
+class RoomNumberSourceSelectView(SettingsTimeoutView):
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        target_channel_id: int,
+        target_feature_channel_id: int,
+        channel_name_format: str,
+        actions: RoomNumberUIActions,
+    ) -> None:
+        super().__init__()
+        self.requesting_user_id = requesting_user_id
+        self.target_channel_id = target_channel_id
+        self.target_feature_channel_id = target_feature_channel_id
+        self.channel_name_format = channel_name_format
+        self.actions = actions
+        self.add_item(RoomNumberSourceSelect())
 
 
 class EditRoomNumberFormatButton(Button):
@@ -151,6 +326,89 @@ class ToggleRecruitmentTemplateButton(Button):
         )
 
 
+class ClearRecruitmentTemplateButton(Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="🗑️ ツイ募テンプレの設定を解除",
+            style=ButtonStyle.danger,
+            row=1,
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        view = self.view
+        if not isinstance(view, RoomNumberSettingsView):
+            return
+        snapshot = view.snapshot
+        if snapshot.config_id is None or snapshot.updated_at is None:
+            return
+        confirmation_view = ClearRecruitmentTemplateConfirmView(
+            config_id=snapshot.config_id,
+            expected_updated_at=snapshot.updated_at,
+            actions=view.actions,
+        )
+        confirmation_view.message = view.message
+        await interaction.response.edit_message(
+            content=TEMPLATE_CLEAR_CONFIRM_CONTENT,
+            embed=None,
+            view=confirmation_view,
+        )
+
+
+class ClearRecruitmentTemplateConfirmView(SettingsTimeoutView):
+    def __init__(
+        self,
+        *,
+        config_id: int,
+        expected_updated_at: datetime,
+        actions: RoomNumberUIActions,
+    ) -> None:
+        super().__init__()
+        self.config_id = config_id
+        self.expected_updated_at = expected_updated_at
+        self.actions = actions
+        self.add_item(ConfirmClearRecruitmentTemplateButton())
+        self.add_item(CancelClearRecruitmentTemplateButton())
+
+
+class ConfirmClearRecruitmentTemplateButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="解除する", style=ButtonStyle.danger)
+
+    async def callback(self, interaction: Interaction) -> None:
+        if not await require_settings_permissions(interaction):
+            return
+        view = self.view
+        if not isinstance(view, ClearRecruitmentTemplateConfirmView):
+            return
+        await interaction.response.edit_message(
+            content=TEMPLATE_CLEAR_PROGRESS_MESSAGE,
+            view=None,
+        )
+        await view.actions.clear_recruitment_template(
+            interaction,
+            view.config_id,
+            view.expected_updated_at,
+            view,
+        )
+
+
+class CancelClearRecruitmentTemplateButton(Button):
+    def __init__(self) -> None:
+        super().__init__(label="キャンセル", style=ButtonStyle.secondary)
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(view, ClearRecruitmentTemplateConfirmView):
+            return
+        await interaction.response.edit_message(
+            content=TEMPLATE_CLEAR_CANCELLED_MESSAGE,
+            view=None,
+        )
+        view.stop()
+
+
 class RoomNumberFormatModal(Modal):
     def __init__(
         self,
@@ -206,6 +464,11 @@ class RoomNumberSettingsView(SettingsTimeoutView):
                     enabled=snapshot.recruitment_template_enabled
                 )
             )
+            if (
+                snapshot.recruitment_template_channel_id is not None
+                and snapshot.recruitment_template_message_id is not None
+            ):
+                self.add_item(ClearRecruitmentTemplateButton())
 
 
 def _template_status(snapshot: RoomNumberSettingsSnapshot) -> str:
@@ -270,7 +533,7 @@ def build_room_output_embed(
     )
     if template_text is not None:
         embed.add_field(name="ツイ募テンプレ", value=template_text, inline=False)
-    embed.set_footer(text=f"部屋番号更新：{actor.display_name}（@{actor.username}）")
+    embed.set_footer(text=f"更新者：{actor.display_name}（@{actor.username}）")
     return embed
 
 
@@ -285,8 +548,8 @@ def build_room_output_view(intent_urls: Sequence[str]) -> View | None:
     return view
 
 
-def remove_pending_rename_description(embed: Embed) -> None:
-    embed.description = None
+def mark_room_output_rename_succeeded(embed: Embed) -> None:
+    embed.description = RENAME_SUCCEEDED_DESCRIPTION
 
 
 def mark_room_output_rename_failed(embed: Embed, bot_mention: str) -> None:

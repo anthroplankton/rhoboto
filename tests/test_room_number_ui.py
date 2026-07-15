@@ -11,11 +11,18 @@ from discord.ui import ChannelSelect
 from bot import config
 from components.ui_room_number import (
     PENDING_RENAME_DESCRIPTION,
-    RECRUITMENT_TEMPLATE_MISSING,
     RECRUITMENT_TEMPLATE_UNREADABLE,
+    RENAME_SUCCEEDED_DESCRIPTION,
+    TEMPLATE_CLEAR_CANCELLED_MESSAGE,
+    TEMPLATE_CLEAR_CONFIRM_CONTENT,
+    TEMPLATE_CLEAR_PROGRESS_MESSAGE,
+    ClearRecruitmentTemplateConfirmView,
     RoomNumberFormatModal,
+    RoomNumberInitialFormatModal,
+    RoomNumberInitialSetupView,
     RoomNumberSettingsSnapshot,
     RoomNumberSettingsView,
+    RoomNumberSourceSelectView,
     RoomNumberUIActions,
     build_room_number_settings_panel,
     build_room_output_embed,
@@ -23,8 +30,8 @@ from components.ui_room_number import (
     build_room_storage_error_embed,
     build_target_output_failure_embed,
     mark_room_output_rename_failed,
+    mark_room_output_rename_succeeded,
     mark_room_output_superseded,
-    remove_pending_rename_description,
 )
 from tests.fakes import FakeInteraction
 from utils.structs_base import UserInfo
@@ -34,9 +41,13 @@ UPDATED_AT = datetime(2026, 7, 15, 12, tzinfo=UTC)
 
 def _actions() -> RoomNumberUIActions:
     return RoomNumberUIActions(
+        initial_setup_is_current=AsyncMock(return_value=True),
+        start_initial_setup=AsyncMock(),
+        select_source=AsyncMock(),
         select_target=AsyncMock(),
         save_channel_name_format=AsyncMock(),
         set_recruitment_template_enabled=AsyncMock(),
+        clear_recruitment_template=AsyncMock(),
     )
 
 
@@ -133,6 +144,58 @@ def test_unconfigured_settings_panel_uses_unset_values_and_target_only() -> None
     assert len(panel.view.children) == 1
 
 
+@pytest.mark.asyncio
+async def test_initial_setup_opens_format_modal_then_source_select() -> None:
+    actions = _actions()
+    setup_view = RoomNumberInitialSetupView(
+        requesting_user_id=333,
+        target_channel_id=222,
+        target_feature_channel_id=7,
+        actions=actions,
+    )
+
+    button = setup_view.children[0]
+    assert button.label == "設定を開始"
+    interaction = FakeInteraction()
+    await button.callback(interaction)
+
+    modal = interaction.response.modals[0]
+    assert isinstance(modal, RoomNumberInitialFormatModal)
+    assert modal.title == "チャンネル名形式を設定"
+    assert modal.channel_name_format.default == "部屋番号【{room_number}】"
+
+    modal.channel_name_format._value = "room-{room_number}"  # noqa: SLF001
+    modal_interaction = FakeInteraction()
+    await modal.on_submit(modal_interaction)
+    actions.start_initial_setup.assert_awaited_once_with(
+        modal_interaction,
+        7,
+        222,
+        "room-{room_number}",
+    )
+
+    source_view = RoomNumberSourceSelectView(
+        requesting_user_id=333,
+        target_channel_id=222,
+        target_feature_channel_id=7,
+        channel_name_format="room-{room_number}",
+        actions=actions,
+    )
+    source_select = source_view.children[0]
+    assert source_select.placeholder == "Sourceチャンネルを選択"
+    source_select._values = [SimpleNamespace(id=444)]  # noqa: SLF001
+    source_interaction = FakeInteraction()
+    await source_select.callback(source_interaction)
+    actions.select_source.assert_awaited_once_with(
+        source_interaction,
+        7,
+        222,
+        "room-{room_number}",
+        444,
+        source_view,
+    )
+
+
 def test_settings_view_uses_text_channel_select_and_exact_controls() -> None:
     view = RoomNumberSettingsView(snapshot=_snapshot(), actions=_actions())
     select = view.children[0]
@@ -144,6 +207,7 @@ def test_settings_view_uses_text_channel_select_and_exact_controls() -> None:
     assert [item.label for item in view.children[1:]] == [
         "チャンネル名形式を編集",
         "募集テンプレを無効化",
+        "🗑️ ツイ募テンプレの設定を解除",
     ]
 
 
@@ -221,6 +285,54 @@ async def test_template_toggle_rechecks_permissions_and_routes_next_state() -> N
 
 
 @pytest.mark.asyncio
+async def test_template_clear_requires_confirmation_and_routes_action() -> None:
+    actions = _actions()
+    view = RoomNumberSettingsView(snapshot=_snapshot(), actions=actions)
+    clear = view.children[3]
+
+    interaction = FakeInteraction()
+    await clear.callback(interaction)
+
+    content, kwargs = interaction.response.edits[0]
+    assert content == TEMPLATE_CLEAR_CONFIRM_CONTENT
+    confirmation = kwargs["view"]
+    assert isinstance(confirmation, ClearRecruitmentTemplateConfirmView)
+    assert [item.label for item in confirmation.children] == [
+        "解除する",
+        "キャンセル",
+    ]
+
+    confirm_interaction = FakeInteraction()
+    await confirmation.children[0].callback(confirm_interaction)
+    assert confirm_interaction.response.edits == [
+        (TEMPLATE_CLEAR_PROGRESS_MESSAGE, {"view": None})
+    ]
+    actions.clear_recruitment_template.assert_awaited_once_with(
+        confirm_interaction,
+        9,
+        UPDATED_AT,
+        confirmation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_clear_cancel_leaves_settings_unchanged() -> None:
+    actions = _actions()
+    view = RoomNumberSettingsView(snapshot=_snapshot(), actions=actions)
+    interaction = FakeInteraction()
+    await view.children[3].callback(interaction)
+    confirmation = interaction.response.edits[0][1]["view"]
+
+    cancel_interaction = FakeInteraction()
+    await confirmation.children[1].callback(cancel_interaction)
+
+    assert cancel_interaction.response.edits == [
+        (TEMPLATE_CLEAR_CANCELLED_MESSAGE, {"view": None})
+    ]
+    actions.clear_recruitment_template.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_settings_timeout_disables_every_control() -> None:
     view = RoomNumberSettingsView(snapshot=_snapshot(), actions=_actions())
 
@@ -245,7 +357,7 @@ def test_room_output_builds_exact_template_surface_and_five_links() -> None:
     assert embed.description == PENDING_RENAME_DESCRIPTION
     assert embed.color.value == config.DEFAULT_EMBED_COLOR
     assert embed.timestamp == timestamp
-    assert embed.footer.text == "部屋番号更新：Alice（@alice）"
+    assert embed.footer.text == "更新者：Alice（@alice）"
     assert [(field.name, field.value) for field in embed.fields] == [
         ("ツイ募テンプレ", "12345\n#プロセカ募集")
     ]
@@ -270,10 +382,7 @@ def test_room_output_template_states_and_embed_mutations() -> None:
     assert disabled.fields == []
     assert build_room_output_view(()) is None
 
-    for template_state in (
-        RECRUITMENT_TEMPLATE_MISSING,
-        RECRUITMENT_TEMPLATE_UNREADABLE,
-    ):
+    for template_state in (RECRUITMENT_TEMPLATE_UNREADABLE,):
         embed = build_room_output_embed(
             "12345",
             UserInfo(username="alice", display_name="Alice"),
@@ -287,8 +396,8 @@ def test_room_output_template_states_and_embed_mutations() -> None:
         description=PENDING_RENAME_DESCRIPTION,
         template_text="template",
     )
-    remove_pending_rename_description(pending)
-    assert pending.description is None
+    mark_room_output_rename_succeeded(pending)
+    assert pending.description == RENAME_SUCCEEDED_DESCRIPTION
 
     mark_room_output_rename_failed(pending, "<@999>")
     assert "<@999>" in pending.description

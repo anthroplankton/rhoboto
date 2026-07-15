@@ -17,6 +17,11 @@ from cogs import room_number
 from cogs.base.feature_channel_base import FeatureNotEnabled
 from cogs.room_number import RoomNumber
 from components.ui_permissions import MISSING_SETTINGS_PERMISSION_MESSAGE
+from components.ui_room_number import (
+    RoomNumberInitialFormatModal,
+    RoomNumberInitialSetupView,
+    RoomNumberSourceSelectView,
+)
 from components.ui_settings_flow import SettingsTimeoutView
 from models.feature_channel import FeatureChannel
 from models.room_number import RoomNumberConfig
@@ -383,6 +388,65 @@ async def test_initial_target_selection_configures_distinct_memberships_and_reli
 
 
 @pytest.mark.asyncio
+async def test_target_setup_uses_format_modal_then_source_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    bot = _bot()
+    bot.user = guild.me
+    cog = RoomNumber(bot)
+
+    async with _database():
+        await cog._enable_channel(guild.id, target.id)  # noqa: SLF001
+        setup_interaction = _interaction(guild, target)
+        await cog.setup_after_enable(setup_interaction)
+
+        content, setup_kwargs = setup_interaction.followup.messages[0]
+        assert content == room_number.INITIAL_SETUP_CONTENT
+        setup_view = setup_kwargs["view"]
+        assert isinstance(setup_view, RoomNumberInitialSetupView)
+
+        button_interaction = _interaction(guild, target)
+        await setup_view.children[0].callback(button_interaction)
+        modal = button_interaction.response.modals[0]
+        assert isinstance(modal, RoomNumberInitialFormatModal)
+        modal.channel_name_format._value = "room-{room_number}"  # noqa: SLF001
+
+        modal_interaction = _interaction(guild, target)
+        await modal.on_submit(modal_interaction)
+        source_kwargs = modal_interaction.followup.messages[0][1]
+        source_view = source_kwargs["view"]
+        assert isinstance(source_view, RoomNumberSourceSelectView)
+
+        source_select = source_view.children[0]
+        source_select._values = [SimpleNamespace(id=source.id)]  # noqa: SLF001
+        select_interaction = _interaction(guild, target)
+        await source_select.callback(select_interaction)
+
+        config = await RoomNumberConfig.get()
+        source_membership = await FeatureChannel.get(channel_id=source.id)
+        assert config.feature_channel_id == source_membership.id
+        assert config.target_channel_id == target.id
+        assert config.channel_name_format == "room-{room_number}"
+        assert sorted(
+            await FeatureChannel.filter(feature_name="room_number").values_list(
+                "channel_id",
+                flat=True,
+            )
+        ) == [source.id, target.id]
+        assert select_interaction.original_response_edits
+
+        settings_interaction = _interaction(guild, target)
+        await cog.setup_after_enable(settings_interaction)
+        _, settings_kwargs = settings_interaction.followup.messages[0]
+        assert settings_kwargs["embed"].fields[0].value == "<#111>"
+        assert settings_kwargs["embed"].fields[1].value == "<#222>"
+
+
+@pytest.mark.asyncio
 async def test_self_target_deduplicates_membership_and_pair_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,8 +646,49 @@ async def test_format_toggle_permissions_and_target_only_lifecycle_owner(
         assert cog._delivery_generations[source.id] == 2  # noqa: SLF001
 
         target_source = SimpleNamespace(guild=guild, channel=target)
+        await cog._validate_lifecycle_owner(target_source)  # noqa: SLF001
+
+        source_source = SimpleNamespace(guild=guild, channel=source)
         with pytest.raises(FeatureNotEnabled):
-            await cog._validate_lifecycle_owner(target_source)  # noqa: SLF001
+            await cog._validate_lifecycle_owner(source_source)  # noqa: SLF001
+
+
+@pytest.mark.asyncio
+async def test_clear_recruitment_template_removes_pointer_without_disabling_feature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    cog = RoomNumber(_bot())
+
+    async with _database():
+        config = await _create_room_config(
+            guild,
+            source,
+            target,
+            room="12345",
+            template_channel_id=target.id,
+            template_message_id=333,
+        )
+        interaction = _interaction(guild, target)
+        await interaction.response.defer(ephemeral=True)
+
+        await cog._clear_recruitment_template(  # noqa: SLF001
+            interaction,
+            config.id,
+            config.updated_at,
+            SettingsTimeoutView(),
+        )
+
+        await config.refresh_from_db()
+        assert config.recruitment_template_enabled is True
+        assert config.recruitment_template_channel_id is None
+        assert config.recruitment_template_message_id is None
+        assert config.room_number == "12345"
+        assert target.sent_messages == []
+        assert interaction.original_response_edits
 
 
 @pytest.mark.asyncio
@@ -736,15 +841,15 @@ async def test_distinct_pair_disable_reenable_and_clear_together(
             ]
         )
 
-        assert await cog._disable_channel(guild.id, source.id) is True  # noqa: SLF001
+        assert await cog._disable_channel(guild.id, target.id) is True  # noqa: SLF001
         assert await FeatureChannel.filter(is_enabled=True).count() == 0
         await config.refresh_from_db()
         assert config.recruitment_template_message_id == 444
 
-        await cog._enable_channel(guild.id, source.id)  # noqa: SLF001
+        await cog._enable_channel(guild.id, target.id)  # noqa: SLF001
         assert await FeatureChannel.filter(is_enabled=True).count() == 2
 
-        await cog._clear_feature_settings(guild.id, source.id)  # noqa: SLF001
+        await cog._clear_feature_settings(guild.id, target.id)  # noqa: SLF001
         assert await FeatureChannel.all().count() == 0
         assert await RoomNumberConfig.all().count() == 0
 
@@ -780,7 +885,10 @@ async def test_automatic_room_capture_accepts_source_or_current_target(
         assert target.name == "部屋番号【12345】"
         assert len(target.sent_messages) == 1
         assert target.sent_messages[0].embed.footer.text == (
-            "部屋番号更新：Alice（@alice）"  # noqa: RUF001
+            "更新者：Alice（@alice）"  # noqa: RUF001
+        )
+        assert target.sent_messages[0].embed.description == (
+            "チャンネル名を更新しました。"
         )
         assert message.added_reactions == [config.PROCESSING_EMOJI, "✅"]
         assert message.removed_reactions == [(config.PROCESSING_EMOJI, guild.me)]
@@ -963,7 +1071,10 @@ async def test_manual_room_menu_accepts_both_roles_and_attributes_invoker(
         await config_row.refresh_from_db()
         assert config_row.room_number == "12345"
         assert target.sent_messages[0].embed.footer.text == (
-            "部屋番号更新：Alice（@alice）"  # noqa: RUF001
+            "更新者：Alice（@alice）"  # noqa: RUF001
+        )
+        assert target.sent_messages[0].embed.description == (
+            "チャンネル名を更新しました。"
         )
         assert interaction.followup.messages[-1] == (
             "部屋番号を「12345」に更新しました。",
@@ -997,6 +1108,107 @@ async def test_automatic_template_capture_replaces_pointer_and_reacts(
         assert config_row.recruitment_template_channel_id == target.id
         assert config_row.recruitment_template_message_id == candidate.id
         assert cog._delivery_generations[source.id] == 7  # noqa: SLF001
+        assert candidate.added_reactions == ["🔄"]
+
+
+@pytest.mark.asyncio
+async def test_automatic_template_capture_publishes_current_room_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    cog = RoomNumber(_bot())
+
+    async with _database():
+        await _create_room_config(guild, source, target, room="12345")
+        candidate = FakeRoomMessage(
+            "@{people} {room_number}\n#プロセカ募集",
+            target,
+            administrator=True,
+            manage_channels=True,
+        )
+
+        await cog.on_message(candidate)
+
+        assert len(target.sent_messages) == 1
+        sent = target.sent_messages[0]
+        assert sent.embed.title == "部屋番号【12345】"
+        assert sent.embed.description is None
+        assert sent.embed.fields[0].value == "@ 12345\n#プロセカ募集"
+        assert target.fetched_message_ids == []
+        assert target.edited_names == []
+        assert candidate.added_reactions == ["🔄"]
+
+
+@pytest.mark.asyncio
+async def test_cleared_template_pointer_restores_on_next_automatic_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    cog = RoomNumber(_bot())
+
+    async with _database():
+        config_row = await _create_room_config(
+            guild,
+            source,
+            target,
+            room="12345",
+            template_channel_id=target.id,
+            template_message_id=333,
+        )
+        clear_interaction = _interaction(guild, target)
+        await clear_interaction.response.defer(ephemeral=True)
+        await cog._clear_recruitment_template(  # noqa: SLF001
+            clear_interaction,
+            config_row.id,
+            config_row.updated_at,
+            SettingsTimeoutView(),
+        )
+        candidate = FakeRoomMessage(
+            "{room_number}\n#プロセカ募集",
+            target,
+            administrator=True,
+            manage_channels=True,
+        )
+
+        await cog.on_message(candidate)
+
+        await config_row.refresh_from_db()
+        assert config_row.recruitment_template_channel_id == target.id
+        assert config_row.recruitment_template_message_id == candidate.id
+        assert len(target.sent_messages) == 1
+        assert target.sent_messages[0].embed.fields[0].value == ("12345\n#プロセカ募集")
+
+
+@pytest.mark.asyncio
+async def test_automatic_template_capture_does_not_publish_without_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    cog = RoomNumber(_bot())
+
+    async with _database():
+        config_row = await _create_room_config(guild, source, target)
+        candidate = FakeRoomMessage(
+            "{room_number}\n#プロセカ募集",
+            target,
+            administrator=True,
+            manage_channels=True,
+        )
+
+        await cog.on_message(candidate)
+
+        await config_row.refresh_from_db()
+        assert config_row.recruitment_template_message_id == candidate.id
+        assert target.sent_messages == []
         assert candidate.added_reactions == ["🔄"]
 
 
@@ -1066,6 +1278,38 @@ async def test_manual_template_capture_is_target_only_and_works_while_disabled(
             ("募集テンプレに設定しました。", {"ephemeral": True})
         ]
         assert selected.added_reactions == []
+        assert target.sent_messages == []
+
+
+@pytest.mark.asyncio
+async def test_manual_template_capture_publishes_current_room_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(room_number, "TextChannel", FakeTextChannel, raising=False)
+    source = FakeTextChannel(111)
+    target = FakeTextChannel(222)
+    guild = FakeGuild([source, target])
+    cog = RoomNumber(_bot())
+
+    async with _database():
+        await _create_room_config(guild, source, target, room="12345")
+        selected = FakeRoomMessage(
+            "{room_number}\n#プロセカ協力",
+            target,
+        )
+        interaction = _interaction(guild, target)
+
+        await cog.set_recruitment_template_from_context_menu(interaction, selected)
+
+        assert len(target.sent_messages) == 1
+        sent = target.sent_messages[0]
+        assert sent.embed.title == "部屋番号【12345】"
+        assert sent.embed.description is None
+        assert sent.embed.fields[0].value == "12345\n#プロセカ協力"
+        assert target.edited_names == []
+        assert interaction.followup.messages == [
+            ("募集テンプレに設定しました。", {"ephemeral": True})
+        ]
 
 
 @pytest.mark.asyncio
@@ -1135,7 +1379,7 @@ async def test_room_delivery_orders_output_before_rename_and_edits_same_message(
             ("reaction_add", trigger.id, "✅"),
             ("reaction_remove", trigger.id, config.PROCESSING_EMOJI),
         ]
-        assert sent.edits[-1]["embed"].description is None
+        assert sent.edits[-1]["embed"].description == "チャンネル名を更新しました。"
 
 
 @pytest.mark.asyncio
@@ -1282,7 +1526,7 @@ async def test_automatic_template_storage_failure_preserves_pointer_and_generati
     ("template_enabled", "pointer", "expected_field", "expected_fetches"),
     [
         (False, True, None, []),
-        (True, False, "募集テンプレが設定されていません。", []),
+        (True, False, None, []),
         (
             True,
             True,
@@ -1765,6 +2009,19 @@ async def test_concurrent_same_room_only_latest_completes(
             return result
 
         monkeypatch.setattr(cog, "_persist_room_update", tracked_persist)
+        second_sent = asyncio.Event()
+        original_send = target.send
+        send_count = 0
+
+        async def tracked_send(**kwargs: object) -> FakeSentMessage:
+            nonlocal send_count
+            sent = await original_send(**kwargs)
+            send_count += 1
+            if send_count == 2:
+                second_sent.set()
+            return sent
+
+        monkeypatch.setattr(target, "send", tracked_send)
         actor = UserInfo(username="alice", display_name="Alice")
         first = FakeRoomMessage("12345", source, message_id=5001)
         second = FakeRoomMessage("12345", source, message_id=5002)
@@ -1786,6 +2043,12 @@ async def test_concurrent_same_room_only_latest_completes(
             )
         )
         await asyncio.wait_for(second_persisted.wait(), timeout=2)
+        sent_before_release = True
+        try:
+            await asyncio.wait_for(second_sent.wait(), timeout=1)
+        except TimeoutError:
+            sent_before_release = False
+        assert sent_before_release
         target.rename_release.set()
 
         await asyncio.wait_for(asyncio.gather(first_task, second_task), timeout=3)

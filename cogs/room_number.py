@@ -25,10 +25,14 @@ from components.ui_permissions import (
     has_settings_permissions,
 )
 from components.ui_room_number import (
+    INITIAL_SETUP_CONTENT,
+    INITIAL_SETUP_STALE_MESSAGE,
+    INITIAL_SOURCE_SELECTION_CONTENT,
     PENDING_RENAME_DESCRIPTION,
-    RECRUITMENT_TEMPLATE_MISSING,
     RECRUITMENT_TEMPLATE_UNREADABLE,
+    RoomNumberInitialSetupView,
     RoomNumberSettingsSnapshot,
+    RoomNumberSourceSelectView,
     RoomNumberUIActions,
     build_room_number_settings_panel,
     build_room_output_embed,
@@ -36,13 +40,14 @@ from components.ui_room_number import (
     build_room_storage_error_embed,
     build_target_output_failure_embed,
     mark_room_output_rename_failed,
+    mark_room_output_rename_succeeded,
     mark_room_output_superseded,
-    remove_pending_rename_description,
 )
 from components.ui_settings_flow import (
     SETTINGS_STORAGE_EXCEPTIONS,
     prepare_replacement_settings_view,
     send_current_panel_followup,
+    send_settings_view_followup,
 )
 from components.ui_storage_errors import send_storage_error
 from models.feature_channel import FeatureChannel
@@ -168,9 +173,13 @@ class RoomNumber(
 
     def _ui_actions(self) -> RoomNumberUIActions:
         return RoomNumberUIActions(
+            initial_setup_is_current=self._initial_setup_is_current,
+            start_initial_setup=self._start_initial_setup,
+            select_source=self._select_source,
             select_target=self._select_target,
             save_channel_name_format=self._save_channel_name_format,
             set_recruitment_template_enabled=(self._set_recruitment_template_enabled),
+            clear_recruitment_template=self._clear_recruitment_template,
         )
 
     async def _send_ephemeral(
@@ -243,13 +252,90 @@ class RoomNumber(
         )
         if membership is None:
             raise FeatureNotEnabled(self.feature_name, self.feature_display_name)
-        snapshot = await self._settings_snapshot(membership.id)
+        config = await RoomNumberConfig.get_or_none(
+            target_channel_id=source.channel.id,
+        )
+        if config is None:
+            config = await RoomNumberConfig.get_or_none(
+                feature_channel_id=membership.id,
+            )
+        if config is None:
+            await send_settings_view_followup(
+                interaction,
+                content=INITIAL_SETUP_CONTENT,
+                view=RoomNumberInitialSetupView(
+                    requesting_user_id=interaction.user.id,
+                    target_channel_id=source.channel.id,
+                    target_feature_channel_id=membership.id,
+                    actions=self._ui_actions(),
+                ),
+            )
+            return
+        snapshot = await self._settings_snapshot(config.feature_channel_id)
         panel = build_room_number_settings_panel(
             source.guild,
             snapshot,
             self._ui_actions(),
         )
         await send_current_panel_followup(interaction, panel)
+
+    async def _initial_setup_is_current(
+        self,
+        target_feature_channel_id: int,
+    ) -> bool:
+        membership = await FeatureChannel.get_or_none(
+            id=target_feature_channel_id,
+            feature_name=self.feature_name,
+        )
+        if membership is None or not membership.is_enabled:
+            return False
+        if (
+            await RoomNumberConfig.get_or_none(
+                feature_channel_id=membership.id,
+            )
+            is not None
+        ):
+            return False
+        return (
+            await RoomNumberConfig.get_or_none(
+                target_channel_id=membership.channel_id,
+            )
+            is None
+        )
+
+    async def _start_initial_setup(
+        self,
+        interaction: Interaction,
+        target_feature_channel_id: int,
+        target_channel_id: int,
+        channel_name_format: str,
+    ) -> None:
+        try:
+            validated_format = validate_channel_name_format(channel_name_format)
+        except RoomNumberFormatError as exc:
+            await self._send_ephemeral(interaction, str(exc))
+            return
+        source = require_guild_channel_source(
+            interaction,
+            action="continue Room Number setup",
+        )
+        if (
+            source.channel.id != target_channel_id
+            or not await self._initial_setup_is_current(target_feature_channel_id)
+        ):
+            await self._send_ephemeral(interaction, INITIAL_SETUP_STALE_MESSAGE)
+            return
+        await send_settings_view_followup(
+            interaction,
+            content=INITIAL_SOURCE_SELECTION_CONTENT,
+            view=RoomNumberSourceSelectView(
+                requesting_user_id=interaction.user.id,
+                target_channel_id=target_channel_id,
+                target_feature_channel_id=target_feature_channel_id,
+                channel_name_format=validated_format,
+                actions=self._ui_actions(),
+            ),
+        )
 
     async def _settings_snapshot(
         self,
@@ -321,16 +407,17 @@ class RoomNumber(
             channel_id=source.channel.id,
             feature_name=self.feature_name,
         )
-        if membership is not None:
-            source_config = await RoomNumberConfig.get_or_none(
-                feature_channel_id=membership.id,
-            )
-            if source_config is not None:
-                return
+        if membership is None:
+            return
         target_config = await RoomNumberConfig.get_or_none(
             target_channel_id=source.channel.id,
         )
         if target_config is not None:
+            return
+        source_config = await RoomNumberConfig.get_or_none(
+            feature_channel_id=membership.id,
+        )
+        if source_config is not None:
             raise FeatureNotEnabled(self.feature_name, self.feature_display_name)
 
     def _missing_target_permissions(
@@ -370,6 +457,95 @@ class RoomNumber(
         if membership is None:
             raise _StaleRoomSettingsError
         return membership
+
+    async def _persist_initial_source_selection(
+        self,
+        *,
+        guild_id: int,
+        target_channel_id: int,
+        target_feature_channel_id: int,
+        source_channel_id: int,
+        channel_name_format: str,
+    ) -> RoomNumberConfig:
+        async with self._state_lock(target_channel_id):
+            async with in_transaction() as connection:
+                target_membership = await (
+                    FeatureChannel.filter(
+                        id=target_feature_channel_id,
+                        guild_id=guild_id,
+                        channel_id=target_channel_id,
+                        feature_name=self.feature_name,
+                    )
+                    .using_db(connection)
+                    .select_for_update()
+                    .first()
+                )
+                if target_membership is None or not target_membership.is_enabled:
+                    raise _StaleRoomSettingsError
+                if (
+                    await RoomNumberConfig.filter(
+                        target_channel_id=target_channel_id,
+                    )
+                    .using_db(connection)
+                    .select_for_update()
+                    .first()
+                    is not None
+                ):
+                    raise _StaleRoomSettingsError
+
+                source_as_target = await (
+                    RoomNumberConfig.filter(target_channel_id=source_channel_id)
+                    .using_db(connection)
+                    .select_for_update()
+                    .first()
+                )
+                if source_as_target is not None:
+                    raise _RoomChannelConflictError
+                source_membership = await (
+                    FeatureChannel.filter(
+                        guild_id=guild_id,
+                        channel_id=source_channel_id,
+                        feature_name=self.feature_name,
+                    )
+                    .using_db(connection)
+                    .select_for_update()
+                    .first()
+                )
+                if source_membership is None:
+                    source_membership = await FeatureChannel.create(
+                        using_db=connection,
+                        guild_id=guild_id,
+                        channel_id=source_channel_id,
+                        feature_name=self.feature_name,
+                        is_enabled=True,
+                    )
+                else:
+                    source_config = await (
+                        RoomNumberConfig.filter(
+                            feature_channel_id=source_membership.id,
+                        )
+                        .using_db(connection)
+                        .select_for_update()
+                        .first()
+                    )
+                    if source_config is not None:
+                        raise _RoomChannelConflictError
+                    if not source_membership.is_enabled:
+                        source_membership.is_enabled = True
+                        await source_membership.save(
+                            using_db=connection,
+                            update_fields=["is_enabled", "updated_at"],
+                        )
+                config = await RoomNumberConfig.create(
+                    using_db=connection,
+                    feature_channel_id=source_membership.id,
+                    target_channel_id=target_channel_id,
+                    channel_name_format=channel_name_format,
+                )
+            self._delivery_generations[source_membership.channel_id] = (
+                self._delivery_generations.get(source_membership.channel_id, 0) + 1
+            )
+        return config
 
     @staticmethod
     def _require_current_config(
@@ -530,7 +706,7 @@ class RoomNumber(
             )
         return config
 
-    async def _select_target(  # noqa: PLR0913
+    async def _select_target(  # noqa: PLR0911, PLR0913
         self,
         interaction: Interaction,
         source_feature_channel_id: int,
@@ -556,11 +732,23 @@ class RoomNumber(
                 "Bot に次の権限が必要です: " + "、".join(missing_permissions),
             )
             return
+        source_membership = await FeatureChannel.get_or_none(
+            id=source_feature_channel_id,
+            guild_id=source.guild.id,
+            feature_name=self.feature_name,
+        )
+        if source_membership is None:
+            await self._send_ephemeral(interaction, STALE_SETTINGS_MESSAGE)
+            return
+        source_channel_id = source_membership.channel_id
+        if expected_config_id is None and source.channel.id != source_channel_id:
+            await self._send_ephemeral(interaction, STALE_SETTINGS_MESSAGE)
+            return
 
         try:
             config = await self._persist_target_selection(
                 guild_id=source.guild.id,
-                source_channel_id=source.channel.id,
+                source_channel_id=source_channel_id,
                 source_feature_channel_id=source_feature_channel_id,
                 target_channel_id=target.id,
                 expected_config_id=expected_config_id,
@@ -581,13 +769,80 @@ class RoomNumber(
             )
             return
 
-        async with self._delivery_lock(source.channel.id):
+        async with self._delivery_lock(source_channel_id):
             naming_succeeded = await self._apply_current_name(source.guild, config)
         if not naming_succeeded:
             await self._send_ephemeral(interaction, RENAME_PARTIAL_SUCCESS_MESSAGE)
         await self._refresh_settings(
             interaction,
             source_feature_channel_id,
+            current_view,
+        )
+
+    async def _select_source(  # noqa: PLR0911, PLR0913
+        self,
+        interaction: Interaction,
+        target_feature_channel_id: int,
+        target_channel_id: int,
+        channel_name_format: str,
+        source_channel_id: int,
+        current_view: View,
+    ) -> None:
+        if not await self._require_settings_permissions(interaction):
+            return
+        source = require_guild_channel_source(
+            interaction,
+            action="select a Room Number source",
+        )
+        selected_source = source.guild.get_channel(source_channel_id)
+        target = source.guild.get_channel(target_channel_id)
+        if not isinstance(selected_source, TextChannel):
+            await self._send_ephemeral(interaction, INVALID_SOURCE_CHANNEL_MESSAGE)
+            return
+        if not isinstance(target, TextChannel) or target.guild.id != source.guild.id:
+            await self._send_ephemeral(interaction, INVALID_TARGET_CHANNEL_MESSAGE)
+            return
+        missing_permissions = self._missing_target_permissions(source.guild, target)
+        if missing_permissions:
+            await self._send_ephemeral(
+                interaction,
+                "Bot に次の権限が必要です: " + "、".join(missing_permissions),
+            )
+            return
+        try:
+            validated_format = validate_channel_name_format(channel_name_format)
+            config = await self._persist_initial_source_selection(
+                guild_id=source.guild.id,
+                target_channel_id=target_channel_id,
+                target_feature_channel_id=target_feature_channel_id,
+                source_channel_id=selected_source.id,
+                channel_name_format=validated_format,
+            )
+        except RoomNumberFormatError as exc:
+            await self._send_ephemeral(interaction, str(exc))
+            return
+        except _StaleRoomSettingsError:
+            await self._send_ephemeral(interaction, INITIAL_SETUP_STALE_MESSAGE)
+            return
+        except _RoomChannelConflictError:
+            await self._send_ephemeral(interaction, TARGET_CONFLICT_MESSAGE)
+            return
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="room_source_selection",
+            )
+            return
+
+        async with self._delivery_lock(selected_source.id):
+            naming_succeeded = await self._apply_current_name(source.guild, config)
+        if not naming_succeeded:
+            await self._send_ephemeral(interaction, RENAME_PARTIAL_SUCCESS_MESSAGE)
+        await self._refresh_settings(
+            interaction,
+            config.feature_channel_id,
             current_view,
         )
 
@@ -616,6 +871,22 @@ class RoomNumber(
         )
         return membership, config
 
+    async def _source_channel_id_for_config(
+        self,
+        config_id: int,
+        expected_updated_at: datetime,
+    ) -> int:
+        config = await RoomNumberConfig.get_or_none(id=config_id)
+        if config is None or config.updated_at != expected_updated_at:
+            raise _StaleRoomSettingsError
+        membership = await FeatureChannel.get_or_none(
+            id=config.feature_channel_id,
+            feature_name=self.feature_name,
+        )
+        if membership is None:
+            raise _StaleRoomSettingsError
+        return membership.channel_id
+
     async def _save_channel_name_format(
         self,
         interaction: Interaction,
@@ -636,22 +907,26 @@ class RoomNumber(
             action="save the Room Number channel format",
         )
         try:
-            async with self._state_lock(source.channel.id):
+            source_channel_id = await self._source_channel_id_for_config(
+                config_id,
+                expected_updated_at,
+            )
+            async with self._state_lock(source_channel_id):
                 async with in_transaction() as connection:
                     membership, config = await self._locked_owned_config(
                         connection,
                         config_id=config_id,
                         expected_updated_at=expected_updated_at,
                         guild_id=source.guild.id,
-                        source_channel_id=source.channel.id,
+                        source_channel_id=source_channel_id,
                     )
                     config.channel_name_format = validated_format
                     await config.save(
                         using_db=connection,
                         update_fields=["channel_name_format", "updated_at"],
                     )
-                self._delivery_generations[source.channel.id] = (
-                    self._delivery_generations.get(source.channel.id, 0) + 1
+                self._delivery_generations[source_channel_id] = (
+                    self._delivery_generations.get(source_channel_id, 0) + 1
                 )
         except _StaleRoomSettingsError:
             await self._send_ephemeral(interaction, STALE_SETTINGS_MESSAGE)
@@ -665,7 +940,7 @@ class RoomNumber(
             )
             return
 
-        async with self._delivery_lock(source.channel.id):
+        async with self._delivery_lock(source_channel_id):
             naming_succeeded = await self._apply_current_name(source.guild, config)
         if not naming_succeeded:
             await self._send_ephemeral(interaction, RENAME_PARTIAL_SUCCESS_MESSAGE)
@@ -686,8 +961,12 @@ class RoomNumber(
             action="toggle the Room Number recruitment template",
         )
         try:
+            source_channel_id = await self._source_channel_id_for_config(
+                config_id,
+                expected_updated_at,
+            )
             async with (
-                self._state_lock(source.channel.id),
+                self._state_lock(source_channel_id),
                 in_transaction() as connection,
             ):
                 membership, config = await self._locked_owned_config(
@@ -695,7 +974,7 @@ class RoomNumber(
                     config_id=config_id,
                     expected_updated_at=expected_updated_at,
                     guild_id=source.guild.id,
-                    source_channel_id=source.channel.id,
+                    source_channel_id=source_channel_id,
                 )
                 config.recruitment_template_enabled = enabled
                 await config.save(
@@ -714,6 +993,61 @@ class RoomNumber(
                 exc,
                 source=source,
                 operation="room_template_toggle",
+            )
+            return
+        await self._refresh_settings(interaction, membership.id, current_view)
+
+    async def _clear_recruitment_template(
+        self,
+        interaction: Interaction,
+        config_id: int,
+        expected_updated_at: datetime,
+        current_view: View,
+    ) -> None:
+        if not await self._require_settings_permissions(interaction):
+            return
+        source = require_guild_channel_source(
+            interaction,
+            action="clear the Room Number recruitment template",
+        )
+        try:
+            source_channel_id = await self._source_channel_id_for_config(
+                config_id,
+                expected_updated_at,
+            )
+            async with (
+                self._state_lock(source_channel_id),
+                in_transaction() as connection,
+            ):
+                membership, config = await self._locked_owned_config(
+                    connection,
+                    config_id=config_id,
+                    expected_updated_at=expected_updated_at,
+                    guild_id=source.guild.id,
+                    source_channel_id=source_channel_id,
+                )
+                config.recruitment_template_channel_id = None
+                config.recruitment_template_message_id = None
+                await config.save(
+                    using_db=connection,
+                    update_fields=[
+                        "recruitment_template_channel_id",
+                        "recruitment_template_message_id",
+                        "updated_at",
+                    ],
+                )
+            self._delivery_generations[source_channel_id] = (
+                self._delivery_generations.get(source_channel_id, 0) + 1
+            )
+        except _StaleRoomSettingsError:
+            await self._send_ephemeral(interaction, STALE_SETTINGS_MESSAGE)
+            return
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="room_template_clear",
             )
             return
         await self._refresh_settings(interaction, membership.id, current_view)
@@ -745,10 +1079,45 @@ class RoomNumber(
             return False
         return True
 
+    async def _state_channel_id_for_channel(
+        self,
+        guild_id: int,
+        channel_id: int,
+    ) -> int:
+        membership = await FeatureChannel.get_or_none(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            feature_name=self.feature_name,
+        )
+        config = None
+        if membership is not None:
+            config = await RoomNumberConfig.get_or_none(
+                feature_channel_id=membership.id,
+            )
+        if config is None:
+            config = await RoomNumberConfig.get_or_none(
+                target_channel_id=channel_id,
+            )
+        if config is None:
+            return channel_id
+        source_membership = await FeatureChannel.get_or_none(
+            id=config.feature_channel_id,
+            feature_name=self.feature_name,
+        )
+        return (
+            source_membership.channel_id
+            if source_membership is not None
+            else channel_id
+        )
+
     @override
     async def _enable_channel(self, guild_id: int, channel_id: int) -> None:
+        state_channel_id = await self._state_channel_id_for_channel(
+            guild_id,
+            channel_id,
+        )
         async with (
-            self._state_lock(channel_id),
+            self._state_lock(state_channel_id),
             in_transaction() as connection,
         ):
             membership = await (
@@ -782,7 +1151,32 @@ class RoomNumber(
                 .first()
             )
             if config is None:
+                config = await (
+                    RoomNumberConfig.filter(target_channel_id=channel_id)
+                    .using_db(connection)
+                    .select_for_update()
+                    .first()
+                )
+            if config is None:
                 return
+            source_membership = await (
+                FeatureChannel.filter(
+                    id=config.feature_channel_id,
+                    guild_id=guild_id,
+                    feature_name=self.feature_name,
+                )
+                .using_db(connection)
+                .select_for_update()
+                .first()
+            )
+            if source_membership is None:
+                return
+            if not source_membership.is_enabled:
+                source_membership.is_enabled = True
+                await source_membership.save(
+                    using_db=connection,
+                    update_fields=["is_enabled", "updated_at"],
+                )
             target_membership = await (
                 FeatureChannel.filter(
                     guild_id=guild_id,
@@ -810,7 +1204,11 @@ class RoomNumber(
 
     @override
     async def _disable_channel(self, guild_id: int, channel_id: int) -> bool:
-        async with self._state_lock(channel_id):
+        state_channel_id = await self._state_channel_id_for_channel(
+            guild_id,
+            channel_id,
+        )
+        async with self._state_lock(state_channel_id):
             async with in_transaction() as connection:
                 membership = await (
                     FeatureChannel.filter(
@@ -830,8 +1228,25 @@ class RoomNumber(
                     .select_for_update()
                     .first()
                 )
+                if config is None:
+                    config = await (
+                        RoomNumberConfig.filter(target_channel_id=channel_id)
+                        .using_db(connection)
+                        .select_for_update()
+                        .first()
+                    )
                 memberships = [membership]
-                if config is not None and config.target_channel_id != channel_id:
+                if config is not None:
+                    source_membership = await (
+                        FeatureChannel.filter(
+                            id=config.feature_channel_id,
+                            guild_id=guild_id,
+                            feature_name=self.feature_name,
+                        )
+                        .using_db(connection)
+                        .select_for_update()
+                        .first()
+                    )
                     target_membership = await (
                         FeatureChannel.filter(
                             guild_id=guild_id,
@@ -842,7 +1257,13 @@ class RoomNumber(
                         .select_for_update()
                         .first()
                     )
-                    if target_membership is not None:
+                    if source_membership is not None and all(
+                        item.id != source_membership.id for item in memberships
+                    ):
+                        memberships.append(source_membership)
+                    if target_membership is not None and all(
+                        item.id != target_membership.id for item in memberships
+                    ):
                         memberships.append(target_membership)
                 for paired_membership in memberships:
                     if paired_membership.is_enabled:
@@ -851,7 +1272,7 @@ class RoomNumber(
                             using_db=connection,
                             update_fields=["is_enabled", "updated_at"],
                         )
-            self._delivery_generations.pop(channel_id, None)
+            self._delivery_generations.pop(state_channel_id, None)
             return True
 
     @override
@@ -860,7 +1281,11 @@ class RoomNumber(
         guild_id: int,
         channel_id: int,
     ) -> None:
-        async with self._state_lock(channel_id):
+        state_channel_id = await self._state_channel_id_for_channel(
+            guild_id,
+            channel_id,
+        )
+        async with self._state_lock(state_channel_id):
             async with in_transaction() as connection:
                 membership = await (
                     FeatureChannel.filter(
@@ -880,7 +1305,37 @@ class RoomNumber(
                     .select_for_update()
                     .first()
                 )
-                if config is not None and config.target_channel_id != channel_id:
+                if config is None:
+                    config = await (
+                        RoomNumberConfig.filter(target_channel_id=channel_id)
+                        .using_db(connection)
+                        .select_for_update()
+                        .first()
+                    )
+                if config is None:
+                    await (
+                        FeatureChannel.filter(
+                            id=membership.id,
+                        )
+                        .using_db(connection)
+                        .delete()
+                    )
+                else:
+                    source_membership = await (
+                        FeatureChannel.filter(
+                            id=config.feature_channel_id,
+                            guild_id=guild_id,
+                            feature_name=self.feature_name,
+                        )
+                        .using_db(connection)
+                        .select_for_update()
+                        .first()
+                    )
+                    await (
+                        RoomNumberConfig.filter(id=config.id)
+                        .using_db(connection)
+                        .delete()
+                    )
                     await (
                         FeatureChannel.filter(
                             guild_id=guild_id,
@@ -890,12 +1345,13 @@ class RoomNumber(
                         .using_db(connection)
                         .delete()
                     )
-                await (
-                    FeatureChannel.filter(id=membership.id)
-                    .using_db(connection)
-                    .delete()
-                )
-            self._delivery_generations.pop(channel_id, None)
+                    if source_membership is not None:
+                        await (
+                            FeatureChannel.filter(id=source_membership.id)
+                            .using_db(connection)
+                            .delete()
+                        )
+            self._delivery_generations.pop(state_channel_id, None)
 
     @override
     def _build_message_context(self, membership: FeatureChannel) -> FeatureChannel:
@@ -1083,6 +1539,15 @@ class RoomNumber(
                 log=self.logger,
             )
             return
+        if replaced:
+            await self._refresh_current_room_template_output(
+                message,
+                config_row,
+                UserInfo(
+                    username=interaction.user.name,
+                    display_name=interaction.user.display_name,
+                ),
+            )
         message_text = (
             MANUAL_TEMPLATE_SUCCESS_MESSAGE
             if replaced
@@ -1150,6 +1615,11 @@ class RoomNumber(
             )
             return
         if replaced:
+            await self._refresh_current_room_template_output(
+                message,
+                config_row,
+                self._message_user_info(message),
+            )
             await add_reaction_if_possible(message, "🔄", log=self.logger)
 
     async def _replace_template_pointer(
@@ -1320,7 +1790,7 @@ class RoomNumber(
         if not config_row.recruitment_template_enabled:
             return None, ()
         if config_row.recruitment_template_message_id is None:
-            return RECRUITMENT_TEMPLATE_MISSING, ()
+            return None, ()
         channel = guild.get_channel(config_row.recruitment_template_channel_id)
         if not isinstance(channel, TextChannel):
             return RECRUITMENT_TEMPLATE_UNREADABLE, ()
@@ -1345,6 +1815,68 @@ class RoomNumber(
         except RoomNumberFormatError:
             return RECRUITMENT_TEMPLATE_UNREADABLE, ()
         return rendered.preview, rendered.intent_urls
+
+    async def _refresh_current_room_template_output(
+        self,
+        message: Message,
+        config_row: RoomNumberConfig,
+        actor: UserInfo,
+    ) -> bool:
+        if message.guild is None:
+            return False
+        try:
+            fresh_config = await self._fresh_delivery_config(
+                config_row.id,
+                message.guild.id,
+                config_row.feature_channel.channel_id,
+            )
+        except SETTINGS_STORAGE_EXCEPTIONS as exc:
+            storage_error = classify_storage_exception(exc)
+            if storage_error is None:
+                raise
+            self.logger.warning(
+                "Room template refresh config lookup failed. guild=%s "
+                "channel=%s kind=%s",
+                message.guild.id,
+                config_row.feature_channel.channel_id,
+                storage_error.kind.value,
+            )
+            fresh_config = None
+        if (
+            fresh_config is None
+            or not fresh_config.recruitment_template_enabled
+            or fresh_config.room_number is None
+        ):
+            return False
+        target = message.guild.get_channel(fresh_config.target_channel_id)
+        if not isinstance(target, TextChannel) or not self._can_send_output(
+            message.guild,
+            target,
+        ):
+            return False
+        try:
+            rendered = render_recruitment_template(
+                message.content,
+                fresh_config.room_number,
+            )
+        except RoomNumberFormatError:
+            return False
+        embed = build_room_output_embed(
+            fresh_config.room_number,
+            actor,
+            template_text=rendered.preview,
+        )
+        view = build_room_output_view(rendered.intent_urls)
+        try:
+            await target.send(embed=embed, view=view)
+        except Exception:
+            self.logger.exception(
+                "Failed to send Room template refresh. guild=%s channel=%s",
+                message.guild.id,
+                target.id,
+            )
+            return False
+        return True
 
     @staticmethod
     def _can_send_output(guild: Guild, channel: TextChannel) -> bool:
@@ -1476,15 +2008,14 @@ class RoomNumber(
                 superseded=True,
             )
         fresh_config, generation = persisted
-        async with self._delivery_lock(source_channel_id):
-            return await self._deliver_room_update(
-                message,
-                fresh_config,
-                room_number,
-                actor,
-                source_channel_id,
-                generation,
-            )
+        return await self._deliver_room_update(
+            message,
+            fresh_config,
+            room_number,
+            actor,
+            source_channel_id,
+            generation,
+        )
 
     async def _deliver_room_update(  # noqa: C901, PLR0911, PLR0912, PLR0913, PLR0915
         self,
@@ -1579,19 +2110,20 @@ class RoomNumber(
 
         naming_succeeded = False
         if target_is_text:
-            if not rename_required:
-                naming_succeeded = True
-            else:
-                try:
-                    await target.edit(name=desired_name)
-                except Exception:
-                    self.logger.exception(
-                        "Failed to rename Room target. guild=%s channel=%s",
-                        guild.id,
-                        target.id,
-                    )
-                else:
+            async with self._delivery_lock(source_channel_id):
+                if not rename_required or target.name == desired_name:
                     naming_succeeded = True
+                else:
+                    try:
+                        await target.edit(name=desired_name)
+                    except Exception:
+                        self.logger.exception(
+                            "Failed to rename Room target. guild=%s channel=%s",
+                            guild.id,
+                            target.id,
+                        )
+                    else:
+                        naming_succeeded = True
         if not self._is_current_generation(source_channel_id, generation):
             await self._invalidate_output(output_message, embed)
             await self._finish_processing(message)
@@ -1634,7 +2166,7 @@ class RoomNumber(
 
         if output_message is not None and rename_required:
             if naming_succeeded:
-                remove_pending_rename_description(embed)
+                mark_room_output_rename_succeeded(embed)
             else:
                 mark_room_output_rename_failed(embed, self._bot_mention(guild))
             await self._edit_output(output_message, embed=embed, view=view)

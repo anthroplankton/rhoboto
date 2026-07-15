@@ -22,8 +22,8 @@ remain separately gated by `AGENTS.md` and the approved implementation plan.
 - Fetch and render a live recruitment-template message with five X intent
   links.
 - Support source and target as distinct channels or as the same channel.
-- Preserve one source-owned lifecycle and settings surface across both channel
-  memberships.
+- Keep source-owned config storage while making target the lifecycle and
+  settings surface.
 - Make Discord rate-limit waits and partial failures visible without implying
   that successfully persisted room state was lost.
 - Prefer the existing FeatureChannel and message-upsert architecture over a
@@ -45,7 +45,7 @@ This feature does not add:
 - old target-name restoration;
 - a rename cooldown field, hard-coded rate-limit duration, debounce service,
   background delivery worker, or startup reconciliation worker;
-- a raw template message-ID input or pointer-clear action; or
+- a raw template message-ID input; or
 - a data backfill for existing features.
 
 ## Naming
@@ -118,10 +118,10 @@ Source FeatureChannel ── owns ── RoomNumberConfig
        └──────── captures room      Target FeatureChannel
 ```
 
-- The channel where `/room_number enable` runs is the sole lifecycle and
-  settings owner, called **source**.
-- The explicitly selected channel whose name and public output are managed is
-  **target**.
+- The channel where `/room_number enable` runs is the lifecycle and settings
+  owner, called **target**.
+- The channel whose messages provide room-number input is explicitly selected
+  as **source** after the target administrator enters the channel-name format.
 - Source and target both have `room_number` FeatureChannel memberships and both
   accept automatic room messages and `部屋番号を設定`.
 - Only current target accepts automatic template capture and
@@ -131,7 +131,8 @@ Source FeatureChannel ── owns ── RoomNumberConfig
 - Apart from same-config source equals target, one guild text channel may not
   participate as source or target in another Room config. Enable and relink
   check both roles transactionally and reject ambiguous reuse ephemerally.
-- A linked target cannot own settings, disable, or hard-clear operations.
+- The source is an input channel only; lifecycle commands and settings are
+  opened from the target.
 
 ## Supported Channels and Permissions
 
@@ -141,14 +142,14 @@ Source and target must both be ordinary guild text channels
 (`ChannelType.text` / `GUILD_TEXT`).
 
 - `/room_number enable` rejects unsupported invocation channels ephemerally.
-- The target Channel Select lists only ordinary guild text channels.
+- The Source and Target Channel Selects list only ordinary guild text channels.
 - Threads, forum/media, announcement, voice/stage, and category channels are
   intentionally unsupported.
 
 ### Administrator Permissions
 
-All slash commands, settings buttons, target selects, modals, and both context
-menus require the current actor to have both:
+All slash commands, settings buttons, source/target selects, modals, and both
+context menus require the current actor to have both:
 
 - `administrator`; and
 - `manage_channels`.
@@ -164,8 +165,8 @@ selected message itself may have another author.
 
 ### Bot Target Permissions
 
-Before saving a new or relinked target, check the bot's effective permissions in
-that channel:
+Before completing initial setup or saving a relinked target, check the bot's
+effective permissions in that target channel:
 
 - View Channel;
 - Send Messages;
@@ -251,20 +252,24 @@ FeatureChannel rows is a separate, explicitly approved destructive operation.
 
 ### Initial Enable
 
-`/room_number enable` first creates the source membership and opens the settings
-flow. This is an enabled-but-unconfigured state: without a complete Room config,
-both room and template listeners remain inert.
+`/room_number enable` runs in the intended target channel and first creates its
+target membership. It then shows only `設定を開始`. This is an
+enabled-but-unconfigured state: without a complete Room config, both room and
+template listeners remain inert.
 
-The administrator must explicitly select target, including when target should
-be source itself. There is no silent self-target default. After validation, one
-transaction creates the complete config with:
+Clicking `設定を開始` opens the `チャンネル名形式を設定` modal. After the
+format is accepted, the administrator must explicitly select source, including
+when source should equal target. There is no silent self-source default. No
+Room config is persisted until the source is selected. One transaction then
+creates the complete config with:
 
-- selected target;
-- default channel format `部屋番号【{room_number}】`;
+- selected source;
+- the current target;
+- the submitted channel format;
 - null room number;
 - recruitment-template handling enabled;
 - null template pointer; and
-- the required deduplicated target membership.
+- the required deduplicated source membership.
 
 Before the first template is captured, settings show `有効（未設定）`.
 
@@ -296,13 +301,17 @@ Missing values use an explicit unset label. The template entry retains the
 stored channel/message IDs and jump link even when the source is no longer the
 current target or cannot currently be fetched.
 
-The only mutable controls are:
+The only mutable controls for a configured target are:
 
 - a Channel Select with placeholder `Targetチャンネルを選択`;
 - a `チャンネル名形式を編集` button that opens a modal; and
-- a dynamic `募集テンプレを無効化` / `募集テンプレを有効化` button.
+- a dynamic `募集テンプレを無効化` / `募集テンプレを有効化` button; and
+- when a template pointer exists, a `🗑️ ツイ募テンプレの設定を解除` button.
 
-There is no raw ID input and no pointer-clear button.
+There is no raw ID input. The pointer-clear button requires confirmation.
+
+Initial setup has a separate Source Channel Select with placeholder
+`Sourceチャンネルを選択`; it appears only after the format modal succeeds.
 
 ### Recruitment-Template Toggle
 
@@ -318,10 +327,23 @@ administrator can stage a validated pointer. Re-enabling starts using the saved
 pointer and resumes automatic capture. Re-enabling is allowed with a missing or
 currently invalid pointer so the feature can wait for a new automatic capture.
 
-Changing the pointer never renames a channel or publishes a room embed. An
-automatic replacement adds `🔄`; manual replacement replies ephemerally. To
-render the changed template immediately, explicitly resubmit the current room
-number.
+ツイ募テンプレの設定解除:
+
+- clears both saved template pointer IDs atomically;
+- keeps the automatic-handling toggle, room number, and channel-name format;
+- does not delete the original Discord message or edit existing Room embeds; and
+- when automatic handling is enabled, allows the next valid Target template to
+  restore the pointer and publish a fresh current-room embed if a room exists.
+
+The confirmation explicitly says that the original message is not deleted.
+
+Changing the pointer never persists a room number or renames a channel. After
+a valid automatic listener capture or context-menu replacement, if template
+handling is enabled and a current room exists, publish a fresh Room embed to
+the current Target using the captured message. If there is no current room,
+replace the pointer only. Automatic replacement adds `🔄`; manual replacement
+replies ephemerally. The Target intentionally accepts successive refresh
+embeds because it is dedicated to this output.
 
 ### Target Relink
 
@@ -356,12 +378,12 @@ choice.
 
 ### Soft Disable, Re-enable, and Hard Clear
 
-`/room_number disable` is source-owned. It disables both deduplicated
+`/room_number disable` is target-owned. It disables both deduplicated
 memberships while preserving the full config: room, format, target, template
 toggle, and template pointer. Both listeners and context-menu checks become
 inactive.
 
-Running `/room_number enable` again from source re-enables the existing source
+Running `/room_number enable` again from target re-enables the existing source
 and target memberships and reopens settings without target reselection.
 
 After confirmation, `/room_number disable_and_clear` deletes the config and
@@ -568,7 +590,11 @@ links open X with the complete decoded template.
 Room uses two `KeyAsyncLock` instances keyed by source channel ID:
 
 - a short **state lock** serializes fresh config reads and room writes; and
-- a longer **delivery lock** serializes target output and rename work.
+- a short **rename delivery lock** serializes target channel edits.
+
+Target output sends and final output edits are not held by the rename delivery
+lock. This lets a later output send proceed while an earlier Discord channel
+rename is waiting on a native rate limit.
 
 The cog also maintains a transient integer delivery generation per source.
 After a room save succeeds under the state lock, increment the generation and
@@ -594,19 +620,19 @@ For a valid configured automatic or manual room request:
 4. persist the canonical room;
 5. increment/capture delivery generation;
 6. release the state lock;
-7. acquire the delivery lock;
-8. reload config and generation;
-9. if the request is already stale, remove processing and stop without output;
-10. resolve target and build/fetch/validate output;
-11. send the public embed before a potentially delayed rename;
-12. skip channel edit if target already has the desired name, otherwise await
-    `channel.edit(name=...)`;
-13. reload config and generation after the Discord call;
-14. if superseded, invalidate the already-sent embed, remove processing, and
+7. reload config and generation;
+8. if the request is already stale, remove processing and stop without output;
+9. resolve target and build/fetch/validate output;
+10. send the public embed before a potentially delayed rename;
+11. acquire the rename delivery lock, skip channel edit if target already has
+    the desired name, otherwise await `channel.edit(name=...)`, then release
+    the lock;
+12. reload config and generation after the Discord call;
+13. if superseded, invalidate the already-sent embed, remove processing, and
     let the latest queued request correct target;
-15. if still latest and naming succeeded, remove the pending description and
-    transition processing to `✅`; or
-16. if still latest and naming failed, replace the description with the rename
+14. if still latest and naming succeeded, replace the pending description with
+    `チャンネル名を更新しました。` and transition processing to `✅`; or
+15. if still latest and naming failed, replace the description with the rename
     error and remove processing without an error reaction.
 
 If the same room is resubmitted after the previous operation completes, it
@@ -619,9 +645,10 @@ Do not hard-code Discord's rename limit. The locked discord.py client honors
 route headers and `retry_after`; Room awaits that native handling.
 
 An edit already issued to Discord and sleeping inside discord.py cannot be
-safely cancelled. It may apply an older room briefly. The post-edit generation
-check invalidates its output and the latest queued delivery corrects target.
-There is no background scheduler or retry clock.
+safely cancelled. It may apply an older room briefly. Later Room output sends
+and template-refresh embeds can still appear while that edit waits. The
+post-edit generation check invalidates stale output and the latest queued
+delivery corrects target. There is no background scheduler or retry clock.
 
 ### Restart Boundary
 
@@ -648,7 +675,14 @@ Discord側のチャンネル名変更回数の制限により、反映まで時�
 ```
 
 When the name is already correct, omit the description from the initial send.
-After rename succeeds, edit the same message to remove the pending description.
+After rename succeeds, edit the same message to:
+
+```text
+チャンネル名を更新しました。
+```
+
+If a template is refreshed without a room update, omit the rename status
+description because no channel rename was performed.
 Do not resend a duplicate output.
 
 When a valid template is enabled, add one field:
@@ -667,7 +701,7 @@ Add link buttons in this order:
 Use the embed's native timestamp. The footer is:
 
 ```text
-部屋番号更新：表示名（@username）
+更新者：表示名（@username）
 ```
 
 There is no honorific. Automatic capture uses the room-message author. Manual
@@ -678,12 +712,8 @@ state change.
 
 When template handling is disabled, omit both the field and buttons entirely.
 
-When enabled without a pointer, show the `ツイ募テンプレ` field with no
-buttons:
-
-```text
-募集テンプレが設定されていません。
-```
+When enabled without a pointer, omit the `ツイ募テンプレ` field and all
+buttons. There is no missing-template placeholder field.
 
 When fetch or validation fails, show the field with no X buttons:
 
@@ -785,7 +815,9 @@ not resend or persist the output ID. Target-naming success still controls `✅`.
 - validates the selected message immediately;
 - atomically replaces both pointer IDs;
 - is available even while template handling is disabled; and
-- reports exact results ephemerally without publishing a room output.
+- reports exact results ephemerally; and
+- when enabled and a current room exists, publishes a fresh current-room
+  embed to Target without renaming the channel.
 
 ## Implementation Surface
 
@@ -847,14 +879,21 @@ new Room test modules over adding broad unrelated fixtures to existing files.
 - Target channel-type and bot-permission preflight.
 - Source/target room listener and context-menu gating.
 - Target-only template capture and menu gating.
-- Template toggle, disabled manual preparation, and no pointer clearing.
+- Automatic listener and context-menu template replacement publish a fresh
+  current-room Target embed when a room exists, without renaming the channel.
+- Template toggle, disabled manual preparation, confirmed pointer clearing,
+  and automatic restoration after the next valid Target template.
 - Automatic template `🔄`, `⚠️📏`, and `⚠️🛠️` outcomes.
 - One live template fetch per room render.
-- Five button order, values, URLs, and no-buttons states.
+- Five button order, values, URLs, and no-buttons states, including omission
+  of the template field when no pointer is configured.
 - Same-name rename skip and same-room refresh.
-- Pending description before rename and edit after success/failure.
+- Pending description before rename and success/failure description after the
+  rename attempt.
 - Storage, target output, template, and rename partial-failure copy.
 - Processing/`✅` semantics.
+- Rename-only delivery locking keeps later Target embeds responsive while an
+  earlier Discord channel rename is rate-limited.
 - Two-lock latest-wins queue skipping.
 - ABA and rapid same-room generation handling.
 - In-flight supersession removes stale field/buttons and has no `✅`.
