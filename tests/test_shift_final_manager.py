@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import asynccontextmanager
 from datetime import date
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -8,6 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from utils import shift_register_manager as manager_module
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_final import (
     FinalScheduleValidationError,
@@ -16,6 +18,7 @@ from utils.shift_final import (
     parse_a1_range,
 )
 from utils.shift_register_manager import (
+    FinalScheduleImageRangeError,
     FinalScheduleReconfirmationRequired,
     ShiftRegisterManager,
 )
@@ -32,7 +35,7 @@ from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import WorksheetContractError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
 
 class FinalBatchWorksheet:
@@ -82,12 +85,16 @@ class FinalValueSheet:
         self.final_grid = final_grid if final_grid is not None else []
         self.read_error = read_error
         self.write_error = write_error
+        self.pdf_exports: list[tuple[int, str]] = []
+        self.events: list[str] | None = None
 
     async def batch_get_worksheet_values(
         self,
         worksheets: Sequence[FinalBatchWorksheet],
     ) -> dict[int, list[list[object]]]:
         self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        if self.events is not None and self.final.id in self.batch_reads[-1]:
+            self.events.append("final_values_read")
         if self.read_error is not None:
             raise self.read_error
         return {
@@ -106,6 +113,16 @@ class FinalValueSheet:
         self.batch_updates.append(copy.deepcopy(list(worksheet_requests)))
         if self.write_error is not None:
             raise self.write_error
+
+    async def export_worksheet_range_pdf(
+        self,
+        worksheet: FinalBatchWorksheet,
+        range_a1: str,
+    ) -> bytes:
+        self.pdf_exports.append((worksheet.id, range_a1))
+        if self.events is not None:
+            self.events.append("final_pdf_export")
+        return b"%PDF-test"
 
 
 def make_request() -> ScheduleUpdateRequest:
@@ -195,6 +212,158 @@ def make_manager(
         return_value=(metadata, False)
     )
     return manager
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_discovers_one_complete_value_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(
+        3,
+        "Shift Final Schedule",
+        row_count=5,
+        col_count=4,
+    )
+    sheet = FinalValueSheet(
+        draft,
+        final,
+        final_grid=[
+            [],
+            ["", '=IF(A1="", "", A1)', "", 0],
+            [],
+            ["", "", False, " "],
+        ],
+    )
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=None,
+    )
+
+    assert result == b"%PDF-test"
+    assert sheet.batch_reads == [[final.id]]
+    assert sheet.pdf_exports == [(final.id, "B2:D4")]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_uses_explicit_range_without_value_read() -> (
+    None
+):
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule", row_count=5, col_count=4)
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=parse_a1_range("B2:D4"),
+    )
+
+    assert result == b"%PDF-test"
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == [(final.id, "B2:D4")]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_empty_automatic_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[])
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(FinalScheduleImageRangeError):
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=None,
+        )
+
+    assert sheet.batch_reads == [[final.id]]
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_out_of_grid_explicit_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule", row_count=5, col_count=4)
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(FinalScheduleImageRangeError):
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=parse_a1_range("A1:E5"),
+        )
+
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_missing_final_worksheet() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, None)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(StorageError) as caught:
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=None,
+        )
+
+    assert caught.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_holds_final_lock_through_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def recording_transactions(_resources: object) -> AsyncIterator[None]:
+        events.append("worksheet_lock_enter")
+        try:
+            yield
+        finally:
+            events.append("worksheet_lock_exit")
+
+    monkeypatch.setattr(
+        manager_module,
+        "worksheet_transactions",
+        recording_transactions,
+    )
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[["value"]])
+    sheet.events = events
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=None,
+    )
+
+    assert events == [
+        "worksheet_lock_enter",
+        "final_values_read",
+        "final_pdf_export",
+        "worksheet_lock_exit",
+    ]
+    assert sheet.batch_updates == []
 
 
 @pytest.mark.asyncio

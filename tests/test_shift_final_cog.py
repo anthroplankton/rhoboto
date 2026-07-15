@@ -96,8 +96,43 @@ def test_update_schedule_from_draft_has_safe_native_length_limit() -> None:
 
 
 def test_shift_finalization_commands_do_not_require_enabled_membership() -> None:
-    assert ShiftRegister.generate_draft.checks == []
-    assert ShiftRegister.update_schedule_from_draft.checks == []
+    for command in (
+        ShiftRegister.generate_draft,
+        ShiftRegister.update_schedule_from_draft,
+        ShiftRegister.assign_schedule_role,
+        ShiftRegister.post_schedule_image,
+    ):
+        assert command.checks == []
+
+
+def test_post_schedule_image_has_native_required_status_and_destination() -> None:
+    command = ShiftRegister.post_schedule_image
+    parameters = {parameter.name: parameter for parameter in command.parameters}
+
+    assert command.name == "post_schedule_image"
+    assert str(command.description) == "Post the current Final Schedule as an image."
+    assert parameters["schedule_status"].required is True
+    assert [
+        (choice.name, choice.value) for choice in parameters["schedule_status"].choices
+    ] == [
+        ("Tentative", "tentative"),
+        ("Confirmed", "confirmed"),
+    ]
+    assert all(
+        choice._locale_name is not None  # noqa: SLF001
+        for choice in parameters["schedule_status"].choices
+    )
+    assert parameters["channel"].required is False
+    assert parameters["channel"].type.value == 7
+    assert {item.value for item in parameters["channel"].channel_types} == {
+        0,
+        5,
+        10,
+        11,
+        12,
+    }
+    assert parameters["final_schedule_range"].required is False
+    assert command.checks == []
 
 
 @pytest.mark.asyncio

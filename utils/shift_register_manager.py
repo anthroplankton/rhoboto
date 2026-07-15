@@ -60,6 +60,7 @@ from utils.shift_final import (
     ScheduleUpdateRequest,
     build_final_schedule,
     build_schedule_update_request,
+    find_final_schedule_data_range,
     parse_a1_range,
 )
 from utils.shift_register_structs import (
@@ -208,6 +209,10 @@ class DraftGenerationResult:
 
 class FinalScheduleReconfirmationRequired(Exception):  # noqa: N818
     """Raised after missing Final inputs are repaired and need reconfirmation."""
+
+
+class FinalScheduleImageRangeError(Exception):
+    """Raised when Final has no publishable in-grid image range."""
 
 
 @dataclass(frozen=True)
@@ -1780,6 +1785,41 @@ class ShiftRegisterManager(
             return _final_schedule_role_source(
                 grids[final_worksheet.id],
                 selected_range,
+            )
+
+    async def export_final_schedule_pdf(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        final_schedule_range: A1Rectangle | None,
+    ) -> bytes:
+        final_worksheet = metadata.final_schedule_worksheet.worksheet
+        if final_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+
+        selected_range = final_schedule_range
+        if selected_range is not None and (
+            selected_range.end.row > final_worksheet.row_count
+            or selected_range.end.column > final_worksheet.col_count
+        ):
+            raise FinalScheduleImageRangeError
+
+        resource = worksheet_transaction_key(
+            metadata.sheet_url,
+            final_worksheet.id,
+        )
+        async with worksheet_transactions([resource]):
+            sheet = await self.get_google_sheet()
+            if selected_range is None:
+                grids = await sheet.batch_get_worksheet_values([final_worksheet])
+                selected_range = find_final_schedule_data_range(
+                    grids[final_worksheet.id]
+                )
+                if selected_range is None:
+                    raise FinalScheduleImageRangeError
+            return await sheet.export_worksheet_range_pdf(
+                final_worksheet,
+                selected_range.a1,
             )
 
     async def _persist_final_schedule_anchor(self, anchor: str | None) -> None:

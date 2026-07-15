@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from gspread.exceptions import WorksheetNotFound
+from requests.exceptions import ConnectionError as RequestsConnectionError
 
 from utils import google_sheets as google_sheets_module
 from utils.google_sheets import BORDER_NAMES, AsyncioGspreadWorksheet, GoogleSheet
@@ -13,7 +14,7 @@ from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 
 
 class RawWorksheet:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         *,
         worksheet_id: int = 1,
@@ -21,6 +22,7 @@ class RawWorksheet:
         metadata: dict[str, object] | None = None,
         row_count: int = 100,
         col_count: int = 20,
+        is_gridlines_hidden: bool = False,
     ) -> None:
         self.id = worksheet_id
         self.title = title
@@ -29,7 +31,11 @@ class RawWorksheet:
         self.delete_calls: list[tuple[int, int | None]] = []
         self.spreadsheet_batch_update_calls: list[dict[str, object]] = []
         self.agcm = RawClientManager()
-        self.ws = RawWorksheetResource(self.spreadsheet_batch_update_calls, metadata)
+        self.ws = RawWorksheetResource(
+            self.spreadsheet_batch_update_calls,
+            metadata,
+            is_gridlines_hidden=is_gridlines_hidden,
+        )
         self.extra_attribute = "delegated"
 
     async def delete_rows(self, index: int, end_index: int | None = None) -> None:
@@ -54,8 +60,54 @@ class RawWorksheetResource:
         self,
         calls: list[dict[str, object]],
         metadata: dict[str, object] | None = None,
+        *,
+        is_gridlines_hidden: bool = False,
     ) -> None:
         self.client = RawSpreadsheetClient(calls, metadata)
+        self.is_gridlines_hidden = is_gridlines_hidden
+
+
+class RawExportResponse:
+    def __init__(self, *, ok: bool, content_type: str, content: bytes) -> None:
+        self.ok = ok
+        self.headers = {"Content-Type": content_type}
+        self.content = content
+
+
+class RawExportClient:
+    def __init__(
+        self,
+        calls: list[dict[str, object]],
+        response: RawExportResponse,
+        error: Exception | None,
+    ) -> None:
+        self.calls = calls
+        self.response = response
+        self.error = error
+
+    def request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        params: dict[str, object],
+    ) -> RawExportResponse:
+        self.calls.append({"method": method, "endpoint": endpoint, "params": params})
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class RawSpreadsheetResource:
+    id = "spreadsheet-id"
+
+    def __init__(
+        self,
+        calls: list[dict[str, object]],
+        response: RawExportResponse,
+        error: Exception | None,
+    ) -> None:
+        self.client = RawExportClient(calls, response, error)
 
 
 class RawSpreadsheetClient:
@@ -89,6 +141,8 @@ class RawSpreadsheet:
         *,
         grids: dict[int, list[list[object]]] | None = None,
         values_batch_get_response: dict[str, object] | None = None,
+        export_response: RawExportResponse | None = None,
+        export_error: Exception | None = None,
     ) -> None:
         self._worksheets = worksheets or []
         self.added_worksheets: list[dict[str, object]] = []
@@ -98,6 +152,18 @@ class RawSpreadsheet:
             "valueRanges": []
         }
         self.grids = copy.deepcopy(grids or {})
+        self.export_calls: list[dict[str, object]] = []
+        self.agcm = RawClientManager()
+        self.ss = RawSpreadsheetResource(
+            self.export_calls,
+            export_response
+            or RawExportResponse(
+                ok=True,
+                content_type="application/pdf",
+                content=b"%PDF-test",
+            ),
+            export_error,
+        )
 
     async def values_batch_get(
         self,
@@ -398,6 +464,131 @@ async def test_batch_get_worksheet_values_skips_empty_request() -> None:
 
     assert await sheet.batch_get_worksheet_values([]) == {}
     assert spreadsheet.values_batch_get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_export_worksheet_range_pdf_uses_authenticated_exact_range() -> None:
+    raw = RawWorksheet(
+        worksheet_id=42,
+        title="Final",
+        row_count=100,
+        col_count=20,
+        is_gridlines_hidden=False,
+    )
+    spreadsheet = RawSpreadsheet(
+        [raw],
+        export_response=RawExportResponse(
+            ok=True,
+            content_type="application/pdf; charset=binary",
+            content=b"%PDF-test",
+        ),
+    )
+    sheet = FakeGoogleSheet(spreadsheet)
+    worksheet = AsyncioGspreadWorksheet(raw)
+
+    result = await sheet.export_worksheet_range_pdf(worksheet, "B2:D4")
+
+    assert result == b"%PDF-test"
+    assert spreadsheet.export_calls == [
+        {
+            "method": "get",
+            "endpoint": (
+                "https://docs.google.com/spreadsheets/d/spreadsheet-id/export"
+            ),
+            "params": {
+                "format": "pdf",
+                "gid": 42,
+                "r1": 1,
+                "c1": 1,
+                "r2": 4,
+                "c2": 4,
+                "portrait": "false",
+                "fitw": "true",
+                "top_margin": 0.1,
+                "bottom_margin": 0.1,
+                "left_margin": 0.1,
+                "right_margin": 0.1,
+                "sheetnames": "false",
+                "printtitle": "false",
+                "pagenum": "UNDEFINED",
+                "fzr": "false",
+                "gridlines": "true",
+                "attachment": "true",
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_export_worksheet_range_pdf_reflects_hidden_gridlines() -> None:
+    raw = RawWorksheet(worksheet_id=42, is_gridlines_hidden=True)
+    spreadsheet = RawSpreadsheet([raw])
+    worksheet = AsyncioGspreadWorksheet(raw)
+
+    assert worksheet.is_gridlines_hidden is True
+    await FakeGoogleSheet(spreadsheet).export_worksheet_range_pdf(worksheet, "A1:A1")
+
+    assert spreadsheet.export_calls[0]["params"]["gridlines"] == "false"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        RawExportResponse(
+            ok=False,
+            content_type="application/pdf",
+            content=b"%PDF-error",
+        ),
+        RawExportResponse(ok=True, content_type="text/html", content=b"error"),
+        RawExportResponse(ok=True, content_type="application/pdf", content=b""),
+    ],
+)
+async def test_export_worksheet_range_pdf_rejects_invalid_response(
+    response: RawExportResponse,
+) -> None:
+    raw = RawWorksheet(worksheet_id=42)
+    sheet = FakeGoogleSheet(RawSpreadsheet([raw], export_response=response))
+
+    with pytest.raises(GoogleSheetsError) as error:
+        await sheet.export_worksheet_range_pdf(
+            AsyncioGspreadWorksheet(raw),
+            "A1:B2",
+        )
+
+    assert error.value.kind is GoogleSheetsErrorKind.UNKNOWN
+    assert error.value.operation == "export_worksheet"
+
+
+@pytest.mark.asyncio
+async def test_export_worksheet_range_pdf_classifies_connection_failure_safely(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    raw = RawWorksheet(worksheet_id=42)
+    sheet = FakeGoogleSheet(
+        RawSpreadsheet(
+            [raw],
+            export_error=RequestsConnectionError("private response content"),
+        )
+    )
+
+    with pytest.raises(GoogleSheetsError) as error:
+        await sheet.export_worksheet_range_pdf(
+            AsyncioGspreadWorksheet(raw),
+            "A1:B2",
+        )
+
+    assert error.value.kind is GoogleSheetsErrorKind.TRANSIENT
+    assert error.value.operation == "export_worksheet"
+    log_text = caplog.text
+    for private_value in (
+        "docs.google.com",
+        "spreadsheet-id",
+        "42",
+        "r1",
+        "private response content",
+    ):
+        assert private_value not in log_text
 
 
 @pytest.mark.asyncio

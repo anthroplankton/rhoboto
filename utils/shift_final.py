@@ -216,6 +216,39 @@ def parse_a1_range(value: str) -> A1Rectangle:
     return A1Rectangle(start=start, end=end)
 
 
+def find_final_schedule_data_range(
+    grid: Sequence[Sequence[object]],
+) -> A1Rectangle | None:
+    min_row: int | None = None
+    min_column: int | None = None
+    max_row = 0
+    max_column = 0
+
+    for row, values in enumerate(grid, start=1):
+        for column, value in enumerate(values, start=1):
+            if value is None or value == "":
+                continue
+            min_row = row if min_row is None else min(min_row, row)
+            min_column = column if min_column is None else min(min_column, column)
+            max_row = max(max_row, row)
+            max_column = max(max_column, column)
+
+    if min_row is None or min_column is None:
+        return None
+
+    start = A1Cell(
+        row=min_row,
+        column=min_column,
+        a1=f"{_column_label(min_column)}{min_row}",
+    )
+    end = A1Cell(
+        row=max_row,
+        column=max_column,
+        a1=f"{_column_label(max_column)}{max_row}",
+    )
+    return A1Rectangle(start=start, end=end)
+
+
 def format_event_day(value: date, pattern: str) -> str:
     if not isinstance(pattern, str):
         raise FinalScheduleInputError

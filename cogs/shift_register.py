@@ -7,7 +7,16 @@ from datetime import UTC, datetime
 from io import BytesIO
 from typing import TYPE_CHECKING, override
 
-from discord import File, HTTPException, Role, User, app_commands
+from discord import (
+    File,
+    Forbidden,
+    HTTPException,
+    Role,
+    TextChannel,
+    Thread,
+    User,
+    app_commands,
+)
 from discord.utils import escape_markdown, escape_mentions
 
 from bot import config
@@ -58,6 +67,7 @@ from utils.shift_final import (
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     AutoCloseDeadlineNotFutureError,
+    FinalScheduleImageRangeError,
     FinalScheduleReconfirmationRequired,
     FinalScheduleRoleSource,
     ScheduleUpdateResult,
@@ -75,6 +85,11 @@ from utils.shift_register_structs import (
 from utils.shift_register_timeline import (
     build_shift_timeline_template_values,
     render_shift_timeline_announcement_messages,
+)
+from utils.shift_schedule_image import (
+    ScheduleImageRenderError,
+    ScheduleImageTooLargeError,
+    render_schedule_pdf_to_png,
 )
 from utils.shift_schedule_role import (
     ScheduleRolePlan,
@@ -117,6 +132,29 @@ _SHIFT_REPORT_SECTION_PREFIXES = (
 )
 _MAX_BMP_CODE_POINT = 0xFFFF
 _FINAL_CONTRACT_VALUE_LIMIT = 160
+_SCHEDULE_IMAGE_FILENAMES = {
+    "tentative": "shift-schedule-tentative.png",
+    "confirmed": "shift-schedule-confirmed.png",
+}
+
+
+def _can_post_schedule_image(
+    channel: TextChannel | Thread,
+    member: Member,
+) -> bool:
+    permissions = channel.permissions_for(member)
+    can_send = (
+        permissions.send_messages_in_threads
+        if isinstance(channel, Thread)
+        else permissions.send_messages
+    )
+    return can_send and permissions.attach_files
+
+
+def _schedule_image_permission_label(channel: TextChannel | Thread) -> str:
+    if isinstance(channel, Thread):
+        return "Send Messages in Threads 與 Attach Files"
+    return "Send Messages 與 Attach Files"
 
 
 def _discord_content_length(content: str) -> int:
@@ -1490,6 +1528,152 @@ class ShiftRegister(
     )
     async def announce_guide(self, interaction: Interaction) -> None:
         await self.send_guide_message(interaction)
+
+    @app_commands.command(
+        name="post_schedule_image",
+        description="Post the current Final Schedule as an image.",
+    )
+    @app_commands.describe(
+        schedule_status="Schedule status used in the attachment filename.",
+        channel="Destination channel; defaults to the current channel.",
+        final_schedule_range=("Optional Final Schedule rectangle, for example A1:J30."),
+    )
+    @app_commands.choices(
+        schedule_status=[
+            app_commands.Choice(
+                name=app_commands.locale_str("Tentative"),
+                value="tentative",
+            ),
+            app_commands.Choice(
+                name=app_commands.locale_str("Confirmed"),
+                value="confirmed",
+            ),
+        ]
+    )
+    async def post_schedule_image(  # noqa: C901, PLR0911, PLR0912
+        self,
+        interaction: Interaction,
+        schedule_status: str,
+        channel: TextChannel | Thread | None = None,
+        final_schedule_range: str | None = None,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        source = require_guild_channel_source(
+            interaction,
+            action="post Final Schedule image",
+        )
+        try:
+            selected_range = (
+                parse_a1_range(final_schedule_range)
+                if final_schedule_range is not None
+                else None
+            )
+            destination = channel or source.channel
+            if not isinstance(destination, (TextChannel, Thread)):
+                await interaction.edit_original_response(
+                    content=("⚠️ 請指定文字頻道或討論串作為發布目的地；未發布圖片。")
+                )
+                return
+
+            bot_member = source.guild.me
+            if bot_member is None:
+                raise RuntimeError  # noqa: TRY301
+            if not _can_post_schedule_image(destination, bot_member):
+                await interaction.edit_original_response(
+                    content=(
+                        f"⚠️ Bot 無法在 {destination.mention} 發布班表圖片；"
+                        f"需要 {_schedule_image_permission_label(destination)} 權限。"
+                    )
+                )
+                return
+
+            context = await self._get_shift_finalization_context_or_none(source)
+            if context is None:
+                await self._send_missing_register_config_followup(interaction)
+                return
+
+            async with fresh_shift_channel_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ):
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                pdf_bytes = await context.manager.export_final_schedule_pdf(
+                    metadata,
+                    final_schedule_range=selected_range,
+                )
+
+            png_bytes = await asyncio.to_thread(
+                render_schedule_pdf_to_png,
+                pdf_bytes,
+            )
+            if len(png_bytes) > source.guild.filesize_limit:
+                raise ScheduleImageTooLargeError  # noqa: TRY301
+        except FinalScheduleInputError:
+            await interaction.edit_original_response(
+                content=(
+                    f"⚠️ {config.CONFUSED_EMOJI} Final Schedule Range "
+                    "格式無效，未發布圖片。"
+                )
+            )
+            return
+        except SheetConfigNotFoundError:
+            await self._send_missing_register_config_followup(interaction)
+            return
+        except FinalScheduleImageRangeError:
+            await interaction.edit_original_response(
+                content=(
+                    "⚠️📏 Final Schedule 沒有可發布的資料範圍，"
+                    "或指定範圍超出 worksheet；未發布圖片。"
+                )
+            )
+            return
+        except ScheduleImageTooLargeError:
+            await interaction.edit_original_response(
+                content=(
+                    "⚠️ 班表圖片過大，請指定較小的 Final Schedule Range；未發布圖片。"
+                )
+            )
+            return
+        except ScheduleImageRenderError:
+            await interaction.edit_original_response(
+                content="⚠️🚧 班表圖片產生失敗，未發布圖片。"
+            )
+            return
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_post_schedule_image",
+            )
+            return
+
+        try:
+            message = await destination.send(
+                file=File(
+                    BytesIO(png_bytes),
+                    filename=_SCHEDULE_IMAGE_FILENAMES[schedule_status],
+                )
+            )
+        except (Forbidden, HTTPException):
+            await interaction.edit_original_response(
+                content=("⚠️🛠️ Discord 無法發布班表圖片，未建立圖片訊息。")
+            )
+            return
+
+        try:
+            await interaction.edit_original_response(content=message.jump_url)
+        except HTTPException:
+            self.logger.warning(
+                "Posted schedule image but failed to edit success response. "
+                "operation=%s guild=%s channel=%s message=%s",
+                "shift_register_post_schedule_image",
+                source.guild.id,
+                destination.id,
+                message.id,
+            )
 
     @app_commands.command(
         name="update_schedule_from_draft",

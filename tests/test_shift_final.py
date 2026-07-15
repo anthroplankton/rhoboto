@@ -18,6 +18,7 @@ from utils.shift_final import (
     ScheduleUpdateRequest,
     build_final_schedule,
     build_schedule_update_request,
+    find_final_schedule_data_range,
     format_event_day,
     parse_a1_cell,
     parse_a1_range,
@@ -91,6 +92,32 @@ def test_parse_a1_range_rejects_unbounded_qualified_or_reversed_input(
 ) -> None:
     with pytest.raises(FinalScheduleInputError):
         parse_a1_range(raw)
+
+
+@pytest.mark.parametrize(
+    ("grid", "expected"),
+    [
+        (
+            [
+                [],
+                ["", '=IF(A1="", "", A1)', "", 0],
+                [],
+                ["", "", False, " "],
+                ["", "", ""],
+            ],
+            "B2:D4",
+        ),
+        ([[None, ""], []], None),
+        ([], None),
+    ],
+)
+def test_find_final_schedule_data_range_uses_physical_values_and_formulas(
+    grid: list[list[object]],
+    expected: str | None,
+) -> None:
+    result = find_final_schedule_data_range(grid)
+
+    assert (result.a1 if result is not None else None) == expected
 
 
 def test_final_request_uses_db_axis_and_exact_rectangles() -> None:
