@@ -3,7 +3,11 @@ from __future__ import annotations
 # ruff: noqa: RUF001
 import json
 
-from utils.shift_draft_prompt import build_shift_draft_llm_prompt
+from utils.shift_draft_prompt import (
+    ShiftDraftPromptBaselineSource,
+    ShiftDraftPromptRunner,
+    build_shift_draft_llm_prompt,
+)
 from utils.shift_register_structs import Shift
 from utils.shift_scheduler import (
     DraftSchedule,
@@ -93,7 +97,24 @@ def test_prompt_contains_complete_snapshot_metrics_and_fixed_contract() -> None:
     assert data["recruitment_time_range"] == "4-6・7-8"
     assert data["recruitment_hours"] == ["4-5", "5-6", "7-8"]
     assert data["gap_hours"] == ["6-7"]
-    assert data["fixed_runner"] == "Runner"
+    assert data["baseline_source"] == "bot_generated"
+    assert data["runners_by_hour"] == [
+        {
+            "JST": "4-5",
+            "discord_username": None,
+            "canonical_name": "Runner",
+        },
+        {
+            "JST": "5-6",
+            "discord_username": None,
+            "canonical_name": "Runner",
+        },
+        {
+            "JST": "7-8",
+            "discord_username": None,
+            "canonical_name": "Runner",
+        },
+    ]
     assert data["encore_power_threshold"] == 35
     assert data["administrator_requirements"] == administrator_requirements
 
@@ -110,12 +131,13 @@ def test_prompt_contains_complete_snapshot_metrics_and_fixed_contract() -> None:
     assert participants["carol"]["team_registration"] == "unregistered"
     assert participants["carol"]["main_isv"] is None
 
-    rows = data["bot_baseline"]["rows"]
+    rows = data["schedule_baseline"]["rows"]
     assert rows[0]["アンコ"] == "Same ⟨@alice⟩"
     assert rows[0]["baseline_unassigned"] == ["Mina ⟨@fake_name⟩ ⟨@carol⟩"]
     assert rows[2] == {
         "JST": "6-7",
         "is_recruitment_hour": False,
+        "ランナー": "",
         "アンコ": "",
         "本走①": "",
         "本走②": "",
@@ -126,7 +148,7 @@ def test_prompt_contains_complete_snapshot_metrics_and_fixed_contract() -> None:
 
     metrics = {
         item["discord_username"]: item
-        for item in data["bot_baseline"]["participant_metrics"]
+        for item in data["schedule_baseline"]["participant_metrics"]
     }
     assert metrics["alice"] == {
         "discord_username": "alice",
@@ -190,14 +212,21 @@ def test_prompt_identifies_runner_entry_with_exact_canonical_name() -> None:
 
     data = prompt_data(prompt)
     participants = {item["discord_username"]: item for item in data["participants"]}
-    assert data["fixed_runner"] == "Same ⟨@alice⟩"
-    assert data["fixed_runner_discord_username"] == "alice"
+    assert data["baseline_source"] == "bot_generated"
+    assert data["runners_by_hour"] == [
+        {
+            "JST": "4-5",
+            "discord_username": "alice",
+            "canonical_name": "Same ⟨@alice⟩",
+        }
+    ]
     assert participants["alice"]["canonical_name"] == "Same ⟨@alice⟩"
     assert participants["alice"]["original_message"] == "4-5／Runner 也有備考"
     assert participants["alice"]["is_fixed_runner"] is True
     assert participants["bob"]["canonical_name"] == "Same ⟨@bob⟩"
     assert participants["bob"]["is_fixed_runner"] is False
-    assert "`is_fixed_runner` 為 true 的參加者就是固定 Runner" in prompt
+    assert "`runners_by_hour` 是逐時固定 Runner" in prompt
+    assert "`is_fixed_runner` 為 true 的參加者就是固定 Runner" not in prompt
 
 
 def test_prompt_marks_unavailable_team_source_without_guessing() -> None:
@@ -257,7 +286,90 @@ def test_prompt_requests_blank_rows_and_shortage_for_zero_participants() -> None
     data = prompt_data(prompt)
     assert data["team_source_available"] is True
     assert data["participants"] == []
-    assert data["bot_baseline"]["participant_metrics"] == []
+    assert data["schedule_baseline"]["participant_metrics"] == []
     assert data["row_count"] == 2
     assert "participants 為空時，輸出全部留白的 2 列" in prompt
     assert "明確報告人力完全不足" in prompt
+
+
+def test_prompt_preserves_current_sheet_errors_and_row_local_runners() -> None:
+    shifts = [
+        Shift(
+            username="alice",
+            display_name="Alice",
+            original_message="4-6／不可連續超過 2 小時",
+            slots={4, 5},
+        ),
+        Shift(
+            username="bob",
+            display_name="Bob",
+            original_message="4-5／希望本走",
+            slots={4},
+        ),
+    ]
+    schedule = DraftSchedule(
+        runner=None,
+        hours=[4, 5, 6],
+        assignments=[
+            HourShiftAssignment(
+                4,
+                {"honso_1": "alice", "standby": "alice"},
+            ),
+            HourShiftAssignment(5, {"encore": "bob"}),
+            HourShiftAssignment(6, {"honso_2": "alice"}),
+        ],
+        display_names={"alice": "Alice", "bob": "Bob"},
+    )
+
+    prompt = build_shift_draft_llm_prompt(
+        schedule=schedule,
+        shifts=shifts,
+        team_profiles={
+            "alice": DraftTeamProfile(main_isv=200, main_power=40),
+            "bob": DraftTeamProfile(main_isv=180, main_power=30),
+        },
+        recruitment_slots={4, 5},
+        recruitment_time_range="4-6",
+        encore_power_threshold=35,
+        administrator_requirements="修正目前 Draft 的錯誤",
+        baseline_source=ShiftDraftPromptBaselineSource.CURRENT_SHEET_DRAFT,
+        runners_by_hour={
+            4: ShiftDraftPromptRunner("bob", "Bob"),
+            5: ShiftDraftPromptRunner("alice", "Alice"),
+        },
+    )
+
+    data = prompt_data(prompt)
+    assert data["baseline_source"] == "current_sheet_draft"
+    assert data["runners_by_hour"] == [
+        {
+            "JST": "4-5",
+            "discord_username": "bob",
+            "canonical_name": "Bob",
+        },
+        {
+            "JST": "5-6",
+            "discord_username": "alice",
+            "canonical_name": "Alice",
+        },
+    ]
+    rows = data["schedule_baseline"]["rows"]
+    assert rows[0]["ランナー"] == "Bob"
+    assert rows[0]["本走①"] == rows[0]["待機"] == "Alice"
+    assert rows[1]["ランナー"] == "Alice"
+    assert rows[1]["アンコ"] == "Bob"
+    assert rows[2]["ランナー"] == ""
+    assert rows[2]["本走②"] == "Alice"
+    metrics = {
+        item["discord_username"]: item
+        for item in data["schedule_baseline"]["participant_metrics"]
+    }
+    assert metrics["alice"]["total_hours"] == 2
+    assert metrics["alice"]["longest_consecutive_hours"] == 1
+    participants = {item["discord_username"]: item for item in data["participants"]}
+    assert participants["alice"]["runner_hours"] == ["5-6"]
+    assert participants["bob"]["runner_hours"] == ["4-5"]
+    assert participants["alice"]["is_fixed_runner"] is False
+    assert "目前 Shift Draft" in prompt
+    assert "先檢查目前 baseline 的錯誤" in prompt
+    assert "Runner 只限制該時段" in prompt

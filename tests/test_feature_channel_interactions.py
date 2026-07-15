@@ -58,7 +58,10 @@ from cogs.shift import Shift
 from cogs.shift_register import (
     ShiftRegister,
     ShiftReportAssignment,
+    _format_draft_prompt_validation_error,
     _format_generate_draft_confirmation,
+    _format_generate_prompt_from_draft_confirmation,
+    _format_generate_prompt_from_draft_report,
     _format_shift_assignment_section,
     _replace_with_shift_report,
     _split_shift_report,
@@ -96,6 +99,10 @@ from utils.shift_register_manager import (
     TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING,
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftGenerationResult,
+    DraftPromptGenerationResult,
+    DraftPromptValidationError,
+    DraftPromptValidationIssue,
+    DraftPromptValidationKind,
     ShiftDeadlineExecution,
     ShiftRegisterManager,
     ShiftTimelineScheduleChange,
@@ -332,6 +339,101 @@ def test_generate_draft_confirmation_formats_missing_team_source(
 
     assert expected in content
     assert "[Team Summary]" not in content
+
+
+def test_generate_prompt_from_draft_has_no_command_parameters() -> None:
+    assert ShiftRegister.generate_prompt_from_draft.name == (
+        "generate_prompt_from_draft"
+    )
+    assert ShiftRegister.generate_prompt_from_draft.parameters == []
+
+
+def test_generate_prompt_from_draft_confirmation_is_read_only_and_not_pending() -> None:
+    content = _format_generate_prompt_from_draft_confirmation(
+        RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        TeamSourceStatus.AVAILABLE,
+        "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+    )
+
+    assert "更新 [Team Summary]" in content
+    assert "只讀取 [Shift Draft]" in content
+    assert "不會覆寫或變更" in content
+    assert "Runner（`B` 欄）" in content
+    assert "閾值（`L` 欄）" in content
+    assert "募集時間【4-6】" in content
+    assert "‼️" not in content
+    assert "🔄" not in content
+
+
+def test_draft_prompt_validation_report_lists_every_cell_and_escapes_values() -> None:
+    report = _format_draft_prompt_validation_error(
+        DraftPromptValidationError(
+            (
+                DraftPromptValidationIssue(
+                    DraftPromptValidationKind.DRAFT_AXIS,
+                    "A2",
+                    "4-5",
+                    "5-6",
+                ),
+                DraftPromptValidationIssue(
+                    DraftPromptValidationKind.SUPPORTER_IDENTITY,
+                    "C2",
+                    "Shift Entry 的完整 canonical name",
+                    "<@123> **unknown**",
+                ),
+            )
+        )
+    )
+
+    assert report.startswith("### ⚠️📏 LLM 排班 prompt 未產生")
+    assert "`A2`" in report
+    assert "`C2`" in report
+    assert "<@123>" not in report
+    assert "未更新 Team Summary" in report
+    assert "Shift Draft 保持不變" in report
+
+
+@pytest.mark.parametrize(
+    ("status", "summary_url", "warning", "expected_marker"),
+    [
+        (
+            TeamSourceStatus.AVAILABLE,
+            "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+            None,
+            "🔄 已更新 [Team Summary]",
+        ),
+        (
+            TeamSourceStatus.UNSET,
+            None,
+            TEAM_SOURCE_UNSET_DRAFT_WARNING,
+            TEAM_SOURCE_UNSET_DRAFT_WARNING,
+        ),
+    ],
+)
+def test_generate_prompt_from_draft_report_uses_completed_state_markers(
+    status: TeamSourceStatus,
+    summary_url: str | None,
+    warning: str | None,
+    expected_marker: str,
+) -> None:
+    report = _format_generate_prompt_from_draft_report(
+        DraftPromptGenerationResult(
+            llm_prompt="prompt",
+            encore_power_threshold=35,
+            team_source_status=status,
+            team_source_warning=warning,
+            team_summary_url=summary_url,
+        ),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+    )
+
+    assert report.startswith("### ✅ LLM 排班 prompt 已產生")
+    assert "`35`" in report
+    assert expected_marker in report
+    assert "👀 已讀取 [Shift Draft]" in report
+    assert "未修改" in report
+    assert ("🔄" in report) is (summary_url is not None)
 
 
 def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
@@ -1043,6 +1145,428 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     assert interaction.original_response_edits[-1] == (
         "⚠️ 募集時段設定已變更，未變更 Shift Draft；請重新執行 command。",
         {"view": None},
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_confirms_refresh_and_attaches_one_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+    )
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, str]:
+            events.append("destination")
+            return (
+                TeamSourceStatus.AVAILABLE,
+                "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+            )
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            events.append("fresh")
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            events.append("sheet")
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            _metadata: object,
+            *,
+            member_by_names: dict[str, object],
+            administrator_requirements: str,
+        ) -> DraftPromptGenerationResult:
+            events.append("generate")
+            assert list(member_by_names) == ["carol"]
+            assert administrator_requirements == "Carol 最多兩小時"
+            return DraftPromptGenerationResult(
+                llm_prompt="prompt body",
+                encore_power_threshold=36,
+                team_source_status=TeamSourceStatus.AVAILABLE,
+                team_source_warning=None,
+                team_summary_url=(
+                    "https://docs.google.com/spreadsheets/d/team/edit#gid=333"
+                ),
+            )
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = "Carol 最多兩小時"
+
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+            destructive: bool,
+        ) -> None:
+            assert requesting_user_id == 333
+            assert destination_label == "目前 Shift Draft"
+            assert destination_url.endswith("#gid=222")
+            assert destructive is False
+
+        async def wait(self) -> None:
+            events.append("wait")
+
+    @asynccontextmanager
+    async def recording_lock(_channel_id: int) -> object:
+        events.append("lock")
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = recording_lock
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction(
+        guild=SimpleNamespace(
+            id=111,
+            members=[
+                SimpleNamespace(
+                    name="carol",
+                    display_name="Carol",
+                    roles=[],
+                )
+            ],
+        )
+    )
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert events == [
+        "destination",
+        "wait",
+        "lock",
+        "fresh",
+        "destination",
+        "sheet",
+        "generate",
+    ]
+    confirmation, kwargs = interaction.original_response_edits[0]
+    assert "只讀取 [Shift Draft]" in confirmation
+    assert kwargs["view"].__class__ is ConfirmView
+    assert len(interaction.followup.messages) == 1
+    report, send_kwargs = interaction.followup.messages[0]
+    assert "### ✅ LLM 排班 prompt 已產生" in report
+    assert "🔄 已更新 [Team Summary]" in report
+    assert "👀 已讀取 [Shift Draft]" in report
+    assert send_kwargs["ephemeral"] is True
+    attachment = send_kwargs["file"]
+    assert isinstance(attachment, File)
+    assert attachment.filename == "shift-draft-llm-prompt.txt"
+    attachment.fp.seek(0)
+    assert attachment.fp.read().decode("utf-8") == "prompt body"
+    assert "files" not in send_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmation", [False, None])
+async def test_generate_prompt_from_draft_cancel_or_timeout_skips_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    confirmation: bool | None,
+) -> None:
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def fetch_google_sheets_metadata(self) -> None:
+            message = "Sheets must not be accessed before confirmation"
+            raise AssertionError(message)
+
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = confirmation
+        administrator_requirements = "discarded"
+
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["destructive"] is False
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert interaction.followup.messages == []
+    if confirmation is None:
+        assert interaction.original_response_edits[-1] == (
+            ("✖️ 確認逾時，未更新 Team Summary、未產生 prompt；Shift Draft 保持不變。"),
+            {"view": None},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_settings_drift_stops_before_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 6}],
+                sheet_url=initial.sheet_url,
+                draft_worksheet_id=222,
+            )
+
+        async def fetch_google_sheets_metadata(self) -> None:
+            message = "drift must stop before Sheets"
+            raise AssertionError(message)
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=initial)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert interaction.followup.messages == []
+    assert interaction.original_response_edits[-1] == (
+        (
+            "⚠️ 募集時段或 Sheet 目的地已變更，未更新 Team Summary、"
+            "未產生 prompt；Shift Draft 保持不變。請重新執行 command。"
+        ),
+        {"view": None},
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_validation_sends_no_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise DraftPromptValidationError(
+                (
+                    DraftPromptValidationIssue(
+                        DraftPromptValidationKind.SUPPORTER_IDENTITY,
+                        "C2",
+                        "Shift Entry 的完整 canonical name",
+                        "<@123>",
+                    ),
+                )
+            )
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    combined = "\n".join(
+        content or "" for content, _kwargs in interaction.followup.messages
+    )
+    assert "`C2`" in combined
+    assert "<@123>" not in combined
+    assert all(
+        "file" not in kwargs and "files" not in kwargs
+        for _content, kwargs in interaction.followup.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_storage_failure_routes_without_attachment(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+    failure = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise failure
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    routed: list[tuple[Exception, str]] = []
+
+    async def record_storage_error(
+        _interaction: object,
+        error: Exception,
+        *,
+        source: object,
+        operation: str,
+    ) -> None:
+        assert source is not None
+        routed.append((error, operation))
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject._send_interaction_storage_error_or_raise = record_storage_error
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert routed == [(failure, "shift_register_generate_prompt_from_draft")]
+    assert interaction.followup.messages == []
+    assert all(
+        "file" not in kwargs and "files" not in kwargs
+        for _content, kwargs in interaction.original_response_edits
     )
 
 

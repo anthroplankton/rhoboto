@@ -166,13 +166,14 @@ class GenerateShiftScheduleConfirmView(View):
         destination_label: str,
         destination_url: str,
         timeout: float = 20.0,
+        destructive: bool = True,
     ) -> None:
         super().__init__(timeout=timeout)
         self.requesting_user_id = requesting_user_id
         self.destination_label = destination_label
         self.destination_url = destination_url
         self.value: bool | None = None
-        self.add_item(GenerateShiftScheduleConfirmButton())
+        self.add_item(GenerateShiftScheduleConfirmButton(destructive=destructive))
         self.add_item(GenerateShiftScheduleCancelButton())
 
     async def authorize(self, interaction: Interaction) -> bool:
@@ -190,8 +191,11 @@ class GenerateShiftScheduleConfirmView(View):
 
 
 class GenerateShiftScheduleConfirmButton(Button):
-    def __init__(self) -> None:
-        super().__init__(label="確認生成", style=ButtonStyle.danger)
+    def __init__(self, *, destructive: bool) -> None:
+        super().__init__(
+            label="確認生成",
+            style=ButtonStyle.danger if destructive else ButtonStyle.primary,
+        )
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
@@ -239,12 +243,14 @@ class GenerateShiftDraftConfirmView(GenerateShiftScheduleConfirmView):
         requesting_user_id: int,
         destination_label: str,
         destination_url: str,
+        destructive: bool = True,
     ) -> None:
         super().__init__(
             requesting_user_id=requesting_user_id,
             destination_label=destination_label,
             destination_url=destination_url,
             timeout=300.0,
+            destructive=destructive,
         )
         self.administrator_requirements = ""
         self.add_item(GenerateShiftDraftRequirementsButton())

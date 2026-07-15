@@ -4071,6 +4071,27 @@ def make_draft_confirm_view() -> GenerateShiftDraftConfirmView:
     )
 
 
+def test_generate_draft_confirmation_can_select_primary_without_changing_default() -> (
+    None
+):
+    default_view = make_draft_confirm_view()
+    primary_view = GenerateShiftDraftConfirmView(
+        requesting_user_id=333,
+        destination_label="目前 Shift Draft",
+        destination_url="https://sheet.example#gid=222",
+        destructive=False,
+    )
+
+    assert child_with_label(default_view, "確認生成").style is ButtonStyle.danger
+    assert child_with_label(primary_view, "確認生成").style is ButtonStyle.primary
+    assert primary_view.timeout == 300.0
+    assert [child.label for child in primary_view.children] == [
+        "確認生成",
+        "取消",
+        "填寫 LLM 排班需求",
+    ]
+
+
 def test_generate_draft_view_has_requirements_control_and_draft_only_timeout() -> None:
     draft_view = make_draft_confirm_view()
     shared_view = GenerateShiftScheduleConfirmView(

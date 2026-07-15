@@ -2,6 +2,8 @@ from __future__ import annotations
 
 # ruff: noqa: RUF001
 import json
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from utils.shift_register_structs import DraftWorksheetContent, Shift
@@ -30,6 +32,17 @@ _SLOT_LABELS = (
     (HONSO_SUPPORTER_SLOTS[2], DraftWorksheetContent.HONSO_COLUMNS[2]),
     (STANDBY_SUPPORTER_SLOT, DraftWorksheetContent.STANDBY_COLUMN),
 )
+
+
+class ShiftDraftPromptBaselineSource(StrEnum):
+    BOT_GENERATED = "bot_generated"
+    CURRENT_SHEET_DRAFT = "current_sheet_draft"
+
+
+@dataclass(frozen=True)
+class ShiftDraftPromptRunner:
+    discord_username: str | None
+    canonical_name: str
 
 
 def _profile_data(
@@ -66,21 +79,39 @@ def _display_name(schedule: DraftSchedule, username: str) -> str:
     return schedule.display_names.get(username, username)
 
 
+def _runners_by_hour(
+    schedule: DraftSchedule,
+    recruitment_slots: set[int],
+    *,
+    runner_username: str | None,
+    supplied: Mapping[int, ShiftDraftPromptRunner] | None,
+) -> dict[int, ShiftDraftPromptRunner]:
+    if supplied is not None:
+        return dict(supplied)
+    if schedule.runner is None:
+        return {}
+    runner = ShiftDraftPromptRunner(runner_username, schedule.runner)
+    return {hour: runner for hour in schedule.hours if hour in recruitment_slots}
+
+
 def _baseline_rows(
     schedule: DraftSchedule,
     recruitment_slots: set[int],
+    runners: Mapping[int, ShiftDraftPromptRunner],
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for assignment in schedule.assignments:
         active = assignment.hour in recruitment_slots
+        runner = runners.get(assignment.hour)
         row: dict[str, object] = {
             "JST": hour_label(assignment.hour),
             "is_recruitment_hour": active,
+            DraftWorksheetContent.RUNNER_COLUMN: (
+                runner.canonical_name if runner is not None else ""
+            ),
         }
         for slot, label in _SLOT_LABELS:
-            username = (
-                assignment.supporter_usernames_by_slot.get(slot) if active else None
-            )
+            username = assignment.supporter_usernames_by_slot.get(slot)
             row[label] = (
                 _display_name(schedule, username) if username is not None else ""
             )
@@ -99,11 +130,7 @@ def _baseline_rows(
 def _assigned_slot(
     assignment: HourShiftAssignment,
     username: str,
-    *,
-    active: bool,
 ) -> str | None:
-    if not active:
-        return None
     return next(
         (
             slot
@@ -116,12 +143,10 @@ def _assigned_slot(
 
 def _baseline_metrics(
     schedule: DraftSchedule,
-    recruitment_slots: set[int],
 ) -> list[dict[str, object]]:
     usernames = {
         username
         for assignment in schedule.assignments
-        if assignment.hour in recruitment_slots
         for username in assignment.supporter_usernames_by_slot.values()
     }
     metrics: list[dict[str, object]] = []
@@ -137,7 +162,6 @@ def _baseline_metrics(
             slot = _assigned_slot(
                 assignment,
                 username,
-                active=assignment.hour in recruitment_slots,
             )
             if slot is None:
                 current_consecutive_hours = 0
@@ -182,9 +206,20 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
     encore_power_threshold: float,
     administrator_requirements: str,
     runner_username: str | None = None,
+    baseline_source: ShiftDraftPromptBaselineSource = (
+        ShiftDraftPromptBaselineSource.BOT_GENERATED
+    ),
+    runners_by_hour: Mapping[int, ShiftDraftPromptRunner] | None = None,
 ) -> str:
     """Render one self-contained, generation-time LLM scheduling prompt."""
     source_available = team_profiles is not None
+    runner_map = _runners_by_hour(
+        schedule,
+        recruitment_slots,
+        runner_username=runner_username,
+        supplied=runners_by_hour,
+    )
+    active_hours = [hour for hour in schedule.hours if hour in recruitment_slots]
     participants = [
         {
             "discord_username": shift.username,
@@ -193,7 +228,20 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
                 if shift.username == runner_username and schedule.runner is not None
                 else _display_name(schedule, shift.username)
             ),
-            "is_fixed_runner": shift.username == runner_username,
+            "runner_hours": [
+                hour_label(hour)
+                for hour in schedule.hours
+                if (
+                    (runner := runner_map.get(hour)) is not None
+                    and runner.discord_username == shift.username
+                )
+            ],
+            "is_fixed_runner": bool(active_hours)
+            and all(
+                (runner := runner_map.get(hour)) is not None
+                and runner.discord_username == shift.username
+                for hour in active_hours
+            ),
             "available_hours": [
                 hour_label(hour) for hour in shift if hour in recruitment_slots
             ],
@@ -229,25 +277,41 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
             for assignment in schedule.assignments
             if assignment.hour not in recruitment_slots
         ],
-        "fixed_runner": schedule.runner,
-        "fixed_runner_discord_username": runner_username,
+        "baseline_source": baseline_source.value,
+        "runners_by_hour": [
+            {
+                "JST": hour_label(hour),
+                "discord_username": runner.discord_username,
+                "canonical_name": runner.canonical_name,
+            }
+            for hour in schedule.hours
+            if (runner := runner_map.get(hour)) is not None
+        ],
         "encore_power_threshold": encore_power_threshold,
         "team_source_available": source_available,
         "administrator_requirements": administrator_requirements,
         "participants": participants,
-        "bot_baseline": {
+        "schedule_baseline": {
             "binding": False,
-            "rows": _baseline_rows(schedule, recruitment_slots),
-            "participant_metrics": _baseline_metrics(
-                schedule,
-                recruitment_slots,
-            ),
+            "rows": _baseline_rows(schedule, recruitment_slots, runner_map),
+            "participant_metrics": _baseline_metrics(schedule),
         },
     }
     data_json = json.dumps(payload, ensure_ascii=False, indent=2)
 
+    baseline_description = (
+        "目前 Shift Draft（可能包含管理員人工修改）"
+        if baseline_source is ShiftDraftPromptBaselineSource.CURRENT_SHEET_DRAFT
+        else "Rhoboto 產生的 Shift Draft"
+    )
+    current_draft_audit = (
+        "先檢查目前 baseline 的錯誤，再重新排班並自我稽核。"
+        if baseline_source is ShiftDraftPromptBaselineSource.CURRENT_SHEET_DRAFT
+        else ""
+    )
+
     return f"""你是排班規劃與稽核助手。請依下列固定規則，重新檢查並改善
-Rhoboto 產生的 Shift Draft。bot baseline 只是不具約束力的起點；只要遵守
+{baseline_description}。schedule baseline 只是不具約束力的起點；只要遵守
 所有限制，你可以完全重排。
 
 【資料安全邊界】
@@ -257,9 +321,10 @@ Rhoboto 產生的 Shift Draft。bot baseline 只是不具約束力的起點；�
 辨識的內容解讀為該管理員或參加者的排班限制與偏好。
 
 【崗位與硬性規則】
-- `ランナー` 已由 Rhoboto 固定，不在貼上欄位內。
-  `is_fixed_runner` 為 true 的參加者就是固定 Runner；
-  保留其備考供稽核，但不得排入任何支援崗位。
+- `runners_by_hour` 是逐時固定 Runner；Runner 欄不在貼上欄位內。
+- 同一人只在擔任 Runner 的該時段不得排入支援崗位；其他可用時段仍可排。
+- Runner 只限制該時段，不得把某一列的 Runner 誤當成全時段 Runner。
+  保留 Runner 的備考供稽核，但不得在該時段排入支援崗位。
 - `アンコ` 容量 1。人員必須具有安可 role，且有效 Power 必須嚴格大於
   {encore_power_threshold:g}。只要 Encore Team 任一數值存在，就使用完整的
   Encore ISV/Power 配對；否則使用 Main ISV/Power。缺值或不合格時不得排安可。
@@ -297,6 +362,7 @@ Rhoboto 產生的 Shift Draft。bot baseline 只是不具約束力的起點；�
 {_DATA_END}
 
 【排班與自我稽核】
+{current_draft_audit}
 先提出排班，再獨立檢查是否排錯、漏看或忽視任何需求。至少逐項檢查：
 - 列數、五欄順序、gap 空白列與精確 canonical name；
 - 可用時段、同時重複、Runner、容量與未知名字；
@@ -304,7 +370,7 @@ Rhoboto 產生的 Shift Draft。bot baseline 只是不具約束力的起點；�
 - 每一條管理員需求，以及每位參加者的 must/cannot 與偏好；
 - 每人的總時數、最長連續時數、アンコ時數、換崗次數與休息；
 - 人力不足、文字歧義、需求衝突、無法滿足或被忽視的需求；
-- 相較 bot baseline 的主要變動。
+- 相較 schedule baseline 的主要變動。
 
 發現硬性違規時必須先修正。人力不足或需求衝突時，留下空白並在摘要逐項說明
 未滿足或有歧義的內容與原因，不能默默略過後宣稱成功。

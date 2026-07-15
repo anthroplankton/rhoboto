@@ -26,6 +26,12 @@ external LLM, and Google Sheets paste checks remain part of the manual integrati
 checklist. It preserves every existing Draft, worksheet, and scheduler contract
 described in this document.
 
+The non-overwriting current-Draft prompt command below is implemented in the
+working tree and covered by the complete automated validation suite. Live Discord,
+Google Sheets, and external-LLM checks remain in the manual integration checklist.
+It adds one Summary-refresh and prompt-generation path without changing the
+existing `generate_draft` behavior or writing Shift Draft.
+
 ## Goal
 
 Improve `/shift_register generate_draft` so the generated Shift Draft uses the
@@ -975,6 +981,137 @@ snapshot, and two attachments only on the final followup.
 Manual validation must submit the generated file to an external LLM, confirm the
 audit reports assignment mistakes or ignored requirements, copy the marked TSV to
 `C2`, and verify the existing dynamic Notes recalculate from the pasted schedule.
+
+## Current-Draft Prompt Refresh Command
+
+### Goal And Command Surface
+
+`/shift_register generate_prompt_from_draft` refreshes Team Summary and generates
+the same scheduling prompt from the current Shift Draft, including administrator
+edits, without regenerating or writing the Draft. The command has no slash-command
+parameters. It reads the current row-local Runner values from Draft column `B` and
+the Encore Power threshold from the editable numeric cell in column `L` beside the
+signed `アンコ候補閾値` control.
+
+The existing per-run paragraph modal supplies optional administrator requirements.
+The confirmation has a five-minute timeout and retains requester-only and live
+`administrator` plus `manage_channels` checks. It uses a normal primary action,
+not destructive styling or `‼️`, and states that the operation will update Team
+Summary while only reading Shift Draft. Cancel and timeout perform no Google Sheets
+access. After confirmation, the command refreshes current settings under the Shift
+channel lock and stops without Sheets access if the displayed destinations or
+recruitment contract changed.
+
+### Read, Validate, Build, Then Write
+
+Within the confirmed worksheet transaction, the manager uses the existing
+spreadsheet-scoped batch-read and Team Summary reconciliation paths to read Shift
+Entry, Shift Draft, and an available Team Source. It computes the current Summary
+row plan and profiles in memory. Before submitting any mutation, it validates the
+Draft and builds the complete prompt. Only after both succeed does it apply the
+Team Summary mutations. The command submits no Draft worksheet request and does
+not write any Draft value, formula, formatting, validation, note, conditional
+format, frozen property, or worksheet dimension.
+
+The Draft parser shares the structural portion of the existing Draft-to-Final
+reader but returns the exact Sheet column order before Final-only Honso reordering
+or split-color planning. It validates:
+
+- the exact `A:G` header and continuous expected JST axis, including configured
+  recruitment gaps;
+- the absence of an additional recognized hour row after the expected axis;
+- string-or-blank values in `B:G`;
+- the signed threshold label at the expected row and a finite, non-negative
+  numeric threshold value; and
+- reversible identities for every nonblank Runner or supporter cell.
+
+Supporter cells `C:G` must resolve to exactly one current Shift Entry participant.
+A unique display name is accepted directly; duplicate or reserved-suffix names
+must use the complete canonical `display name ⟨@username⟩` value already produced
+by Draft. Runner cells in `B` resolve against current guild members so an existing
+Runner remains valid even without a Shift Entry. When a Runner also has Entry, the
+prompt retains that participant's complete original message. Unknown or ambiguous
+values are never guessed.
+
+Structural, threshold, and identity problems are collected with their A1 cells and
+stop the entire operation before both Summary and Draft writes. Resolvable schedule
+mistakes do not block prompt generation. Duplicate supporter roles, Runner/supporter
+overlap, assignment outside availability, invalid Encore eligibility, nonblank gap
+roles, excessive workload, frequent switches, and ignored requirements remain in
+the non-binding baseline so the LLM can identify and repair them.
+
+### One Prompt Builder And Exact Baseline
+
+The implementation extends the existing pure prompt builder instead of adding a
+second Sheet-specific copy. A current-Draft adapter converts the validated exact
+rows to the existing username-backed supporter representation and supplies
+row-local Runner identity. Existing `generate_draft` uses the same generalized
+builder; its one fixed Runner is represented on each applicable row without
+changing its command or worksheet behavior.
+
+The JSON data identifies the baseline source as the current Sheet Draft and
+preserves every visible row and the exact `B:G` role order. It also contains the
+fresh in-memory Team profiles, every participant's availability and complete raw
+`original_message`, the current threshold, and the raw administrator requirements.
+Baseline workload metrics are computed from the current supporter cells. Schedule
+mistakes remain visible to the audit rather than being silently normalized.
+
+Runner is an hourly constraint. The LLM cannot place a row's Runner in a supporter
+cell for that hour, but that person may be a supporter during another available
+hour when they are not Runner. Runner remains outside the paste columns. The hard
+domain rules, requirement priority, soft ISV directions, continuity, workload,
+rest, switching, injection boundary, and self-audit rules remain those defined in
+the LLM scheduling-prompt extension above. The audit additionally identifies the
+mistakes found in the current Draft and the corrections made.
+
+The final response remains a Traditional Chinese audit followed by the exact
+five-column `C2:G...` TSV markers. The command never asks the LLM to emit or replace
+JST or Runner. When Team Source is unavailable, it retains the existing safe
+fallback: no capability values are guessed, Encore output stays blank, and the
+prompt and Discord report state the limitation.
+
+### Discord Result And Failure Behavior
+
+A successful ephemeral result states that the LLM prompt was generated, uses `🔄`
+only when Team Summary was synchronized, uses `👀` to state that Shift Draft was
+read without modification, and shows the threshold read from Draft. It attaches
+only `shift-draft-llm-prompt.txt`; it does not rebuild or attach a Notes snapshot.
+
+Invalid Draft input uses `⚠️ 📏` and lists every bounded problem cell with a safe
+detected value. It produces no attachment and no Summary mutation. If prompt
+building succeeds but Team Summary persistence fails, the command uses the
+existing storage-error response and does not report success or attach the prompt;
+the administrator may retry safely. There is no Draft-write partial-success state
+because this command has no Draft write request.
+
+### Implementation And Verification Surface
+
+Implementation is limited to:
+
+- `cogs/shift_register.py`: the parameterless command, confirmation/report copy,
+  error presentation, and prompt attachment;
+- `components/ui_shift_register.py`: reuse of the requirements confirmation with
+  non-destructive action semantics;
+- `utils/shift_register_manager.py`: exact current-Draft planning, Summary-only
+  mutation, and result data;
+- `utils/shift_final.py`: shared structural parsing before Final-only transformations;
+- `utils/shift_draft_prompt.py`: current-Sheet baseline source and row-local Runner;
+- focused tests in `tests/test_shift_final.py`,
+  `tests/test_shift_draft_prompt.py`, `tests/test_shift_draft.py`,
+  `tests/test_ui_permissions.py`, and
+  `tests/test_feature_channel_interactions.py`; and
+- this document plus `docs/manual_integration_validation.md`.
+
+Tests cover exact order preservation, threshold and identity errors, aggregated A1
+reporting, retention of repairable schedule violations, row-local Runner behavior,
+fresh profile and raw-message propagation, Summary-only mutations, zero Draft
+requests, no pre-confirmation access, permission and settings drift, safe fallback,
+storage failure, result copy, and the one-file attachment. Full repository lint,
+format, lock, pytest coverage, compile, and whitespace gates remain required.
+
+This follow-up adds no worksheet columns or ownership, database schema, dependency,
+LLM API, response ingestion, pasted-output validation, persistent requirement,
+scheduler change, translator entry, or additional Notes artifact.
 
 ## Affected Files
 

@@ -9,12 +9,21 @@ import pytest
 
 from tests.fakes import FakeWorksheet
 from utils import shift_register_manager
-from utils.shift_draft_prompt import build_shift_draft_llm_prompt
+from utils.shift_draft_prompt import (
+    ShiftDraftPromptBaselineSource,
+    ShiftDraftPromptRunner,
+    build_shift_draft_llm_prompt,
+)
+from utils.shift_final import inspect_draft_schedule_rows
 from utils.shift_register_manager import (
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
+    CurrentDraftPromptInputs,
+    DraftPromptValidationError,
+    DraftPromptValidationKind,
     DraftTeamProfileResolution,
     ShiftRegisterManager,
     TeamSourceStatus,
+    _current_draft_prompt_inputs,
 )
 from utils.shift_register_structs import (
     DraftNotesTeamSource,
@@ -212,6 +221,414 @@ def build_entry_ranges(
         identities,
         availability,
     ]
+
+
+def current_draft_grid(
+    *rows: list[object],
+    threshold_label: object = DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL,
+    threshold: object = 35,
+) -> list[list[object]]:
+    grid = [[*DraftWorksheetContent.COLUMNS, *("" for _ in range(6))]]
+    grid.extend([*row, *("" for _ in range(max(0, 13 - len(row))))] for row in rows)
+    control = [""] * 13
+    control[10] = threshold_label
+    control[11] = threshold
+    grid.append(control)
+    return grid
+
+
+def test_current_draft_prompt_inputs_preserve_exact_rows_and_runner_identity() -> None:
+    shifts = [
+        Shift(
+            username="alice",
+            display_name="Same",
+            original_message="4-6／本走希望",  # noqa: RUF001
+            slots={4, 5},
+        ),
+        Shift(
+            username="carol",
+            display_name="Carol",
+            original_message="4-5／待機希望",  # noqa: RUF001
+            slots={4},
+        ),
+    ]
+    grid = current_draft_grid(
+        [
+            "4-5",
+            "Same ⟨@bob⟩",
+            "",
+            "Same ⟨@alice⟩",
+            "",
+            "",
+            "Same ⟨@alice⟩",
+        ],
+        ["5-6", "Same ⟨@alice⟩", "", "", "Carol", "", ""],
+    )
+    inspection = inspect_draft_schedule_rows(
+        grid,
+        expected_hours=(4, 5),
+        recruitment_slots=frozenset({4}),
+    )
+
+    inputs = _current_draft_prompt_inputs(
+        inspection=inspection,
+        draft_grid=grid,
+        shifts=shifts,
+        member_by_names={
+            "alice": SimpleNamespace(name="alice", display_name="Same"),
+            "bob": SimpleNamespace(name="bob", display_name="Same"),
+            "carol": SimpleNamespace(name="carol", display_name="Carol"),
+        },
+    )
+
+    assert isinstance(inputs, CurrentDraftPromptInputs)
+    assert inputs.encore_power_threshold == 35
+    assert inputs.runners_by_hour == {
+        4: ShiftDraftPromptRunner("bob", "Same ⟨@bob⟩"),
+        5: ShiftDraftPromptRunner("alice", "Same ⟨@alice⟩"),
+    }
+    first, second = inputs.schedule.assignments
+    assert first.supporter_usernames_by_slot == {
+        "honso_1": "alice",
+        "standby": "alice",
+    }
+    assert second.supporter_usernames_by_slot == {"honso_2": "carol"}
+    assert inputs.schedule.display_names == {
+        "alice": "Same ⟨@alice⟩",
+        "carol": "Carol",
+    }
+
+
+def test_current_draft_prompt_inputs_aggregate_structure_threshold_and_identity() -> (
+    None
+):
+    shifts = [
+        Shift(
+            username="alice",
+            display_name="Same",
+            original_message="4-5",
+            slots={4},
+        ),
+        Shift(
+            username="amy",
+            display_name="Same",
+            original_message="4-5",
+            slots={4},
+        ),
+    ]
+    grid = current_draft_grid(
+        ["wrong", "Unknown Runner", "Unknown Supporter", "Same", "", "", ""],
+        threshold_label="wrong label",
+        threshold="35",
+    )
+    inspection = inspect_draft_schedule_rows(
+        grid,
+        expected_hours=(4,),
+        recruitment_slots=frozenset({4}),
+    )
+
+    with pytest.raises(DraftPromptValidationError) as caught:
+        _current_draft_prompt_inputs(
+            inspection=inspection,
+            draft_grid=grid,
+            shifts=shifts,
+            member_by_names={
+                "alice": SimpleNamespace(name="alice", display_name="Same"),
+                "amy": SimpleNamespace(name="amy", display_name="Same"),
+            },
+        )
+
+    assert [(issue.kind, issue.cell) for issue in caught.value.issues] == [
+        (DraftPromptValidationKind.DRAFT_AXIS, "A2"),
+        (DraftPromptValidationKind.THRESHOLD_LABEL, "K3"),
+        (DraftPromptValidationKind.THRESHOLD_VALUE, "L3"),
+        (DraftPromptValidationKind.RUNNER_IDENTITY, "B2"),
+        (DraftPromptValidationKind.SUPPORTER_IDENTITY, "C2"),
+        (DraftPromptValidationKind.SUPPORTER_IDENTITY, "D2"),
+    ]
+
+
+def configure_available_prompt_source(  # noqa: PLR0913
+    manager: ShiftRegisterManager,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    entry: EntryRangeFakeWorksheet,
+    draft: DraftBatchFakeWorksheet,
+    sheet_url: str,
+    profiles: dict[str, DraftTeamProfile] | None = None,
+) -> None:
+    main = FakeWorksheet(title="Main Team", worksheet_id=101)
+    summary = FakeWorksheet(title="Team Summary", worksheet_id=201)
+    source_config = SimpleNamespace(sheet_url=sheet_url, encore_role_ids=[])
+    source_metadata = TeamRegisterGoogleSheetsMetadata.from_subtyped_worksheets(
+        sheet_url,
+        [
+            TeamWorksheetMetadata(101, "Main Team", main),
+            SummaryWorksheetMetadata(201, "Team Summary", summary),
+        ],
+    )
+    source = shift_register_manager.TeamSource(
+        source_config,
+        source_metadata,
+        shift_register_manager.TeamSummaryColumns(1, 3, 4, 5, None, None, "F"),
+    )
+    resolution = shift_register_manager.TeamSourceResolution(
+        TeamSourceStatus.AVAILABLE,
+        source,
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(
+            return_value=(
+                TeamSourceStatus.AVAILABLE,
+                source_config,
+                source_metadata,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_read_shift_and_team_source_locked",
+        AsyncMock(
+            return_value=(
+                {entry.id: entry.values, draft.id: draft.values},
+                resolution,
+                {},
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_summary_grid_plan",
+        Mock(
+            return_value=SimpleNamespace(
+                summary_headers=(),
+                summaries=(),
+                mutations=("summary",),
+            )
+        ),
+    )
+    monkeypatch.setattr(manager, "_build_team_source", Mock(return_value=resolution))
+    monkeypatch.setattr(
+        manager,
+        "_draft_profiles_from_summary",
+        Mock(
+            return_value=DraftTeamProfileResolution(
+                TeamSourceStatus.AVAILABLE,
+                profiles or {},
+            )
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_builds_before_summary_only_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet(build_entry_ranges([("alice", "Alice", {4})]))
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    draft.values = current_draft_grid(["4-5", "", "", "Alice", "", "", ""])
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    configure_available_prompt_source(
+        manager,
+        monkeypatch,
+        entry=entry,
+        draft=draft,
+        sheet_url=shift_sheet.sheet_url,
+        profiles={"alice": DraftTeamProfile(main_isv=200, main_power=40)},
+    )
+    ensure = AsyncMock(side_effect=AssertionError("must not repair worksheets"))
+    monkeypatch.setattr(manager, "_ensure_current_worksheets", ensure)
+    prompt_calls: list[dict[str, object]] = []
+
+    def build_prompt(**kwargs: object) -> str:
+        assert shift_sheet.batch_updates == []
+        prompt_calls.append(kwargs)
+        return "prompt"
+
+    monkeypatch.setattr(
+        shift_register_manager,
+        "build_shift_draft_llm_prompt",
+        build_prompt,
+    )
+
+    result = await manager.generate_prompt_from_draft(
+        metadata,
+        member_by_names={
+            "alice": SimpleNamespace(
+                name="alice",
+                display_name="Alice",
+                roles=[],
+            )
+        },
+        administrator_requirements="Alice 最多一小時",
+    )
+
+    assert result.llm_prompt == "prompt"
+    assert result.encore_power_threshold == 35
+    assert result.team_source_status is TeamSourceStatus.AVAILABLE
+    assert result.team_summary_url.endswith("#gid=201")
+    assert prompt_calls[0]["baseline_source"] is (
+        ShiftDraftPromptBaselineSource.CURRENT_SHEET_DRAFT
+    )
+    assert prompt_calls[0]["administrator_requirements"] == "Alice 最多一小時"
+    assert prompt_calls[0]["team_profiles"] == {
+        "alice": DraftTeamProfile(main_isv=200, main_power=40)
+    }
+    assert shift_sheet.batch_updates == [(["summary"], [])]
+    ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_validation_blocks_every_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet(build_entry_ranges([]))
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    draft.values = current_draft_grid(
+        ["4-5", "Unknown", "", "", "", "", ""],
+        threshold="bad",
+    )
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
+    prompt = Mock(side_effect=AssertionError("invalid Draft must not build prompt"))
+    monkeypatch.setattr(shift_register_manager, "build_shift_draft_llm_prompt", prompt)
+
+    with pytest.raises(DraftPromptValidationError):
+        await manager.generate_prompt_from_draft(metadata, member_by_names={})
+
+    assert shift_sheet.batch_reads == [[1, 2]]
+    assert shift_sheet.batch_updates == []
+    prompt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_unset_source_builds_safe_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet(build_entry_ranges([("alice", "Alice", {4})]))
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    draft.values = current_draft_grid(["4-5", "", "", "Alice", "", "", ""])
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    monkeypatch.setattr(
+        manager,
+        "_resolve_team_source_metadata",
+        AsyncMock(return_value=(TeamSourceStatus.UNSET, None, None)),
+    )
+    prompt = Mock(return_value="fallback prompt")
+    monkeypatch.setattr(shift_register_manager, "build_shift_draft_llm_prompt", prompt)
+
+    result = await manager.generate_prompt_from_draft(
+        metadata,
+        member_by_names={
+            "alice": SimpleNamespace(
+                name="alice",
+                display_name="Alice",
+                roles=[],
+            )
+        },
+    )
+
+    assert result.llm_prompt == "fallback prompt"
+    assert result.team_source_status is TeamSourceStatus.UNSET
+    assert result.team_source_warning == TEAM_SOURCE_UNSET_DRAFT_WARNING
+    assert result.team_summary_url is None
+    assert prompt.call_args.kwargs["team_profiles"] is None
+    assert shift_sheet.batch_reads == [[1, 2]]
+    assert shift_sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_summary_failure_has_no_draft_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = ShiftRegisterManager(make_feature_channel(), "service.json")
+    shift_sheet = configure_draft_value_sheet(manager)
+    entry = EntryRangeFakeWorksheet(build_entry_ranges([("alice", "Alice", {4})]))
+    draft = DraftBatchFakeWorksheet(title="Shift Draft", worksheet_id=2)
+    draft.values = current_draft_grid(["4-5", "", "", "Alice", "", "", ""])
+    metadata = ShiftRegisterGoogleSheetsMetadata(
+        shift_sheet.sheet_url,
+        [
+            EntryWorksheetMetadata(1, "Shift Entry", entry),
+            DraftWorksheetMetadata(2, "Shift Draft", draft),
+            FinalScheduleWorksheetMetadata(3, "Shift Final Schedule", None),
+        ],
+    )
+    manager._sheet_config = SimpleNamespace(  # noqa: SLF001
+        recruitment_time_ranges=[{"start": 4, "end": 5}]
+    )
+    configure_available_prompt_source(
+        manager,
+        monkeypatch,
+        entry=entry,
+        draft=draft,
+        sheet_url=shift_sheet.sheet_url,
+    )
+    monkeypatch.setattr(
+        shift_register_manager,
+        "build_shift_draft_llm_prompt",
+        Mock(return_value="prompt built before write"),
+    )
+    shift_sheet.batch_update_error = StorageError(
+        StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+    )
+
+    with pytest.raises(StorageError) as caught:
+        await manager.generate_prompt_from_draft(
+            metadata,
+            member_by_names={
+                "alice": SimpleNamespace(
+                    name="alice",
+                    display_name="Alice",
+                    roles=[],
+                )
+            },
+        )
+
+    assert caught.value.kind is StorageErrorKind.GOOGLE_SHEETS_TRANSIENT
+    assert shift_sheet.batch_updates == [(["summary"], [])]
 
 
 def build_entry_grid(
