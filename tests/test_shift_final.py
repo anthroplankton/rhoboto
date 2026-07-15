@@ -20,6 +20,7 @@ from utils.shift_final import (
     build_schedule_update_request,
     find_final_schedule_data_range,
     format_event_day,
+    inspect_draft_schedule_rows,
     parse_a1_cell,
     parse_a1_range,
 )
@@ -214,6 +215,75 @@ def grid_for_rows(
         for hour, runner, encore, honso, standby in rows
     )
     return grid
+
+
+def test_inspect_draft_rows_preserves_honso_order_and_repairable_conflicts() -> None:
+    inspection = inspect_draft_schedule_rows(
+        grid_for_rows(
+            (4, "Runner", "Alice", ("Bob", "Alice", "Carol"), "Alice"),
+            (5, "", "", ("Carol", "Bob", "Alice"), ""),
+        ),
+        expected_hours=(4, 5),
+        recruitment_slots=frozenset({4, 5}),
+    )
+
+    assert inspection.issues == ()
+    assert inspection.rows[0].honso == ("Bob", "Alice", "Carol")
+    assert inspection.rows[0].encore == inspection.rows[0].standby == "Alice"
+    assert inspection.rows[1].honso == ("Carol", "Bob", "Alice")
+
+
+def test_inspect_draft_rows_collects_axis_and_role_value_issues() -> None:
+    grid: list[list[object]] = [
+        list(DraftWorksheetContent.COLUMNS),
+        ["wrong", "Runner", 123, "A", "B", "C", False],
+        ["5-6", "", "", "C", "B", "A", ""],
+        ["6-7", "", "", "", "", "", ""],
+    ]
+
+    inspection = inspect_draft_schedule_rows(
+        grid,
+        expected_hours=(4, 5),
+        recruitment_slots=frozenset({4, 5}),
+    )
+
+    assert [issue.kind for issue in inspection.issues] == [
+        FinalScheduleValidationKind.AXIS,
+        FinalScheduleValidationKind.ROLE_VALUE,
+        FinalScheduleValidationKind.ROLE_VALUE,
+        FinalScheduleValidationKind.EXTRA_AXIS,
+    ]
+    assert [
+        (issue.row, issue.column, issue.detected) for issue in inspection.issues
+    ] == [
+        (2, 1, "wrong"),
+        (2, 3, 123),
+        (2, 7, False),
+        (4, 1, "6-7"),
+    ]
+    assert inspection.rows[0].encore == ""
+    assert inspection.rows[0].standby == ""
+
+
+def test_build_final_schedule_keeps_first_error_and_honso_reordering_contract() -> None:
+    invalid: list[list[object]] = [
+        list(DraftWorksheetContent.COLUMNS),
+        ["wrong", "", 123, "A", "B", "C", ""],
+    ]
+
+    with pytest.raises(FinalScheduleValidationError) as caught:
+        build_final_schedule(invalid, request_for_hours(4, 5))
+
+    assert caught.value.kind is FinalScheduleValidationKind.AXIS
+
+    plan = build_final_schedule(
+        grid_for_rows(
+            (4, "", "", ("A", "B", "C"), ""),
+            (5, "", "", ("C", "A", "B"), ""),
+        ),
+        request_for_hours(4, 6),
+    )
+    assert plan.rows[0].honso == plan.rows[1].honso == ("A", "B", "C")
 
 
 def test_build_final_schedule_ignores_h_plus_and_preserves_formula_text_literal() -> (

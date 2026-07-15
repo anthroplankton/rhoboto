@@ -41,10 +41,12 @@ from components.ui_shift_register import (
     ApplyTeamSourceButton,
     AssignScheduleRoleConfirmView,
     AutoCloseButton,
+    GenerateShiftDraftConfirmView,
     GenerateShiftScheduleConfirmView,
     ManageTeamSourceButton,
     ScheduleRoleDecision,
     ShiftAutoCloseCallbacks,
+    ShiftDraftRequirementsModal,
     ShiftRecruitmentRangeModal,
     ShiftRegisterButton,
     ShiftRegisterSheetModal,
@@ -4050,6 +4052,193 @@ async def test_generate_draft_cancel_allows_requester() -> None:
         destination_label="Shift Draft",
         destination_url="https://sheet.example#gid=222",
     )
+    interaction = FakeInteraction(user_id=333)
+
+    await child_with_label(view, "取消").callback(interaction)
+
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.edits == [
+        ("✖️ 已取消生成，未變更 Shift Draft。", {"view": None})  # noqa: RUF001
+    ]
+
+
+def make_draft_confirm_view() -> GenerateShiftDraftConfirmView:
+    return GenerateShiftDraftConfirmView(
+        requesting_user_id=333,
+        destination_label="Shift Draft",
+        destination_url="https://sheet.example#gid=222",
+    )
+
+
+def test_generate_draft_confirmation_can_select_primary_without_changing_default() -> (
+    None
+):
+    default_view = make_draft_confirm_view()
+    primary_view = GenerateShiftDraftConfirmView(
+        requesting_user_id=333,
+        destination_label="目前 Shift Draft",
+        destination_url="https://sheet.example#gid=222",
+        destructive=False,
+    )
+
+    assert child_with_label(default_view, "確認生成").style is ButtonStyle.danger
+    assert child_with_label(primary_view, "確認生成").style is ButtonStyle.primary
+    assert primary_view.timeout == 300.0
+    assert [child.label for child in primary_view.children] == [
+        "確認生成",
+        "取消",
+        "填寫 LLM 排班需求",
+    ]
+
+
+def test_generate_draft_view_has_requirements_control_and_draft_only_timeout() -> None:
+    draft_view = make_draft_confirm_view()
+    shared_view = GenerateShiftScheduleConfirmView(
+        requesting_user_id=333,
+        destination_label="Final Schedule",
+        destination_url="https://sheet.example#gid=333",
+    )
+
+    assert draft_view.timeout == 300.0
+    assert shared_view.timeout == 20.0
+    assert draft_view.administrator_requirements == ""
+    assert [child.label for child in draft_view.children] == [
+        "確認生成",
+        "取消",
+        "填寫 LLM 排班需求",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_requirements_rejects_other_user() -> None:
+    view = make_draft_confirm_view()
+    interaction = FakeInteraction(user_id=444)
+
+    await child_with_label(view, "填寫 LLM 排班需求").callback(interaction)
+
+    assert interaction.response.modals == []
+    assert view.administrator_requirements == ""
+    assert view.value is None
+    assert not view.is_finished()
+    assert interaction.response.messages == [
+        ("⚠️ 只有執行此 command 的管理員可以操作。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_requirements_can_be_saved_reopened_and_cleared() -> None:
+    view = make_draft_confirm_view()
+    open_interaction = FakeInteraction(user_id=333)
+
+    await child_with_label(view, "填寫 LLM 排班需求").callback(open_interaction)
+
+    modal = open_interaction.response.modals[0]
+    assert isinstance(modal, ShiftDraftRequirementsModal)
+    assert modal.requirements.default == ""
+    assert modal.requirements.max_length == 4000
+    modal.requirements._value = "Alice 只能排本走\nBob 最多兩小時"  # noqa: SLF001
+    save_interaction = FakeInteraction(user_id=333)
+    await modal.on_submit(save_interaction)
+
+    assert view.administrator_requirements == "Alice 只能排本走\nBob 最多兩小時"
+    assert save_interaction.response.messages == [
+        ("✅ 已儲存這次生成使用的 LLM 排班需求。", {"ephemeral": True})
+    ]
+    assert view.value is None
+    assert not view.is_finished()
+
+    reopen_interaction = FakeInteraction(user_id=333)
+    await child_with_label(view, "填寫 LLM 排班需求").callback(reopen_interaction)
+    reopened = reopen_interaction.response.modals[0]
+    assert reopened.requirements.default == "Alice 只能排本走\nBob 最多兩小時"
+    reopened.requirements._value = ""  # noqa: SLF001
+    clear_interaction = FakeInteraction(user_id=333)
+    await reopened.on_submit(clear_interaction)
+
+    assert view.administrator_requirements == ""
+    assert clear_interaction.response.messages == [
+        ("✅ 已清除這次生成使用的 LLM 排班需求。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_requirements_modal_rechecks_requester() -> None:
+    view = make_draft_confirm_view()
+    modal = ShiftDraftRequirementsModal(view)
+    modal.requirements._value = "不應儲存"  # noqa: SLF001
+    interaction = FakeInteraction(user_id=444)
+
+    await modal.on_submit(interaction)
+
+    assert view.administrator_requirements == ""
+    assert not view.is_finished()
+    assert interaction.response.messages == [
+        ("⚠️ 只有執行此 command 的管理員可以操作。", {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("administrator", "manage_channels"),
+    [(False, True), (True, False)],
+)
+async def test_generate_draft_requirements_button_stops_after_permission_loss(
+    *,
+    administrator: bool,
+    manage_channels: bool,
+) -> None:
+    view = make_draft_confirm_view()
+    interaction = FakeInteraction(
+        user_id=333,
+        administrator=administrator,
+        manage_channels=manage_channels,
+    )
+
+    await child_with_label(view, "填寫 LLM 排班需求").callback(interaction)
+
+    assert interaction.response.modals == []
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.messages == [
+        (MISSING_SETTINGS_PERMISSION_MESSAGE, {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("administrator", "manage_channels"),
+    [(False, True), (True, False)],
+)
+async def test_generate_draft_requirements_modal_stops_after_permission_loss(
+    *,
+    administrator: bool,
+    manage_channels: bool,
+) -> None:
+    view = make_draft_confirm_view()
+    view.administrator_requirements = "原本的需求"
+    modal = ShiftDraftRequirementsModal(view)
+    modal.requirements._value = "不應覆蓋"  # noqa: SLF001
+    interaction = FakeInteraction(
+        user_id=333,
+        administrator=administrator,
+        manage_channels=manage_channels,
+    )
+
+    await modal.on_submit(interaction)
+
+    assert view.administrator_requirements == "原本的需求"
+    assert view.value is False
+    assert view.is_finished()
+    assert interaction.response.messages == [
+        (MISSING_SETTINGS_PERMISSION_MESSAGE, {"ephemeral": True})
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_draft_subclass_keeps_shared_cancel_behavior() -> None:
+    view = make_draft_confirm_view()
+    view.administrator_requirements = "只存在於這個 View"
     interaction = FakeInteraction(user_id=333)
 
     await child_with_label(view, "取消").callback(interaction)

@@ -32,6 +32,7 @@ from components.ui_shift_register import (
     AUTO_CLOSE_INVALIDATED_MESSAGE,
     SHIFT_REGISTER_DISPLAY_NAME,
     AssignScheduleRoleConfirmView,
+    GenerateShiftDraftConfirmView,
     GenerateShiftScheduleConfirmView,
     ScheduleRoleDecision,
     ShiftAutoCloseCallbacks,
@@ -67,6 +68,9 @@ from utils.shift_final import (
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     AutoCloseDeadlineNotFutureError,
+    DraftPromptGenerationResult,
+    DraftPromptValidationError,
+    DraftPromptValidationKind,
     FinalScheduleImageRangeError,
     FinalScheduleReconfirmationRequired,
     FinalScheduleRoleSource,
@@ -128,7 +132,7 @@ _SHIFT_REPORT_SECTION_PREFIXES = (
     "⚠️ 編成未登録：",
     "- 募集時間【",
     "- 未排入（",
-    "附件是生成時資料的 Notes 快照",
+    "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt",
 )
 _MAX_BMP_CODE_POINT = 0xFFFF
 _FINAL_CONTRACT_VALUE_LIMIT = 160
@@ -310,6 +314,93 @@ def _format_generate_draft_confirmation(
             ("Notes・候補的展開位置若已有資料，將保留該資料並可能顯示 `#REF!`。"),
         ]
     )
+
+
+def _format_generate_prompt_from_draft_confirmation(
+    recruitment_ranges: RecruitmentTimeRanges,
+    draft_sheet_url: str,
+    team_source_status: TeamSourceStatus,
+    team_summary_url: str | None,
+) -> str:
+    if team_summary_url is not None:
+        summary_line = (
+            "- 確認後會以目前 Discord 成員與 Team 資料更新 "
+            f"[Team Summary]({team_summary_url})。"
+        )
+    elif team_source_status is TeamSourceStatus.UNSET:
+        summary_line = "⚠️ Team Source 未設定；本次不會更新 Team Summary。"
+    else:
+        summary_line = "⚠️ Team Source 設定無效；本次不會更新 Team Summary。"
+    return "\n".join(
+        [
+            "### 👀 確認從目前 Draft 產生 LLM 排班 prompt",
+            summary_line,
+            (
+                f"- 只讀取 [Shift Draft]({draft_sheet_url})；"
+                "不會覆寫或變更任何 Draft 內容。"
+            ),
+            "- 從每列 Runner（`B` 欄）與安可 Power 閾值（`L` 欄）讀取設定。",
+            f"- 募集時間【{recruitment_ranges.announcement_display()}】",
+            "- 可先用下方按鈕填寫這次的 LLM 排班需求。",
+        ]
+    )
+
+
+_DRAFT_PROMPT_VALIDATION_PROBLEMS = {
+    DraftPromptValidationKind.DRAFT_EMPTY: "Draft 沒有可讀取的內容",
+    DraftPromptValidationKind.DRAFT_HEADER: "Draft 標題列不符合契約",
+    DraftPromptValidationKind.DRAFT_AXIS: "Draft 時段軸不符合契約",
+    DraftPromptValidationKind.DRAFT_EXTRA_AXIS: "Draft 出現契約外的額外時段",
+    DraftPromptValidationKind.DRAFT_ROLE_VALUE: "Draft 崗位值不是文字或空白",
+    DraftPromptValidationKind.THRESHOLD_LABEL: "安可 Power 閾值標籤不符合契約",
+    DraftPromptValidationKind.THRESHOLD_VALUE: "安可 Power 閾值不是有效數字",
+    DraftPromptValidationKind.RUNNER_IDENTITY: "無法唯一識別 Runner",
+    DraftPromptValidationKind.SUPPORTER_IDENTITY: ("無法唯一識別 Shift Entry 參加者"),
+}
+
+
+def _format_draft_prompt_validation_error(
+    error: DraftPromptValidationError,
+) -> str:
+    lines = [
+        "### ⚠️📏 LLM 排班 prompt 未產生",
+        "請修正以下 Draft 儲存格後重新執行 command：",
+    ]
+    lines.extend(
+        (
+            f"- `{issue.cell}`：{_DRAFT_PROMPT_VALIDATION_PROBLEMS[issue.kind]}；"
+            f"預期 {_format_prompt_contract_value(issue.expected)}；"
+            f"實際 {_format_prompt_contract_value(issue.detected)}"
+        )
+        for issue in error.issues
+    )
+    lines.append("未更新 Team Summary、未產生附件；Shift Draft 保持不變。")
+    return "\n".join(lines)
+
+
+def _format_prompt_contract_value(value: object) -> str:
+    return _format_final_contract_value(value).replace("<@", "<\u200b@")
+
+
+def _format_generate_prompt_from_draft_report(
+    result: DraftPromptGenerationResult,
+    draft_sheet_url: str,
+) -> str:
+    lines = [
+        "### ✅ LLM 排班 prompt 已產生",
+        f"- 安可 Power 閾值（從 Draft 讀取）：`{result.encore_power_threshold:g}`",
+    ]
+    if result.team_summary_url is not None:
+        lines.append(f"🔄 已更新 [Team Summary]({result.team_summary_url})。")
+    elif result.team_source_warning is not None:
+        lines.append(result.team_source_warning)
+    lines.extend(
+        [
+            f"👀 已讀取 [Shift Draft]({draft_sheet_url})，未修改任何 Draft 內容。",
+            "附件 `shift-draft-llm-prompt.txt` 可直接交給 LLM 協助排班與稽核。",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _event_day_status_message(request: ScheduleUpdateRequest) -> str | None:
@@ -1949,7 +2040,7 @@ class ShiftRegister(
                 team_source_status,
                 team_summary_url,
             )
-            view = GenerateShiftScheduleConfirmView(
+            view = GenerateShiftDraftConfirmView(
                 requesting_user_id=interaction.user.id,
                 destination_label="Shift Draft",
                 destination_url=draft_sheet_url,
@@ -2025,6 +2116,7 @@ class ShiftRegister(
                     member_by_names=member_by_names,
                     encore_power_threshold=float(encore_power_threshold),
                     runner=runner_info,
+                    administrator_requirements=view.administrator_requirements,
                 )
                 schedule = result.schedule
                 current_config = await context.manager.get_sheet_config()
@@ -2060,11 +2152,151 @@ class ShiftRegister(
         for index, report_message in enumerate(report_messages):
             send_kwargs: dict[str, object] = {"ephemeral": True}
             if index == len(report_messages) - 1:
-                send_kwargs["file"] = File(
-                    BytesIO(result.notes_snapshot.encode("utf-8")),
-                    filename="shift-draft-notes.txt",
-                )
+                send_kwargs["files"] = [
+                    File(
+                        BytesIO(result.notes_snapshot.encode("utf-8")),
+                        filename="shift-draft-notes.txt",
+                    ),
+                    File(
+                        BytesIO(result.llm_prompt.encode("utf-8")),
+                        filename="shift-draft-llm-prompt.txt",
+                    ),
+                ]
             await interaction.followup.send(report_message, **send_kwargs)
+
+    @app_commands.command(
+        name="generate_prompt_from_draft",
+        description="Refresh Team Summary and build an LLM prompt from current Draft.",
+    )
+    async def generate_prompt_from_draft(  # noqa: PLR0911
+        self,
+        interaction: Interaction,
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        source = require_guild_channel_source(
+            interaction,
+            action="generate LLM prompt from current shift draft",
+        )
+        try:
+            context = await self._get_shift_finalization_context_or_none(source)
+            if context is None:
+                await self._send_missing_register_config_followup(interaction)
+                return
+
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                context.feature_config.recruitment_time_ranges
+            )
+            draft_sheet_url = google_sheet_url_with_gid(
+                context.feature_config.sheet_url,
+                context.feature_config.draft_worksheet_id,
+            )
+            (
+                team_source_status,
+                team_summary_url,
+            ) = await context.manager.get_saved_team_summary_destination()
+            confirmation_content = _format_generate_prompt_from_draft_confirmation(
+                recruitment_ranges,
+                draft_sheet_url,
+                team_source_status,
+                team_summary_url,
+            )
+            view = GenerateShiftDraftConfirmView(
+                requesting_user_id=interaction.user.id,
+                destination_label="目前 Shift Draft",
+                destination_url=draft_sheet_url,
+                destructive=False,
+            )
+            await interaction.edit_original_response(
+                content=confirmation_content,
+                view=view,
+            )
+            await view.wait()
+            if view.value is False:
+                await interaction.edit_original_response(view=None)
+                return
+            if view.value is None:
+                await interaction.edit_original_response(
+                    content=(
+                        "✖️ 確認逾時，未更新 Team Summary、未產生 prompt；"
+                        "Shift Draft 保持不變。"
+                    ),
+                    view=None,
+                )
+                return
+
+            context = await self._get_shift_finalization_context_or_none(source)
+            if context is None:
+                await self._send_missing_register_config_followup(interaction)
+                return
+            async with fresh_shift_channel_transaction(
+                context.manager,
+                self.sheet_write_lock,
+                channel_id=source.channel.id,
+            ) as fresh_config:
+                fresh_ranges = RecruitmentTimeRanges.from_json(
+                    fresh_config.recruitment_time_ranges
+                )
+                fresh_draft_sheet_url = google_sheet_url_with_gid(
+                    fresh_config.sheet_url,
+                    fresh_config.draft_worksheet_id,
+                )
+                (
+                    fresh_team_status,
+                    fresh_team_summary_url,
+                ) = await context.manager.get_saved_team_summary_destination()
+                if (
+                    _format_generate_prompt_from_draft_confirmation(
+                        fresh_ranges,
+                        fresh_draft_sheet_url,
+                        fresh_team_status,
+                        fresh_team_summary_url,
+                    )
+                    != confirmation_content
+                ):
+                    await interaction.edit_original_response(
+                        content=(
+                            "⚠️ 募集時段或 Sheet 目的地已變更，未更新 Team Summary、"
+                            "未產生 prompt；Shift Draft 保持不變。請重新執行 command。"
+                        ),
+                        view=None,
+                    )
+                    return
+
+                metadata = await context.manager.fetch_google_sheets_metadata()
+                context.manager.log_missing_worksheet_warnings(metadata)
+                member_by_names = {
+                    member.name: member for member in source.guild.members
+                }
+                result = await context.manager.generate_prompt_from_draft(
+                    metadata,
+                    member_by_names=member_by_names,
+                    administrator_requirements=view.administrator_requirements,
+                )
+                draft_sheet_url = fresh_draft_sheet_url
+        except DraftPromptValidationError as exc:
+            for message in _split_shift_report(
+                _format_draft_prompt_validation_error(exc)
+            ):
+                await interaction.followup.send(message, ephemeral=True)
+            return
+        except Exception as exc:  # noqa: BLE001
+            await self._send_interaction_storage_error_or_raise(
+                interaction,
+                exc,
+                source=source,
+                operation="shift_register_generate_prompt_from_draft",
+            )
+            return
+
+        await interaction.followup.send(
+            _format_generate_prompt_from_draft_report(result, draft_sheet_url),
+            file=File(
+                BytesIO(result.llm_prompt.encode("utf-8")),
+                filename="shift-draft-llm-prompt.txt",
+            ),
+            ephemeral=True,
+        )
 
     @app_commands.command(
         name="assign_schedule_role",
@@ -2457,7 +2689,9 @@ class ShiftRegister(
                 )
                 for assignment in unassigned_assignments
             )
-        lines.append("附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。")
+        lines.append(
+            "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，不會隨 Sheet 調整更新。"
+        )
         return "\n".join(lines)
 
 

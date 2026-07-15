@@ -21,6 +21,11 @@ from models.shift_timeline_event_state import (
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import BORDER_NAMES, GoogleSheet, WorksheetCreationStatus
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.shift_draft_prompt import (
+    ShiftDraftPromptBaselineSource,
+    ShiftDraftPromptRunner,
+    build_shift_draft_llm_prompt,
+)
 from utils.structs_base import WorksheetContractError, validate_anchor_cell
 from utils.team_register_manager import SummaryReconciliationPlan, TeamRegisterManager
 from utils.team_register_structs import (
@@ -31,13 +36,12 @@ from utils.team_register_structs import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Hashable, Sequence
+    from collections.abc import AsyncIterator, Hashable, Mapping, Sequence
     from datetime import date
 
     from discord import Member
 
     from utils.google_sheets import AsyncioGspreadWorksheet
-    from utils.shift_scheduler import DraftSchedule
     from utils.structs_base import UserInfo
 
 from utils.google_sheets_urls import (
@@ -54,13 +58,16 @@ from utils.manager_base import (
 )
 from utils.shift_final import (
     A1Rectangle,
+    DraftScheduleInspection,
     EventDayWriteStatus,
     FinalScheduleInputError,
     FinalSchedulePlan,
+    FinalScheduleValidationKind,
     ScheduleUpdateRequest,
     build_final_schedule,
     build_schedule_update_request,
     find_final_schedule_data_range,
+    inspect_draft_schedule_rows,
     parse_a1_range,
 )
 from utils.shift_register_structs import (
@@ -74,7 +81,15 @@ from utils.shift_register_structs import (
     build_team_summary_formula,
     column_letter,
 )
-from utils.shift_scheduler import DraftTeamProfile, ShiftScheduler
+from utils.shift_scheduler import (
+    DRAFT_USERNAME_SUFFIX_PATTERN,
+    SUPPORTER_SLOT_PRIORITY,
+    DraftSchedule,
+    DraftTeamProfile,
+    HourShiftAssignment,
+    ShiftScheduler,
+    build_draft_display_names,
+)
 from utils.storage_errors import (
     StorageError,
     StorageErrorKind,
@@ -203,8 +218,51 @@ class DraftGenerationResult:
     team_source_warning: str | None
     recruitment_ranges: RecruitmentTimeRanges
     notes_snapshot: str
+    llm_prompt: str
     unregistered_usernames: tuple[str, ...] = ()
     team_summary_url: str | None = None
+
+
+class DraftPromptValidationKind(StrEnum):
+    DRAFT_EMPTY = "draft_empty"
+    DRAFT_HEADER = "draft_header"
+    DRAFT_AXIS = "draft_axis"
+    DRAFT_EXTRA_AXIS = "draft_extra_axis"
+    DRAFT_ROLE_VALUE = "draft_role_value"
+    THRESHOLD_LABEL = "threshold_label"
+    THRESHOLD_VALUE = "threshold_value"
+    RUNNER_IDENTITY = "runner_identity"
+    SUPPORTER_IDENTITY = "supporter_identity"
+
+
+@dataclass(frozen=True)
+class DraftPromptValidationIssue:
+    kind: DraftPromptValidationKind
+    cell: str
+    expected: object
+    detected: object
+
+
+class DraftPromptValidationError(Exception):
+    def __init__(self, issues: tuple[DraftPromptValidationIssue, ...]) -> None:
+        super().__init__("invalid current Draft prompt input")
+        self.issues = issues
+
+
+@dataclass(frozen=True)
+class CurrentDraftPromptInputs:
+    schedule: DraftSchedule
+    runners_by_hour: dict[int, ShiftDraftPromptRunner]
+    encore_power_threshold: float
+
+
+@dataclass(frozen=True)
+class DraftPromptGenerationResult:
+    llm_prompt: str
+    encore_power_threshold: float
+    team_source_status: TeamSourceStatus
+    team_source_warning: str | None
+    team_summary_url: str | None
 
 
 class FinalScheduleReconfirmationRequired(Exception):  # noqa: N818
@@ -245,6 +303,192 @@ TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING = (
     "⚠️🛠️ Team Sourceを読み取れなかったため、今回はISVを使用せず、"
     "アンコを空欄にしています。"
 )
+
+
+_FINAL_TO_DRAFT_PROMPT_KIND = {
+    FinalScheduleValidationKind.EMPTY: DraftPromptValidationKind.DRAFT_EMPTY,
+    FinalScheduleValidationKind.HEADER: DraftPromptValidationKind.DRAFT_HEADER,
+    FinalScheduleValidationKind.AXIS: DraftPromptValidationKind.DRAFT_AXIS,
+    FinalScheduleValidationKind.EXTRA_AXIS: DraftPromptValidationKind.DRAFT_EXTRA_AXIS,
+    FinalScheduleValidationKind.ROLE_VALUE: DraftPromptValidationKind.DRAFT_ROLE_VALUE,
+}
+
+
+def _draft_prompt_cell(row: int | None, column: int | None) -> str:
+    return f"{column_letter(column or 1)}{row or 1}"
+
+
+def _draft_prompt_runner_member(
+    label: str,
+    member_by_names: Mapping[str, Member],
+) -> Member | None:
+    match = DRAFT_USERNAME_SUFFIX_PATTERN.search(label)
+    if match is not None:
+        username = match.group(1)
+        member = member_by_names.get(username)
+        if member is not None and label == f"{member.display_name} ⟨@{username}⟩":
+            return member
+        return None
+    matches = [
+        member for member in member_by_names.values() if member.display_name == label
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _current_draft_prompt_inputs(  # noqa: C901, PLR0912
+    *,
+    inspection: DraftScheduleInspection,
+    draft_grid: Sequence[Sequence[object]],
+    shifts: Sequence[Shift],
+    member_by_names: Mapping[str, Member],
+) -> CurrentDraftPromptInputs:
+    issues = [
+        DraftPromptValidationIssue(
+            _FINAL_TO_DRAFT_PROMPT_KIND[issue.kind],
+            _draft_prompt_cell(issue.row, issue.column),
+            issue.expected,
+            issue.detected,
+        )
+        for issue in inspection.issues
+    ]
+
+    threshold_row = len(inspection.rows) + 2
+    threshold_values = _padded_row(
+        draft_grid[threshold_row - 1] if threshold_row <= len(draft_grid) else [],
+        13,
+    )
+    threshold_label = threshold_values[10]
+    if threshold_label != DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL:
+        issues.append(
+            DraftPromptValidationIssue(
+                DraftPromptValidationKind.THRESHOLD_LABEL,
+                f"K{threshold_row}",
+                DraftWorksheetContent.CANDIDATE_THRESHOLD_LABEL,
+                threshold_label,
+            )
+        )
+
+    threshold_value = threshold_values[11]
+    threshold_number: float | None = None
+    if type(threshold_value) in (int, float):
+        try:
+            candidate = float(threshold_value)
+        except OverflowError:
+            pass
+        else:
+            if math.isfinite(candidate) and candidate >= 0:
+                threshold_number = candidate
+    if threshold_number is None:
+        issues.append(
+            DraftPromptValidationIssue(
+                DraftPromptValidationKind.THRESHOLD_VALUE,
+                f"L{threshold_row}",
+                "有限且非負的數字",
+                threshold_value,
+            )
+        )
+
+    runners_by_hour: dict[int, ShiftDraftPromptRunner] = {}
+    runner_members: dict[str, Member] = {}
+    for row_number, row in enumerate(inspection.rows, start=2):
+        if not row.runner:
+            continue
+        member = _draft_prompt_runner_member(row.runner, member_by_names)
+        if member is None:
+            issues.append(
+                DraftPromptValidationIssue(
+                    DraftPromptValidationKind.RUNNER_IDENTITY,
+                    f"B{row_number}",
+                    "可解析的 Discord 成員",
+                    row.runner,
+                )
+            )
+        else:
+            runners_by_hour[row.hour] = ShiftDraftPromptRunner(
+                member.name,
+                row.runner,
+            )
+            runner_members[member.name] = member
+
+    identity_shifts = list(shifts)
+    entry_usernames = {shift.username for shift in shifts}
+    identity_shifts.extend(
+        Shift(
+            username=member.name,
+            display_name=member.display_name,
+            original_message="",
+            slots=set(),
+        )
+        for member in runner_members.values()
+        if member.name not in entry_usernames
+    )
+    display_names = build_draft_display_names(identity_shifts)
+    supporter_by_username = {
+        shift.username: display_names[shift.username] for shift in shifts
+    }
+    supporter_by_name = {
+        canonical_name: username
+        for username, canonical_name in supporter_by_username.items()
+    }
+
+    assignments: list[HourShiftAssignment] = []
+    for row_number, row in enumerate(inspection.rows, start=2):
+        supporters: dict[str, str] = {}
+        for slot, column, label in zip(
+            SUPPORTER_SLOT_PRIORITY,
+            range(3, 8),
+            (row.encore, *row.honso, row.standby),
+            strict=True,
+        ):
+            if not label:
+                continue
+            username = supporter_by_name.get(label)
+            if username is None:
+                issues.append(
+                    DraftPromptValidationIssue(
+                        DraftPromptValidationKind.SUPPORTER_IDENTITY,
+                        f"{column_letter(column)}{row_number}",
+                        "Entry に存在する可逆な名前",
+                        label,
+                    )
+                )
+                continue
+            supporters[slot] = username
+
+        assigned = set(supporters.values())
+        runner_username = (
+            runners_by_hour[row.hour].discord_username
+            if row.hour in runners_by_hour
+            else None
+        )
+        unassigned = [
+            shift.username
+            for shift in shifts
+            if row.is_recruitment
+            and row.hour in shift
+            and shift.username not in assigned
+            and shift.username != runner_username
+        ]
+        assignments.append(
+            HourShiftAssignment(
+                row.hour,
+                supporters,
+                unassigned,
+            )
+        )
+
+    if issues:
+        raise DraftPromptValidationError(tuple(issues))
+    return CurrentDraftPromptInputs(
+        schedule=DraftSchedule(
+            runner=None,
+            hours=[row.hour for row in inspection.rows],
+            assignments=assignments,
+            display_names=supporter_by_username,
+        ),
+        runners_by_hour=runners_by_hour,
+        encore_power_threshold=threshold_number,
+    )
 
 
 class ShiftRegisterManager(
@@ -1845,6 +2089,7 @@ class ShiftRegisterManager(
         member_by_names: dict[str, Member],
         encore_power_threshold: float,
         runner: UserInfo | None = None,
+        administrator_requirements: str = "",
     ) -> DraftGenerationResult:
         """Build the draft schedule and overwrite the draft worksheet."""
         metadata, structure_changed = await self._ensure_current_worksheets(
@@ -1936,6 +2181,7 @@ class ShiftRegisterManager(
                     draft_grid=shift_grids[draft_worksheet.id],
                     encore_power_threshold=encore_power_threshold,
                     runner=runner,
+                    administrator_requirements=administrator_requirements,
                 )
                 shift_sheet = await self.get_google_sheet()
                 if source is None:
@@ -1977,6 +2223,174 @@ class ShiftRegisterManager(
             if structure_changed and (partial := partial_success_storage_error(exc)):
                 raise partial from partial.__cause__
             raise
+
+    async def generate_prompt_from_draft(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        *,
+        member_by_names: dict[str, Member],
+        administrator_requirements: str = "",
+    ) -> DraftPromptGenerationResult:
+        """Build a prompt from the current Draft and refresh Team Summary only."""
+        entry_worksheet = metadata.entry_worksheets.worksheet
+        draft_worksheet = metadata.draft_worksheet.worksheet
+        if entry_worksheet is None or draft_worksheet is None:
+            raise StorageError(StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET)
+
+        (
+            source_status,
+            source_config,
+            source_metadata,
+        ) = await self._resolve_team_source_metadata()
+        resources = [
+            worksheet_transaction_key(metadata.sheet_url, entry_worksheet.id),
+            worksheet_transaction_key(metadata.sheet_url, draft_worksheet.id),
+        ]
+        if source_config is not None and source_metadata is not None:
+            resources.extend(
+                worksheet_transaction_key(source_config.sheet_url, worksheet.id)
+                for worksheet in source_metadata
+                if worksheet.id is not None
+            )
+
+        async with worksheet_transactions(resources):
+            (
+                shift_grids,
+                resolution,
+                source_grids,
+            ) = await self._read_shift_and_team_source_locked(
+                metadata.sheet_url,
+                [entry_worksheet, draft_worksheet],
+                source_status,
+                source_config,
+                source_metadata,
+            )
+            summary_mutations = ()
+            source = resolution.source
+            if (
+                source_config is not None
+                and source_metadata is not None
+                and source_grids is not None
+            ):
+                source_grid_plan = self._summary_grid_plan(
+                    source_config,
+                    source_metadata,
+                    source_grids,
+                    member_by_names,
+                )
+                resolution = self._build_team_source(
+                    source_config,
+                    source_metadata,
+                    [list(source_grid_plan.summary_headers)],
+                )
+                source = resolution.source
+                if source is None:
+                    profile_resolution = DraftTeamProfileResolution(
+                        TeamSourceStatus.INVALID,
+                        {},
+                    )
+                else:
+                    profile_resolution = self._draft_profiles_from_summary(
+                        source,
+                        source_grid_plan.summaries,
+                    )
+                    summary_mutations = source_grid_plan.mutations
+            else:
+                profile_resolution = DraftTeamProfileResolution(
+                    resolution.status,
+                    {},
+                )
+
+            entry_grid = shift_grids[entry_worksheet.id]
+            _layout, header_rows, identity_rows, availability_rows = (
+                _entry_layout_from_grid(entry_grid)
+            )
+            header_row = _padded_row(
+                header_rows[1] if len(header_rows) > 1 else [],
+                EntryWorksheetContent.COLUMN_COUNT,
+            )
+            shifts = EntryWorksheetContent.shifts_from_ranges(
+                [header_row]
+                if any(not _is_blank(value) for value in header_row)
+                else [],
+                identity_rows,
+                availability_rows,
+            )
+            config = await self.get_sheet_config()
+            recruitment_ranges = RecruitmentTimeRanges.from_json(
+                config.recruitment_time_ranges
+            )
+            normalized = recruitment_ranges.ranges.ranges
+            expected_hours = tuple(range(normalized[0].start, normalized[-1].end))
+            active_slots = recruitment_ranges.ranges.slots
+            shifts = [
+                Shift(
+                    username=shift.username,
+                    display_name=shift.display_name,
+                    original_message=shift.original_message,
+                    slots=set(shift) & active_slots,
+                )
+                for shift in shifts
+            ]
+            draft_grid = shift_grids[draft_worksheet.id]
+            inspection = inspect_draft_schedule_rows(
+                draft_grid,
+                expected_hours=expected_hours,
+                recruitment_slots=frozenset(active_slots),
+            )
+            prompt_inputs = _current_draft_prompt_inputs(
+                inspection=inspection,
+                draft_grid=draft_grid,
+                shifts=shifts,
+                member_by_names=member_by_names,
+            )
+            llm_prompt = build_shift_draft_llm_prompt(
+                schedule=prompt_inputs.schedule,
+                shifts=shifts,
+                team_profiles=(
+                    profile_resolution.profiles
+                    if profile_resolution.status is TeamSourceStatus.AVAILABLE
+                    else None
+                ),
+                recruitment_slots=active_slots,
+                recruitment_time_range=recruitment_ranges.announcement_display(),
+                encore_power_threshold=prompt_inputs.encore_power_threshold,
+                administrator_requirements=administrator_requirements,
+                baseline_source=ShiftDraftPromptBaselineSource.CURRENT_SHEET_DRAFT,
+                runners_by_hour=prompt_inputs.runners_by_hour,
+            )
+            team_summary_url = (
+                google_sheet_url_with_gid(
+                    source.config.sheet_url,
+                    source.metadata.summary_worksheet.id,
+                )
+                if source is not None
+                else None
+            )
+            result = DraftPromptGenerationResult(
+                llm_prompt=llm_prompt,
+                encore_power_threshold=prompt_inputs.encore_power_threshold,
+                team_source_status=profile_resolution.status,
+                team_source_warning=_draft_team_source_warning(
+                    profile_resolution.status
+                ),
+                team_summary_url=team_summary_url,
+            )
+
+            if source is None:
+                return result
+            if normalize_google_sheet_url(source.config.sheet_url) == (
+                normalize_google_sheet_url(metadata.sheet_url)
+            ):
+                shift_sheet = await self.get_google_sheet()
+                await shift_sheet.batch_update_grid(summary_mutations)
+            else:
+                source_sheet = GoogleSheet(
+                    source.config.sheet_url,
+                    self.service_account_path,
+                )
+                await source_sheet.batch_update_grid(summary_mutations)
+            return result
 
     def _summary_grid_plan(
         self,
@@ -2030,6 +2444,7 @@ class ShiftRegisterManager(
         draft_grid: list[list[object]],
         encore_power_threshold: float,
         runner: UserInfo | None,
+        administrator_requirements: str,
     ) -> tuple[DraftGenerationResult, list[dict[str, object]]]:
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet
@@ -2145,6 +2560,20 @@ class ShiftRegisterManager(
             ),
             team_source_warning=team_source_warning,
         )
+        llm_prompt = build_shift_draft_llm_prompt(
+            schedule=schedule,
+            shifts=shifts,
+            team_profiles=(
+                profiles
+                if profile_resolution.status is TeamSourceStatus.AVAILABLE
+                else None
+            ),
+            recruitment_slots=active_slots,
+            recruitment_time_range=recruitment_time_range,
+            encore_power_threshold=encore_power_threshold,
+            administrator_requirements=administrator_requirements,
+            runner_username=runner.username if runner is not None else None,
+        )
         notes_row = len(schedule.assignments) + 3
         notes_cell = f"A{notes_row}"
         notes_cleanup_updates = (
@@ -2236,6 +2665,7 @@ class ShiftRegisterManager(
                 team_source_warning=team_source_warning,
                 recruitment_ranges=recruitment_ranges,
                 notes_snapshot=notes_snapshot,
+                llm_prompt=llm_prompt,
                 unregistered_usernames=unregistered_usernames,
                 team_summary_url=team_summary_url,
             ),

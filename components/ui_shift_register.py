@@ -166,13 +166,14 @@ class GenerateShiftScheduleConfirmView(View):
         destination_label: str,
         destination_url: str,
         timeout: float = 20.0,
+        destructive: bool = True,
     ) -> None:
         super().__init__(timeout=timeout)
         self.requesting_user_id = requesting_user_id
         self.destination_label = destination_label
         self.destination_url = destination_url
         self.value: bool | None = None
-        self.add_item(GenerateShiftScheduleConfirmButton())
+        self.add_item(GenerateShiftScheduleConfirmButton(destructive=destructive))
         self.add_item(GenerateShiftScheduleCancelButton())
 
     async def authorize(self, interaction: Interaction) -> bool:
@@ -190,8 +191,11 @@ class GenerateShiftScheduleConfirmView(View):
 
 
 class GenerateShiftScheduleConfirmButton(Button):
-    def __init__(self) -> None:
-        super().__init__(label="確認生成", style=ButtonStyle.danger)
+    def __init__(self, *, destructive: bool) -> None:
+        super().__init__(
+            label="確認生成",
+            style=ButtonStyle.danger if destructive else ButtonStyle.primary,
+        )
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
@@ -228,6 +232,74 @@ class GenerateShiftScheduleCancelButton(Button):
             view=None,
         )
         view.stop()
+
+
+class GenerateShiftDraftConfirmView(GenerateShiftScheduleConfirmView):
+    """Confirm Draft generation while retaining optional per-run LLM needs."""
+
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        destination_label: str,
+        destination_url: str,
+        destructive: bool = True,
+    ) -> None:
+        super().__init__(
+            requesting_user_id=requesting_user_id,
+            destination_label=destination_label,
+            destination_url=destination_url,
+            timeout=300.0,
+            destructive=destructive,
+        )
+        self.administrator_requirements = ""
+        self.add_item(GenerateShiftDraftRequirementsButton())
+
+
+class GenerateShiftDraftRequirementsButton(Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="填寫 LLM 排班需求",
+            style=ButtonStyle.primary,
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(
+            view, GenerateShiftDraftConfirmView
+        ) or not await view.authorize(interaction):
+            return
+        await interaction.response.send_modal(ShiftDraftRequirementsModal(view))
+
+
+class ShiftDraftRequirementsModal(Modal):
+    """Edit requirements retained only until this Draft confirmation ends."""
+
+    def __init__(self, view: GenerateShiftDraftConfirmView) -> None:
+        super().__init__(title="LLM 排班需求")
+        self.confirm_view = view
+        self.requirements: TextInput = TextInput(
+            label="這次排班的額外需求（選填）",  # noqa: RUF001
+            placeholder=(
+                "例如：Alice 需排 18-20 本走；Bob 20 點後不可排"  # noqa: RUF001
+            ),
+            default=view.administrator_requirements,
+            required=False,
+            max_length=4000,
+            style=TextStyle.paragraph,
+        )
+        self.add_item(self.requirements)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if not await self.confirm_view.authorize(interaction):
+            return
+        self.confirm_view.administrator_requirements = self.requirements.value
+        message = (
+            "✅ 已儲存這次生成使用的 LLM 排班需求。"
+            if self.requirements.value
+            else "✅ 已清除這次生成使用的 LLM 排班需求。"
+        )
+        await interaction.response.send_message(message, ephemeral=True)
 
 
 class ScheduleRoleDecision(StrEnum):
