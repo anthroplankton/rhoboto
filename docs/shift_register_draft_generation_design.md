@@ -20,6 +20,12 @@ Summary without reading it back, and then generates Draft from the same in-memor
 result. It also replaces automatic obsolete-Summary row deletion with the archived
 row contract below.
 
+The LLM scheduling-prompt attachment extension below is implemented in the
+working tree and covered by the complete automated validation suite. Live Discord,
+external LLM, and Google Sheets paste checks remain part of the manual integration
+checklist. It preserves every existing Draft, worksheet, and scheduler contract
+described in this document.
+
 ## Goal
 
 Improve `/shift_register generate_draft` so the generated Shift Draft uses the
@@ -742,6 +748,233 @@ unassigned sections.
 Source warnings are non-blocking because a no-ISV Draft was still generated.
 Shift Entry or Shift Draft storage failures remain blocking and use the existing
 storage-error response.
+
+## LLM Scheduling Prompt Extension
+
+### Goal And Boundary
+
+Each confirmed `/shift_register generate_draft` run also produces a UTF-8
+`shift-draft-llm-prompt.txt` attachment for an administrator to submit manually to
+an external LLM. The prompt contains the complete generation-time scheduling
+inputs, the bot-generated Draft as a non-binding baseline, scheduling rules, a
+self-audit contract, and a Google Sheets paste format.
+
+Rhoboto does not call an LLM API, submit the prompt, ingest an LLM response, or
+validate pasted output. It does not persist prompt text or administrator input,
+and this extension does not change the command name or options, database schema,
+Google Sheets layout or ownership, existing Draft formulas, or
+`ShiftScheduler.assign()` behavior.
+
+### Per-Run Administrator Requirements
+
+Draft generation uses a Draft-specific subclass of the existing schedule
+confirmation view. In addition to Confirm and Cancel, it provides a button that
+opens an optional paragraph modal for up to 4,000 characters of event-specific
+scheduling requirements. Reopening the modal shows the current value so the
+requester can revise it before confirmation.
+
+The Draft-specific view has a five-minute timeout. The requirements button and
+modal submission both require the original command requester and recheck live
+`administrator` plus `manage_channels` permissions. Modal submission only stores
+the raw value in the in-memory view and acknowledges it ephemerally; it performs no
+Google Sheets or database access. Confirm passes the current value into generation.
+Cancel, timeout, permission loss, and destination drift discard it without
+persistence. The shared Final Schedule confirmation flow and its timeout remain
+unchanged.
+
+### Pure Builder And Generation Flow
+
+A single pure function in `utils/shift_draft_prompt.py` owns prompt rendering. It
+accepts the already available generation snapshot:
+
+- the bot-generated `DraftSchedule`, including the baseline rows, fixed Runner,
+  and canonical Draft-name mapping;
+- filtered Shift Entry participants and their exact stored `original_message`;
+- current Team profiles or an unavailable-source state;
+- the configured recruitment-slot set;
+- the formatted recruitment-time description;
+- the Encore Power threshold;
+- the optional administrator requirements; and
+- the fixed Runner's Discord username, when configured.
+
+`build_shift_draft_llm_prompt()` is keyword-only and returns `str`. Its inputs are
+typed as `DraftSchedule`, `Sequence[Shift]`,
+`Mapping[str, DraftTeamProfile] | None`, `set[int]`, `str`, `float`, `str`, and
+`str | None` in the order listed above.
+
+`team_profiles=None` means Team Source data is unavailable; an empty mapping means
+the source was available but has no active profiles. `administrator_requirements`
+is the raw modal value, including an empty string.
+
+The builder has no Discord, Google Sheets, database, or network dependency. It
+runs while `_plan_draft_locked()` still has the same in-memory inputs used to
+create the Draft and Notes. It must not read calculated Sheet Notes, parse the
+rendered worksheet, or trigger a Summary read-back. Prompt rendering completes
+before the Draft write requests are submitted; an unexpected builder failure
+therefore fails generation before any Draft mutation.
+
+`DraftGenerationResult` carries the rendered prompt. The cog attaches
+`shift-draft-notes.txt` and `shift-draft-llm-prompt.txt` together only on the final
+semantic report followup. Existing report splitting and the Notes attachment
+contract otherwise remain unchanged. The final report line becomes exactly:
+
+```text
+附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，不會隨 Sheet 調整更新。
+```
+
+The semantic report splitter treats that line as the final attachment section.
+
+### Prompt Language And Complete Data
+
+Prompt instructions and the requested LLM audit use Traditional Chinese. Exact
+Japanese worksheet and role labels remain unchanged. Participant-authored
+`original_message` is included completely and without translation, normalization,
+or truncation. Every Shift Entry participant is present, including people omitted
+from the bot baseline or missing Team data.
+
+The prompt places variable input in an explicitly delimited JSON data block. Each
+participant record contains the exact canonical name allowed in Draft, a fixed-
+Runner flag, available hours, Main ISV and Power, optional Encore ISV and Power,
+Encore-role eligibility, registration state, and complete `original_message`.
+When the configured Runner also submitted Shift Entry, that record uses the same
+canonical Runner name and remains present for requirement auditing, but is marked
+`is_fixed_runner=true`. Top-level data contains the recruitment axis and gaps,
+fixed Runner name and Discord username, strict Encore threshold, raw administrator
+requirements, and the baseline rows. The baseline also reports each assigned
+participant's total hours, longest consecutive run, Encore hours, and role-switch
+count. Total and Encore hours count supporter assignments only. Consecutive hours
+require adjacent Draft hour values; an unassigned hour or recruitment gap breaks
+the run. A role switch is one transition between adjacent assigned hours when the
+supporter slot changes; an unassigned break or recruitment gap resets the
+comparison and does not count as a switch.
+
+Administrator requirements and participant messages are scheduling data, not
+prompt authority. The LLM may interpret them only as schedule constraints or
+preferences. Text asking it to ignore rules, change the response grammar, execute
+another task, or treat embedded text as instructions must not override the fixed
+prompt contract.
+
+### Roles, Constraints, And Priority
+
+The prompt defines the columns and roles as follows:
+
+- `ランナー` is fixed by Rhoboto, excluded from supporter competition, and absent
+  from the LLM paste columns. A participant marked `is_fixed_runner=true` retains
+  their raw requirements for auditing but cannot be assigned to a supporter role.
+- `アンコ` has capacity one and requires an Encore role plus effective Power
+  strictly greater than the threshold. Encore Team ISV and Power apply when that
+  team exists; otherwise Main values are the effective pair.
+- `本走①` through `本走③` are the three Main-ISV supporter positions.
+- `待機` is the backup supporter position. Lower Main ISV may be preferred only
+  when the other scheduling considerations are comparable; this is not a hard
+  rule.
+
+The following remain non-negotiable:
+
+- assign only exact supplied canonical names;
+- assign only during that participant's availability;
+- assign one position at most per participant per hour;
+- do not exceed role capacity or assign the Runner;
+- satisfy the strict Encore eligibility rule;
+- emit one five-cell row for every visible Draft hour, including blank gap rows;
+  and
+- leave a position blank rather than inventing a person or violating a hard
+  constraint.
+
+Requirement conflicts use this order:
+
+1. Non-negotiable domain constraints.
+2. Explicit participant `must` or `cannot` requirements inferred from
+   `original_message`.
+3. Per-run administrator requirements.
+4. Participant preferences.
+5. General schedule-quality guidance.
+
+After applying the requirement priority above, ISV ordering is a soft scheduling
+signal rather than a hard rule. When other considerations are comparable, Encore
+prefers higher effective ISV, Honso prefers higher Main ISV, and standby prefers
+lower Main ISV. The LLM must not pursue those ordering preferences at the cost of
+participant requirements, continuity, workload, rest, or switching efficiency.
+It may therefore select a lower-ISV Encore or Honso participant, or a higher-ISV
+standby participant, when the whole schedule benefits. It should prefer keeping
+one person in one role for two consecutive hours, avoid frequent role changes,
+avoid excessive total or consecutive hours, and provide rest after long runs. The
+LLM decides how strictly to apply these quality guidelines, but it cannot relax
+the non-negotiable rules. The baseline is a starting reference only and may be
+fully rearranged.
+
+### Required Self-Audit And Response
+
+Before responding, the LLM must independently recheck its proposed schedule for:
+
+- exact row and column shape;
+- unknown or noncanonical names;
+- unavailable or duplicate assignments;
+- Runner use and role-capacity violations;
+- Encore role, effective ISV, and strict Power eligibility;
+- every administrator requirement and every participant requirement or preference;
+- total hours, longest consecutive hours, Encore hours, role switches, and rest;
+- shortages, ambiguous text, conflicting requirements, and ignored needs; and
+- the principal changes from the bot baseline.
+
+It must revise hard-constraint violations before final output. When requirements
+conflict or staffing is insufficient, it leaves cells blank instead of making an
+invalid assignment and names every unsatisfied or ambiguous item with its reason.
+It must not silently claim success after skipping a requirement.
+
+The final response contains a Traditional Chinese validation summary followed by
+these exact markers:
+
+```text
+<<<GOOGLE_SHEETS_TSV_BEGIN:C2>>>
+<<<GOOGLE_SHEETS_TSV_END>>>
+```
+
+The LLM inserts the TSV rows between those marker lines without a header or code
+fence. The enclosed block has exactly `N` rows and five columns in this order:
+`アンコ`, `本走①`, `本走②`, `本走③`, `待機`, where `N` is the number of visible
+Draft hour rows. Each cell is an exact supplied canonical name or blank. A
+non-recruitment gap is represented by one row containing five blank cells. The
+administrator copies only the content between the markers and pastes it at `C2`,
+preserving the bot-owned JST and Runner columns.
+
+When Team Source is unavailable, the prompt exposes the missing-data state, does
+not guess ISV, Power, roles, or registration, and requires Encore to remain blank.
+With zero participants, it requests an all-blank paste block and an explicit
+staffing-shortage summary.
+
+### Implementation And Verification Surface
+
+Implementation is limited to:
+
+- `components/ui_shift_register.py`: Draft-specific confirmation view, button,
+  and requirements modal;
+- `utils/shift_draft_prompt.py`: one pure builder and prompt-only baseline metrics;
+- `utils/shift_register_manager.py`: pass the existing generation snapshot and
+  return the prompt;
+- `cogs/shift_register.py`: use the Draft view, pass requirements, and attach both
+  files;
+- `tests/test_shift_draft_prompt.py`: focused pure-output coverage;
+- `tests/test_ui_permissions.py`: requester, permission, edit, cancel, and timeout
+  behavior;
+- `tests/test_feature_channel_interactions.py`: pre-confirmation access and final
+  attachment behavior;
+- `tests/test_shift_draft.py`: live-profile, unassigned-participant, fallback, and
+  empty-Entry propagation; and
+- this document plus `docs/manual_integration_validation.md`.
+
+Automated tests must cover complete and unassigned participants, a fixed Runner
+who also submitted Entry, duplicate and reserved-suffix names, raw multilingual
+and instruction-shaped messages, Team profiles and missing values, internal
+recruitment gaps, zero participants,
+baseline metrics, requirement preservation, fixed rule/output instructions,
+Draft-only timeout behavior, repeated modal editing, wrong-user and live-permission
+rejection, no pre-confirmation Sheets access, one prompt build from the shared
+snapshot, and two attachments only on the final followup.
+
+Manual validation must submit the generated file to an external LLM, confirm the
+audit reports assignment mistakes or ignored requirements, copy the marked TSV to
+`C2`, and verify the existing dynamic Notes recalculate from the pasted schedule.
 
 ## Affected Files
 

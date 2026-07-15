@@ -21,6 +21,7 @@ from models.shift_timeline_event_state import (
 from models.team_register import TeamRegisterConfig
 from utils.google_sheets import BORDER_NAMES, GoogleSheet, WorksheetCreationStatus
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.shift_draft_prompt import build_shift_draft_llm_prompt
 from utils.structs_base import WorksheetContractError, validate_anchor_cell
 from utils.team_register_manager import SummaryReconciliationPlan, TeamRegisterManager
 from utils.team_register_structs import (
@@ -203,6 +204,7 @@ class DraftGenerationResult:
     team_source_warning: str | None
     recruitment_ranges: RecruitmentTimeRanges
     notes_snapshot: str
+    llm_prompt: str
     unregistered_usernames: tuple[str, ...] = ()
     team_summary_url: str | None = None
 
@@ -1845,6 +1847,7 @@ class ShiftRegisterManager(
         member_by_names: dict[str, Member],
         encore_power_threshold: float,
         runner: UserInfo | None = None,
+        administrator_requirements: str = "",
     ) -> DraftGenerationResult:
         """Build the draft schedule and overwrite the draft worksheet."""
         metadata, structure_changed = await self._ensure_current_worksheets(
@@ -1936,6 +1939,7 @@ class ShiftRegisterManager(
                     draft_grid=shift_grids[draft_worksheet.id],
                     encore_power_threshold=encore_power_threshold,
                     runner=runner,
+                    administrator_requirements=administrator_requirements,
                 )
                 shift_sheet = await self.get_google_sheet()
                 if source is None:
@@ -2030,6 +2034,7 @@ class ShiftRegisterManager(
         draft_grid: list[list[object]],
         encore_power_threshold: float,
         runner: UserInfo | None,
+        administrator_requirements: str,
     ) -> tuple[DraftGenerationResult, list[dict[str, object]]]:
         entry_worksheet = metadata.entry_worksheets.worksheet
         draft_worksheet = metadata.draft_worksheet.worksheet
@@ -2145,6 +2150,20 @@ class ShiftRegisterManager(
             ),
             team_source_warning=team_source_warning,
         )
+        llm_prompt = build_shift_draft_llm_prompt(
+            schedule=schedule,
+            shifts=shifts,
+            team_profiles=(
+                profiles
+                if profile_resolution.status is TeamSourceStatus.AVAILABLE
+                else None
+            ),
+            recruitment_slots=active_slots,
+            recruitment_time_range=recruitment_time_range,
+            encore_power_threshold=encore_power_threshold,
+            administrator_requirements=administrator_requirements,
+            runner_username=runner.username if runner is not None else None,
+        )
         notes_row = len(schedule.assignments) + 3
         notes_cell = f"A{notes_row}"
         notes_cleanup_updates = (
@@ -2236,6 +2255,7 @@ class ShiftRegisterManager(
                 team_source_warning=team_source_warning,
                 recruitment_ranges=recruitment_ranges,
                 notes_snapshot=notes_snapshot,
+                llm_prompt=llm_prompt,
                 unregistered_usernames=unregistered_usernames,
                 team_summary_url=team_summary_url,
             ),

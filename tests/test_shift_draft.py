@@ -9,6 +9,7 @@ import pytest
 
 from tests.fakes import FakeWorksheet
 from utils import shift_register_manager
+from utils.shift_draft_prompt import build_shift_draft_llm_prompt
 from utils.shift_register_manager import (
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftTeamProfileResolution,
@@ -989,12 +990,19 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
         "_draft_profiles_from_summary",
         resolve_profiles,
     )
+    prompt_builder = Mock(wraps=build_shift_draft_llm_prompt)
+    monkeypatch.setattr(
+        shift_register_manager,
+        "build_shift_draft_llm_prompt",
+        prompt_builder,
+    )
 
     result = await manager.generate_draft(
         metadata,
         member_by_names={},
         encore_power_threshold=35,
         runner=make_runner(),
+        administrator_requirements="Alice 優先 4-6 本走\n請檢查備考",
     )
 
     data = draft_worksheet.typed_batches[-1]
@@ -1209,6 +1217,30 @@ async def test_generate_draft_writes_draft_worksheet(  # noqa: PLR0915
     assert result.notes_snapshot.endswith(DraftWorksheetContent.TEAM_VALUE_LEGEND)
     assert "4-7 ⏎  20-22／希望あり" in result.notes_snapshot  # noqa: RUF001
     assert value_sheet.batch_reads == [[1, 2, 101, 102, 201]]
+    prompt_builder.assert_called_once()
+    prompt_kwargs = prompt_builder.call_args.kwargs
+    assert prompt_kwargs["schedule"] is result.schedule
+    assert [shift.username for shift in prompt_kwargs["shifts"]] == [
+        "alice",
+        "bob",
+        "carol",
+    ]
+    assert prompt_kwargs["shifts"][0].original_message == (
+        "4-7 ⏎  20-22／希望あり"  # noqa: RUF001
+    )
+    assert prompt_kwargs["team_profiles"]["alice"] == DraftTeamProfile(
+        main_isv=200,
+        main_power=40,
+        has_encore_role=True,
+    )
+    assert prompt_kwargs["recruitment_slots"] == {4, 5, 6, 20, 21}
+    assert prompt_kwargs["recruitment_time_range"] == "4-7・20-22"
+    assert prompt_kwargs["encore_power_threshold"] == 35
+    assert prompt_kwargs["administrator_requirements"] == (
+        "Alice 優先 4-6 本走\n請檢查備考"
+    )
+    assert prompt_kwargs["runner_username"] == "runner"
+    assert "Alice 優先 4-6 本走" in result.llm_prompt
 
 
 @pytest.mark.asyncio
@@ -1528,6 +1560,9 @@ async def test_generate_draft_accepts_completely_empty_entry(
     assert value_sheet.batch_reads == [[1, 2]]
     assert len(value_sheet.batch_updates) == 1
     assert draft_worksheet.typed_minimums == [(38, 13)]
+    assert '"team_source_available": false' in result.llm_prompt
+    assert '"participants": []' in result.llm_prompt
+    assert "輸出全部留白的 1 列" in result.llm_prompt
 
 
 @pytest.mark.asyncio
@@ -1671,6 +1706,8 @@ async def test_generate_draft_falls_back_without_team_profiles(
         ),
     ]
     assert draft_worksheet.frozen_column_counts[-1] == 1
+    assert '"team_source_available": false' in result.llm_prompt
+    assert '"discord_username": "alice"' in result.llm_prompt
 
 
 @pytest.mark.asyncio

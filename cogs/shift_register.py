@@ -32,6 +32,7 @@ from components.ui_shift_register import (
     AUTO_CLOSE_INVALIDATED_MESSAGE,
     SHIFT_REGISTER_DISPLAY_NAME,
     AssignScheduleRoleConfirmView,
+    GenerateShiftDraftConfirmView,
     GenerateShiftScheduleConfirmView,
     ScheduleRoleDecision,
     ShiftAutoCloseCallbacks,
@@ -128,7 +129,7 @@ _SHIFT_REPORT_SECTION_PREFIXES = (
     "⚠️ 編成未登録：",
     "- 募集時間【",
     "- 未排入（",
-    "附件是生成時資料的 Notes 快照",
+    "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt",
 )
 _MAX_BMP_CODE_POINT = 0xFFFF
 _FINAL_CONTRACT_VALUE_LIMIT = 160
@@ -1949,7 +1950,7 @@ class ShiftRegister(
                 team_source_status,
                 team_summary_url,
             )
-            view = GenerateShiftScheduleConfirmView(
+            view = GenerateShiftDraftConfirmView(
                 requesting_user_id=interaction.user.id,
                 destination_label="Shift Draft",
                 destination_url=draft_sheet_url,
@@ -2025,6 +2026,7 @@ class ShiftRegister(
                     member_by_names=member_by_names,
                     encore_power_threshold=float(encore_power_threshold),
                     runner=runner_info,
+                    administrator_requirements=view.administrator_requirements,
                 )
                 schedule = result.schedule
                 current_config = await context.manager.get_sheet_config()
@@ -2060,10 +2062,16 @@ class ShiftRegister(
         for index, report_message in enumerate(report_messages):
             send_kwargs: dict[str, object] = {"ephemeral": True}
             if index == len(report_messages) - 1:
-                send_kwargs["file"] = File(
-                    BytesIO(result.notes_snapshot.encode("utf-8")),
-                    filename="shift-draft-notes.txt",
-                )
+                send_kwargs["files"] = [
+                    File(
+                        BytesIO(result.notes_snapshot.encode("utf-8")),
+                        filename="shift-draft-notes.txt",
+                    ),
+                    File(
+                        BytesIO(result.llm_prompt.encode("utf-8")),
+                        filename="shift-draft-llm-prompt.txt",
+                    ),
+                ]
             await interaction.followup.send(report_message, **send_kwargs)
 
     @app_commands.command(
@@ -2457,7 +2465,9 @@ class ShiftRegister(
                 )
                 for assignment in unassigned_assignments
             )
-        lines.append("附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。")
+        lines.append(
+            "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，不會隨 Sheet 調整更新。"
+        )
         return "\n".join(lines)
 
 

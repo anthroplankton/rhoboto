@@ -151,7 +151,8 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
             "hour 4: 😀alice, 😀bob, 😀carol",
             "- 未排入（位置已滿）：",
             "hour 4: 😀dave, 😀eve",
-            "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。",
+            "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，"
+            "不會隨 Sheet 調整更新。",
         ]
     )
 
@@ -163,7 +164,8 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
     assert any(message.startswith("- 募集時間【") for message in messages)
     assert any(message.startswith("- 未排入（") for message in messages)
     assert any(
-        message.startswith("附件是生成時資料的 Notes 快照") for message in messages
+        message.startswith("附件包含生成時資料的 Notes 快照與 LLM 排班 prompt")
+        for message in messages
     )
     assert "".join(messages).replace("\n", "") == report.replace("\n", "")
 
@@ -419,7 +421,8 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"
         "- 未排入（位置已滿）：\n"
         "  - -# `4-5`：<@333>、`Dave`\n"
-        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"
+        "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，"
+        "不會隨 Sheet 調整更新。"
     )
     assert "`8-9`" not in report
     assert "`7-8`" in report
@@ -447,7 +450,7 @@ def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
     assert "`4-5`" not in report
     assert "`5-6`" not in report
     assert "募集時間【4-6】" in report
-    assert "附件是生成時資料的 Notes 快照" in report
+    assert "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt" in report
 
 
 @pytest.mark.parametrize(
@@ -471,7 +474,7 @@ def test_format_shift_draft_report_places_team_warning_before_assignments(
     assert report.index("已排入") == report.index("募集時間") + len(
         f"募集時間【{RecruitmentTimeRanges.default().announcement_display()}】\n- "
     )
-    assert report.index("已排入") < report.index("附件是生成時資料")
+    assert report.index("已排入") < report.index("附件包含生成時資料")
     assert "[Team Summary]" not in report
 
 
@@ -497,6 +500,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     )
     ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
     notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"
+    llm_prompt = (
+        "繁體中文稽核\n<<<GOOGLE_SHEETS_TSV_BEGIN:C2>>>\n<<<GOOGLE_SHEETS_TSV_END>>>"
+    )
+    expected_administrator_requirements = "Alice 必須排本走\n請檢查是否漏掉需求"
 
     class Manager:
         async def get_saved_team_summary_destination(
@@ -535,16 +542,19 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
             member_by_names: dict[str, object],
             encore_power_threshold: float,
             runner: UserInfo | None,
+            administrator_requirements: str,
         ) -> DraftGenerationResult:
             assert list(member_by_names) == ["carol"]
             assert encore_power_threshold == 35
             assert runner is None
+            assert administrator_requirements == expected_administrator_requirements
             return DraftGenerationResult(
                 schedule=schedule,
                 team_source_status=TeamSourceStatus.AVAILABLE,
                 team_source_warning=None,
                 recruitment_ranges=ranges,
                 notes_snapshot=notes_snapshot,
+                llm_prompt=llm_prompt,
                 unregistered_usernames=(
                     "carol",
                     *(f"user{index}" for index in range(300)),
@@ -568,6 +578,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
 
     class ConfirmView:
         value = True
+        administrator_requirements = expected_administrator_requirements
 
         def __init__(
             self,
@@ -593,7 +604,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
@@ -635,15 +646,38 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     )
     assert "⚠️ 編成未登録：<@333>" in (content or "")
     kwargs = interaction.followup.messages[-1][1]
-    attachment = kwargs["file"]
-    assert isinstance(attachment, File)
-    assert attachment.filename == "shift-draft-notes.txt"
-    attachment.fp.seek(0)
-    assert attachment.fp.read().decode("utf-8") == notes_snapshot
+    attachments = kwargs["files"]
+    assert len(attachments) == 2
+    assert all(isinstance(attachment, File) for attachment in attachments)
+    attachments_by_name = {
+        attachment.filename: attachment for attachment in attachments
+    }
+    assert set(attachments_by_name) == {
+        "shift-draft-notes.txt",
+        "shift-draft-llm-prompt.txt",
+    }
+    for attachment in attachments:
+        attachment.fp.seek(0)
     assert (
-        sum("file" in kwargs for _content, kwargs in interaction.followup.messages) == 1
+        attachments_by_name["shift-draft-notes.txt"].fp.read().decode("utf-8")
+        == notes_snapshot
     )
-    assert "附件是生成時資料的 Notes 快照" in (
+    assert (
+        attachments_by_name["shift-draft-llm-prompt.txt"].fp.read().decode("utf-8")
+        == llm_prompt
+    )
+    assert (
+        sum(
+            "files" in followup_kwargs
+            for _content, followup_kwargs in interaction.followup.messages
+        )
+        == 1
+    )
+    assert all(
+        "file" not in followup_kwargs
+        for _content, followup_kwargs in interaction.followup.messages
+    )
+    assert "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt" in (
         interaction.followup.messages[-1][0] or ""
     )
     assert all(
@@ -704,6 +738,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -728,7 +763,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -816,6 +851,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -840,7 +876,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
     subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -908,7 +944,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
     subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -976,6 +1012,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -995,7 +1032,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     subject._get_register_feature_channel_context_or_none = get_feature_channel_context
     subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
