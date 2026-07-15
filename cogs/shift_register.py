@@ -2083,6 +2083,16 @@ class ShiftRegister(
                 view=None,
             )
             return
+        bot_member = source.guild.me
+        if bot_member is None or not bot_member.guild_permissions.manage_roles:
+            await interaction.edit_original_response(
+                content=(
+                    "⚠️ Bot 缺少 Manage Roles 權限，未讀取 Final Schedule，"
+                    "也未變更任何 role。"
+                ),
+                view=None,
+            )
+            return
         try:
             selected_range = (
                 parse_a1_range(final_schedule_range)

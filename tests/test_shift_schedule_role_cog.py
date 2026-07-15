@@ -94,6 +94,21 @@ class WorkflowMessage:
 
 
 class WorkflowInteraction(FakeInteraction):
+    def __init__(
+        self,
+        *,
+        guild: SimpleNamespace,
+        bot_manage_roles: bool | None = True,
+    ) -> None:
+        guild.me = (
+            None
+            if bot_manage_roles is None
+            else SimpleNamespace(
+                guild_permissions=SimpleNamespace(manage_roles=bot_manage_roles)
+            )
+        )
+        super().__init__(guild=guild)
+
     async def edit_original_response(
         self,
         content: object = None,
@@ -273,6 +288,32 @@ async def test_assign_schedule_role_add_only_reads_once_and_changes_only_missing
     assert "原本已有 <@&90>：<@2>" in interaction.original_response_edits[-1][0]
     assert "⚠️ 找不到對應的 Discord 成員：`Missing`" in (
         interaction.original_response_edits[-1][0] or ""
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bot_manage_roles", [False, None])
+async def test_assign_schedule_role_rejects_missing_manage_roles_before_final_read(
+    bot_manage_roles: bool | None,
+) -> None:
+    events: list[str] = []
+    alice = FakeMember(1, name="alice", display_name="Alice")
+    role = CommandRole(90, [])
+    interaction = WorkflowInteraction(
+        guild=SimpleNamespace(id=111, members=[alice]),
+        bot_manage_roles=bot_manage_roles,
+    )
+    manager = SnapshotManager([role_source("Alice")], events)
+    subject = make_role_subject(role_context(manager), events)
+
+    await ShiftRegister.assign_schedule_role.callback(subject, interaction, role)
+
+    assert role.assignable_checks == 1
+    assert events == []
+    assert alice.calls == []
+    assert interaction.original_response_edits[-1] == (
+        "⚠️ Bot 缺少 Manage Roles 權限，未讀取 Final Schedule，也未變更任何 role。",
+        {"view": None},
     )
 
 

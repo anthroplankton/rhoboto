@@ -87,11 +87,19 @@ roles outside the bot's hierarchy. Prefix the invalid-input response with
 Bot 無法新增或清除 <role>，請確認 role 類型與角色順位。
 ```
 
-Do not separately preflight the bot's `Manage Roles` permission. Existing
-Rhoboto Discord writes call the API and handle permission failures. Missing
-`Manage Roles`, or permission drift after preview, is reported through the
-normal per-member role-operation failure lines. A true no-op may therefore
-complete without that permission.
+Also require the bot's current guild member to have `Manage Roles` before any
+Google Sheets read. `Role.is_assignable()` does not check that guild permission,
+and both conditions are prerequisites for changing the selected role. Report a
+missing permission separately from an invalid role:
+
+```text
+⚠️ Bot 缺少 Manage Roles 權限，未讀取 Final Schedule，也未變更任何 role。
+```
+
+Reject even when the eventual role plan might have been a no-op. The command
+does not read Final Schedule merely to discover a no-op when the bot cannot
+perform any required role mutation. Still handle Discord API failures per
+member because the permission or role hierarchy may change after the preflight.
 
 ### `role_update_mode`
 
@@ -445,6 +453,7 @@ The following stop before role mutation:
 
 - invalid explicit A1 range;
 - unassignable selected role;
+- bot missing `Manage Roles`;
 - missing FeatureChannel or Shift Sheet configuration;
 - missing Final worksheet;
 - Google Sheets read/structure failure;
@@ -513,6 +522,7 @@ Add focused tests for:
 - add-only, replacement, include, skip, no-op, and empty-target set differences;
 - unresolved labels in both modes;
 - minimal role calls and preservation of unrelated roles;
+- missing `Manage Roles` rejected before context or Google Sheets access;
 - individual add/remove failures without rollback;
 - soft-disabled availability and hard-cleared rejection for all three
   finalization commands;
@@ -544,7 +554,8 @@ In a development guild:
 7. edit Final, rename a resolved member, and add/remove a duplicate candidate
    while separate previews are open; confirm each drift causes no role mutation;
 8. test `@everyone`, a managed role, and a role above the bot;
-9. remove `Manage Roles` and confirm Discord failures appear in Screen A;
+9. remove `Manage Roles` and confirm the command stops before any Final
+   Schedule request or role call;
 10. verify unrelated roles are unchanged;
 11. run concurrent requests against the same and different roles;
 12. create enough mentions to require several Discord messages and verify the
@@ -567,8 +578,8 @@ In a development guild:
   from current role members.
 - **External administrator race:** use atomic single-role endpoints and report
   outcomes; do not attempt rollback or distributed locking.
-- **Missing Manage Roles:** report native API failures; document the required
-  invite update.
+- **Missing Manage Roles:** fail before Final Schedule access; retain native API
+  failure reporting for permission drift after the preflight.
 - **Large mention output:** reuse UTF-16 line-aware splitting and put controls on
   the last preview chunk.
 - **Partial Discord failure:** retain successful operations and report add/remove
