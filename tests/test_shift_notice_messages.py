@@ -8,6 +8,7 @@ from types import MappingProxyType
 import discord
 import pytest
 
+from bot import config
 from utils import shift_notice_messages
 from utils.announcement_languages import normalize_announcement_languages
 from utils.shift_notice import (
@@ -130,6 +131,9 @@ def test_normal_message_preserves_language_member_and_image_shape() -> None:
         "🕑 26時｜シフト交代インフォ",
         "🕑 26:00｜Shift Handoff Info",
     ]
+    assert all(
+        embed.color.value == config.DEFAULT_EMBED_COLOR for embed in result.embeds
+    )
     assert all(embed.timestamp == TARGET_BOUNDARY for embed in result.embeds)
     assert [field.name for field in result.embeds[0].fields] == [
         "⏹️ 結束",
@@ -300,6 +304,9 @@ def test_failure_message_has_only_generic_localized_text_and_timestamp() -> None
         "班次時間：JST",
         "Shift time: JST",
     ]
+    assert all(
+        embed.color.value == config.DEFAULT_EMBED_COLOR for embed in result.embeds
+    )
     assert all(embed.timestamp == target_boundary for embed in result.embeds)
     assert all(not embed.fields for embed in result.embeds)
     assert all(embed.image.url is None for embed in result.embeds)

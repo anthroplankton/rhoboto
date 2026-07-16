@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Final
 import discord
 from discord.utils import escape_markdown, escape_mentions
 
+from bot import config as bot_config
 from utils.message_templates import (
     MessageTemplateNotFoundError,
     render_message_template,
@@ -152,6 +153,7 @@ def _build_embeds(
             title=title,
             description=description,
             timestamp=target_boundary,
+            color=bot_config.DEFAULT_EMBED_COLOR,
         )
         embed.set_footer(text=footer)
         if snapshot is not None:

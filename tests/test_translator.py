@@ -8,6 +8,13 @@ from discord.app_commands import locale_str
 from bot.translator import Translator
 
 TRANSLATIONS = [
+    ("shift_notice", "シフト交代", "換班資訊"),
+    ("send_latest", "最新を再送", "重發最新"),
+    (
+        "Resend the latest eligible shift handoff notice.",
+        "最新の対象時点のシフト交代インフォを再送します。",
+        "重新發送最新可用的換班資訊。",
+    ),
     ("room_number", "部屋番号", "房號"),
     (
         "Configure and update the current room number.",

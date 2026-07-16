@@ -24,6 +24,18 @@ class Translator(app_commands.Translator):
                 "ja": "シフト",
                 "zh-TW": "班表",
             },
+            "shift_notice": {
+                "ja": "シフト交代",
+                "zh-TW": "換班資訊",
+            },
+            "send_latest": {
+                "ja": "最新を再送",
+                "zh-TW": "重發最新",
+            },
+            "Resend the latest eligible shift handoff notice.": {
+                "ja": "最新の対象時点のシフト交代インフォを再送します。",
+                "zh-TW": "重新發送最新可用的換班資訊。",
+            },
             "team": {
                 "ja": "編成",
                 "zh-TW": "編成",
