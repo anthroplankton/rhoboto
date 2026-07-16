@@ -252,7 +252,11 @@ def _people_value(people: Sequence[ShiftNoticePerson], empty: str) -> str:
                 f"<@{member_id}>" for member_id in person.candidate_member_ids
             )
         else:
-            rendered.append(escape_markdown(escape_mentions(person.schedule_label)))
+            rendered.append(
+                escape_markdown(escape_mentions(name))
+                if "`" in (name := person.schedule_label)
+                else f"`{name}`"
+            )
     return "、".join(rendered) or empty
 
 
