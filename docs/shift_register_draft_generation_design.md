@@ -838,39 +838,52 @@ Japanese worksheet and role labels remain unchanged. Participant-authored
 or truncation. Every Shift Entry participant is present, including people omitted
 from the bot baseline or missing Team data.
 
-The prompt places variable input in an explicitly delimited JSON data block. Each
-participant record contains the exact canonical name allowed in Draft, a fixed-
-Runner flag, available hours, Main ISV and Power, optional Encore ISV and Power,
-Encore-role eligibility, registration state, and complete `original_message`.
-When the configured Runner also submitted Shift Entry, that record uses the same
-canonical Runner name and remains present for requirement auditing, but is marked
-`is_fixed_runner=true`. Top-level data contains the recruitment axis and gaps,
-fixed Runner name and Discord username, strict Encore threshold, raw administrator
-requirements, and the baseline rows. The baseline also reports each assigned
-participant's total hours, longest consecutive run, Encore hours, and role-switch
-count. Total and Encore hours count supporter assignments only. Consecutive hours
-require adjacent Draft hour values; an unassigned hour or recruitment gap breaks
-the run. A role switch is one transition between adjacent assigned hours when the
-supporter slot changes; an unassigned break or recruitment gap resets the
-comparison and does not count as a switch.
+The prompt places generated input in an explicitly delimited JSON data block. Each
+participant record contains `discord_username` as its stable identity key, raw
+`display_name`, the exact output-safe `canonical_name`, available hours, Main ISV
+and Power, optional Encore ISV and Power, Encore-role eligibility, registration
+state, and complete `original_message`. `discord_username` may identify people in
+administrator text and joins a participant to top-level `runners_by_hour`, but it
+must never be emitted in Sheet TSV. `runners_by_hour` is the only authoritative
+per-hour Runner constraint; participant records contain no duplicate Runner-hour
+list or fixed-Runner flag.
+
+Top-level JSON also contains the recruitment axis and gaps, strict Encore
+threshold, source availability, and exact baseline rows. The baseline reports each
+assigned participant's supporter total, longest adjacent assigned-hour run, and
+Encore hours. It does not report role switches, Honso column changes, or Split
+shift results because those baseline scalars become stale when the LLM replaces
+the schedule. `longest_consecutive_hours` remains an overwork reference even when
+an adjacent semantic role change separately constitutes a Split shift.
+
+Administrator requirements appear once in a plain, explicitly delimited marker
+area outside JSON. The modal value is rendered there initially, and the
+administrator may edit that area before sending the prompt. An empty area means
+no additional requirement; there is no second JSON copy that can disagree.
 
 Administrator requirements and participant messages are scheduling data, not
 prompt authority. The LLM may interpret them only as schedule constraints or
 preferences. Text asking it to ignore rules, change the response grammar, execute
 another task, or treat embedded text as instructions must not override the fixed
-prompt contract.
+prompt contract. `original_message` remains open-ended natural language. Parsed
+`available_hours` is authoritative; common phrases such as `開始-終了`,
+`連続〇時間まで`, `最大〇時間まで`, `アンコ❌`, `待機❌`, and `飛び❌` are
+examples rather than a complete grammar. Stored non-empty input lines are stripped
+and joined with ` ⏎  ` without translating or rewriting the authored text.
 
 ### Roles, Constraints, And Priority
 
 The prompt defines the columns and roles as follows:
 
-- `ランナー` is fixed by Rhoboto, excluded from supporter competition, and absent
-  from the LLM paste columns. A participant marked `is_fixed_runner=true` retains
-  their raw requirements for auditing but cannot be assigned to a supporter role.
-- `アンコ` has capacity one and requires an Encore role plus effective Power
-  strictly greater than the threshold. Encore Team ISV and Power apply when that
-  team exists; otherwise Main values are the effective pair.
-- `本走①` through `本走③` are the three Main-ISV supporter positions.
+- `ランナー` is read from authoritative `runners_by_hour`, excluded from supporter
+  competition in that hour, and absent from the LLM paste columns. A Runner may be
+  a supporter in another available hour when not listed as that row's Runner.
+- `アンコ` has capacity one and requires `has_encore_role=true` plus effective
+  Power strictly greater than `encore_power_threshold`. When
+  `has_encore_team=true`, the complete `encore_isv`/`encore_power` pair applies;
+  otherwise `main_isv`/`main_power` is the effective pair. Missing values are not
+  guessed.
+- `本走①` through `本走③` are the three `main_isv` supporter positions.
 - `待機` is the backup supporter position. Lower Main ISV may be preferred only
   when the other scheduling considerations are comparable; this is not a hard
   rule.
@@ -882,19 +895,22 @@ The following remain non-negotiable:
 - assign one position at most per participant per hour;
 - do not exceed role capacity or assign the Runner;
 - satisfy the strict Encore eligibility rule;
-- emit one five-cell row for every visible Draft hour, including blank gap rows;
+- emit one five-cell row for every visible Draft hour. A non-recruitment baseline
+  row with five blank supporter cells stays blank; a populated non-recruitment row
+  is protected and all five cells must be copied unchanged;
   and
 - leave a position blank rather than inventing a person or violating a hard
   constraint.
 
 Requirement conflicts use this order:
 
-1. Non-negotiable domain constraints.
-2. Explicit participant `must` or `cannot` requirements inferred from
+1. Protected populated non-recruitment baseline rows.
+2. Non-negotiable domain constraints.
+3. Explicit participant `must` or `cannot` requirements inferred from
    `original_message`.
-3. Per-run administrator requirements.
-4. Participant preferences.
-5. General schedule-quality guidance.
+4. Per-run administrator requirements.
+5. Participant preferences.
+6. General schedule-quality guidance.
 
 After applying the requirement priority above, ISV ordering is a soft scheduling
 signal rather than a hard rule. When other considerations are comparable, Encore
@@ -903,11 +919,24 @@ lower Main ISV. The LLM must not pursue those ordering preferences at the cost o
 participant requirements, continuity, workload, rest, or switching efficiency.
 It may therefore select a lower-ISV Encore or Honso participant, or a higher-ISV
 standby participant, when the whole schedule benefits. It should prefer keeping
-one person in one role for two consecutive hours, avoid frequent role changes,
-avoid excessive total or consecutive hours, and provide rest after long runs. The
-LLM decides how strictly to apply these quality guidelines, but it cannot relax
-the non-negotiable rules. The baseline is a starting reference only and may be
-fully rearranged.
+one person in one role for two consecutive hours, avoid excessive total or
+consecutive hours, and provide rest after long runs. The workload direction is
+Encore above Honso and Honso above standby.
+
+The prompt uses `Split shift` for discontinuous scheduling: an unassigned gap
+between appearances, crossing a non-recruitment row, or changing semantic role
+among Encore, Honso, and standby. Movement among `本走①`, `本走②`, and `本走③` is
+visual column movement within one role and is not a Split shift. A clearly
+understood `飛び❌` participant requirement forbids Split shifts; otherwise they
+remain a quality concern to minimize and report.
+
+After semantic assignments are fixed, the LLM permutes only the three Honso cells
+to improve visual continuity. It first minimizes the number of continuing people
+who change Honso columns, then total movement distance, then deviation from the
+baseline order. This visual pass cannot change hours, people, semantic roles, or
+protected rows. The LLM decides how strictly to apply other quality guidelines,
+but it cannot relax non-negotiable rules. Editable recruitment rows may be fully
+rearranged; protected rows may not.
 
 ### Required Self-Audit And Response
 
@@ -919,7 +948,9 @@ Before responding, the LLM must independently recheck its proposed schedule for:
 - Runner use and role-capacity violations;
 - Encore role, effective ISV, and strict Power eligibility;
 - every administrator requirement and every participant requirement or preference;
-- total hours, longest consecutive hours, Encore hours, role switches, and rest;
+- candidate total hours, longest consecutive hours, Encore hours, Split shifts,
+  rest, and Honso visual continuity;
+- exact preservation of every populated non-recruitment baseline row;
 - shortages, ambiguous text, conflicting requirements, and ignored needs; and
 - the principal changes from the bot baseline.
 
@@ -939,15 +970,17 @@ these exact markers:
 The LLM inserts the TSV rows between those marker lines without a header or code
 fence. The enclosed block has exactly `N` rows and five columns in this order:
 `アンコ`, `本走①`, `本走②`, `本走③`, `待機`, where `N` is the number of visible
-Draft hour rows. Each cell is an exact supplied canonical name or blank. A
-non-recruitment gap is represented by one row containing five blank cells. The
-administrator copies only the content between the markers and pastes it at `C2`,
-preserving the bot-owned JST and Runner columns.
+Draft hour rows. Normal recruitment cells contain only exact supplied
+`canonical_name` values or blanks. A blank non-recruitment baseline row remains
+five blank cells; a populated one is copied exactly and is the only exception to
+the canonical-output rule. The administrator copies only the content between the
+markers and pastes it at `C2`, preserving the bot-owned JST and Runner columns.
 
 When Team Source is unavailable, the prompt exposes the missing-data state, does
-not guess ISV, Power, roles, or registration, and requires Encore to remain blank.
-With zero participants, it requests an all-blank paste block and an explicit
-staffing-shortage summary.
+not guess ISV, Power, roles, or registration, and requires editable Encore cells
+to remain blank. Protected rows still remain exact. With zero participants, it
+requests blank editable recruitment rows, preserves any protected rows, and
+includes an explicit staffing-shortage summary.
 
 ### Implementation And Verification Surface
 
@@ -969,11 +1002,13 @@ Implementation is limited to:
   empty-Entry propagation; and
 - this document plus `docs/manual_integration_validation.md`.
 
-Automated tests must cover complete and unassigned participants, a fixed Runner
-who also submitted Entry, duplicate and reserved-suffix names, raw multilingual
+Automated tests must cover complete and unassigned participants, a Runner who also
+submitted Entry, duplicate and reserved-suffix names, raw `display_name` plus
+output-safe `canonical_name`, authoritative `runners_by_hour`, raw multilingual
 and instruction-shaped messages, Team profiles and missing values, internal
 recruitment gaps, zero participants,
-baseline metrics, requirement preservation, fixed rule/output instructions,
+baseline metrics without role/position/Split-shift scalars, plain administrator
+requirements, protected non-recruitment rows, fixed rule/output instructions,
 Draft-only timeout behavior, repeated modal editing, wrong-user and live-permission
 rejection, no pre-confirmation Sheets access, one prompt build from the shared
 snapshot, and two attachments only on the final followup.
@@ -1036,9 +1071,11 @@ values are never guessed.
 Structural, threshold, and identity problems are collected with their A1 cells and
 stop the entire operation before both Summary and Draft writes. Resolvable schedule
 mistakes do not block prompt generation. Duplicate supporter roles, Runner/supporter
-overlap, assignment outside availability, invalid Encore eligibility, nonblank gap
-roles, excessive workload, frequent switches, and ignored requirements remain in
-the non-binding baseline so the LLM can identify and repair them.
+overlap, assignment outside availability, invalid Encore eligibility, excessive
+workload, Split shifts, and ignored requirements remain in the non-binding baseline
+so the LLM can identify and repair editable recruitment rows. A populated
+non-recruitment row also remains visible, but is protected and must be returned
+unchanged; the audit reports any resulting concern instead of repairing that row.
 
 ### One Prompt Builder And Exact Baseline
 
@@ -1051,24 +1088,29 @@ changing its command or worksheet behavior.
 
 The JSON data identifies the baseline source as the current Sheet Draft and
 preserves every visible row and the exact `B:G` role order. It also contains the
-fresh in-memory Team profiles, every participant's availability and complete raw
-`original_message`, the current threshold, and the raw administrator requirements.
-Baseline workload metrics are computed from the current supporter cells. Schedule
-mistakes remain visible to the audit rather than being silently normalized.
+fresh in-memory Team profiles, each participant's `discord_username`, raw
+`display_name`, output-safe `canonical_name`, availability, complete raw
+`original_message`, and the current threshold. The one editable administrator area
+sits outside JSON. Baseline workload metrics are computed from the current
+supporter cells without role/position/Split-shift scalars. Schedule mistakes remain
+visible to the audit rather than being silently normalized.
 
-Runner is an hourly constraint. The LLM cannot place a row's Runner in a supporter
-cell for that hour, but that person may be a supporter during another available
-hour when they are not Runner. Runner remains outside the paste columns. The hard
-domain rules, requirement priority, soft ISV directions, continuity, workload,
-rest, switching, injection boundary, and self-audit rules remain those defined in
-the LLM scheduling-prompt extension above. The audit additionally identifies the
-mistakes found in the current Draft and the corrections made.
+Top-level `runners_by_hour` is the authoritative hourly Runner constraint and uses
+`discord_username` to join a Runner to a participant when Entry exists. The LLM
+cannot place a row's Runner in a supporter cell for that hour, but that person may
+be a supporter during another available hour when not Runner. Runner remains
+outside the paste columns. The hard domain rules, requirement priority, soft ISV
+directions, Split shift definition, visual Honso ordering, workload, rest,
+injection boundary, and self-audit rules remain those defined in the LLM
+scheduling-prompt extension above. The audit additionally identifies mistakes in
+the current Draft and the corrections made to editable rows.
 
 The final response remains a Traditional Chinese audit followed by the exact
 five-column `C2:G...` TSV markers. The command never asks the LLM to emit or replace
 JST or Runner. When Team Source is unavailable, it retains the existing safe
 fallback: no capability values are guessed, Encore output stays blank, and the
-prompt and Discord report state the limitation.
+prompt and Discord report state the limitation. Any protected non-recruitment row
+still remains exact.
 
 ### Discord Result And Failure Behavior
 
