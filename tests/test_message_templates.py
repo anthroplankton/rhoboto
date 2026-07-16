@@ -757,3 +757,246 @@ def test_admin_notification_templates_render_exactly(
         "milestone_full_timestamp",
         "milestone_relative_timestamp",
     }
+
+
+def _shift_notice_template_values(
+    locale: str,
+    *,
+    case: str,
+    is_failure: bool = False,
+    next_is_internal_cut: bool = False,
+    next_is_active_empty: bool = False,
+) -> dict[str, object]:
+    def hour_label(hour: int) -> str:
+        return f"{hour}:00" if locale == "en" else f"{hour}時"
+
+    range_separator = "–"
+    return {
+        "is_failure": is_failure,
+        "case": case,
+        "previous_event_hour_label": hour_label(25),
+        "next_event_hour_label": hour_label(26),
+        "boundary_event_hour_label": hour_label(26),
+        "next_event_hour_range_label": (
+            f"26:00{range_separator}27:00"
+            if locale == "en"
+            else f"26{range_separator}27時"
+        ),
+        "emoji": "⚠️" if is_failure else "🕑",
+        "next_is_internal_cut": next_is_internal_cut,
+        "next_is_active_empty": next_is_active_empty,
+    }
+
+
+@pytest.mark.parametrize(
+    ("locale", "case", "expected"),
+    [
+        (
+            "ja",
+            "transition",
+            "25時のシフトが終わり、26時のシフトが始まる時点での交代内容と、"
+            "その前後のシフト状況です。",
+        ),
+        (
+            "ja",
+            "start",
+            "26時のシフトが始まる時点での交代内容と、その前後のシフト状況です。",
+        ),
+        (
+            "ja",
+            "end",
+            "25時のシフトが終わる時点での交代内容と、その前後のシフト状況です。",
+        ),
+        ("ja", "cut", "25時から26時へ切り替わる時点でのシフト状況です。"),
+        (
+            "zh_tw",
+            "transition",
+            "25時的班次結束、26時的班次開始時，以下是換班內容及前後班次狀況。",
+        ),
+        (
+            "zh_tw",
+            "start",
+            "26時的班次開始時，以下是換班內容及前後班次狀況。",
+        ),
+        (
+            "zh_tw",
+            "end",
+            "25時的班次結束時，以下是換班內容及前後班次狀況。",
+        ),
+        ("zh_tw", "cut", "以下是25時至26時交界的班次狀況。"),
+        (
+            "en",
+            "transition",
+            "This shows the handoff as the 25:00 shift ends and the 26:00 shift "
+            "begins, together with the surrounding shift status.",
+        ),
+        (
+            "en",
+            "start",
+            "This shows the handoff as the 26:00 shift begins, together with the "
+            "surrounding shift status.",
+        ),
+        (
+            "en",
+            "end",
+            "This shows the handoff as the 25:00 shift ends, together with the "
+            "surrounding shift status.",
+        ),
+        (
+            "en",
+            "cut",
+            "This shows the shift status at the 25:00–26:00 boundary.",
+        ),
+    ],
+)
+def test_shift_notice_description_templates_render_exact_case_first_line(
+    locale: str,
+    case: str,
+    expected: str,
+) -> None:
+    description = render_message_template(
+        "shift.notice.description",
+        locale,
+        **_shift_notice_template_values(locale, case=case),
+    )
+
+    assert description.rstrip("\n") == expected
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_internal_cut", "expected_active_empty"),
+    [
+        (
+            "ja",
+            "25時のシフトが終わる時点での交代内容と、その前後のシフト状況です。\n"
+            "26–27時はシフトカットです。",
+            "26時のシフトが始まる時点での交代内容と、その前後のシフト状況です。\n"
+            "次枠に支援者様がいません。",
+        ),
+        (
+            "zh_tw",
+            "25時的班次結束時，以下是換班內容及前後班次狀況。\n26–27時無排定班次。",
+            "26時的班次開始時，以下是換班內容及前後班次狀況。\n下一班沒有支援者。",
+        ),
+        (
+            "en",
+            "This shows the handoff as the 25:00 shift ends, together with the "
+            "surrounding shift status.\nNo shift is scheduled for 26:00–27:00.",
+            "This shows the handoff as the 26:00 shift begins, together with the "
+            "surrounding shift status.\nNo supporters are assigned to the next "
+            "shift.",
+        ),
+    ],
+)
+def test_shift_notice_description_templates_append_only_applicable_sentence(
+    locale: str,
+    expected_internal_cut: str,
+    expected_active_empty: str,
+) -> None:
+    internal_cut = render_message_template(
+        "shift.notice.description",
+        locale,
+        **_shift_notice_template_values(
+            locale,
+            case="end",
+            next_is_internal_cut=True,
+        ),
+    )
+    active_empty = render_message_template(
+        "shift.notice.description",
+        locale,
+        **_shift_notice_template_values(
+            locale,
+            case="start",
+            next_is_active_empty=True,
+        ),
+    )
+    outer_end = render_message_template(
+        "shift.notice.description",
+        locale,
+        **_shift_notice_template_values(locale, case="end"),
+    )
+
+    assert internal_cut.rstrip("\n") == expected_internal_cut
+    assert active_empty.rstrip("\n") == expected_active_empty
+    assert outer_end.rstrip("\n") == expected_internal_cut.split("\n", maxsplit=1)[0]
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_title", "expected_footer"),
+    [
+        ("ja", "🕑 26時｜シフト交代インフォ", "シフト時刻：JST｜敬称略"),
+        ("zh_tw", "🕑 26時｜換班資訊", "班次時間：JST｜敬稱從略"),
+        ("en", "🕑 26:00｜Shift Handoff Info", "Shift time: JST｜Honorifics omitted"),
+    ],
+)
+def test_shift_notice_templates_render_exact_normal_title_and_footer(
+    locale: str,
+    expected_title: str,
+    expected_footer: str,
+) -> None:
+    values = _shift_notice_template_values(locale, case="transition")
+
+    assert (
+        render_message_template("shift.notice.title", locale, **values).rstrip("\n")
+        == expected_title
+    )
+    assert (
+        render_message_template("shift.notice.footer", locale, **values).rstrip("\n")
+        == expected_footer
+    )
+
+
+@pytest.mark.parametrize(
+    ("locale", "expected_title", "expected_description", "expected_footer"),
+    [
+        (
+            "ja",
+            "⚠️ 26時｜シフト交代インフォ",
+            "シフト交代情報を表示できませんでした。\n"
+            "管理者は /shift_notice send_latest で再送できます。",
+            "シフト時刻：JST",
+        ),
+        (
+            "zh_tw",
+            "⚠️ 26時｜換班資訊",
+            "無法顯示換班資訊。\n管理員可使用 /shift_notice send_latest 重新發送。",
+            "班次時間：JST",
+        ),
+        (
+            "en",
+            "⚠️ 26:00｜Shift Handoff Info",
+            "Shift handoff information could not be displayed.\n"
+            "Administrators can resend it with /shift_notice send_latest.",
+            "Shift time: JST",
+        ),
+    ],
+)
+def test_shift_notice_templates_render_exact_generic_failure_copy(
+    locale: str,
+    expected_title: str,
+    expected_description: str,
+    expected_footer: str,
+) -> None:
+    values = _shift_notice_template_values(
+        locale,
+        case="failure",
+        is_failure=True,
+    )
+
+    assert (
+        render_message_template("shift.notice.title", locale, **values).rstrip("\n")
+        == expected_title
+    )
+    assert (
+        render_message_template(
+            "shift.notice.description",
+            locale,
+            **values,
+        ).rstrip("\n")
+        == expected_description
+    )
+    assert (
+        render_message_template("shift.notice.footer", locale, **values).rstrip("\n")
+        == expected_footer
+    )
