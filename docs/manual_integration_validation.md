@@ -377,6 +377,42 @@ do not use `generate_schemas()` as a production migration. Verify the guild
 singleton, occurrence uniqueness, both cascading foreign keys, positive nonce,
 and unchanged existing `feature_channel`/`shift_register` tables before startup.
 
+## Shift Notice
+
+Use a dedicated normal text channel and disposable Final Schedule worksheets in
+the development guild. Keep one worker running for automatic delivery checks;
+record any manual Discord or Sheets result in the table below.
+
+| Scenario | Steps | Pass Criteria | Result | Notes |
+| --- | --- | --- | --- | --- |
+| Fresh schema and setup state | Start with a fresh disposable database, run schema generation, then run `/shift_notice enable` without opening the setup modal. | `shift_notice_config` exists with one guild row, `minute_of_hour` is null, and no automatic task or Sheets request starts until setup succeeds. |  |  |
+| Explicit setup and edit | Use `Set Up Shift Notice`, submit `45`, reopen settings, and edit to `0` and then `59`; also try invalid, signed, decimal, full-width, and out-of-range values. | Only valid `0..59` values persist after a successful modal submission; the settings panel shows the saved minute in JST and invalid input leaves the prior value unchanged. |  |  |
+| Lifecycle retention and rollback | Soft-disable, re-enable, and then hard-clear the destination. Roll back by running code that does not load Shift Notice without dropping its table. | Soft disable stops delivery but retains the minute; re-enable reuses it; hard clear removes feature settings/config; rollback leaves `shift_notice_config` and its data in place. |  |  |
+| Destination singleton and replacement | Enable a second usable channel in the same guild, then delete or make the stored channel unusable and enable in a new normal text channel. | A usable singleton rejects the second claim; an unusable destination offers requester-bound `‼️ Replace Channel`, preserves the minute, and replaces only after permissions and stale state are rechecked. |  |  |
+| Command and callback permissions | Run every `/shift_notice` command as a user missing `administrator` or `manage_channels`; repeat after opening setup/settings and then removing either permission. | Commands and callbacks return the ephemeral permission error and make no state, task, or Sheet change. |  |  |
+| Destination permissions | Remove each bot permission in turn before enable, replacement, preparation, and send: `view_channel`, `send_messages`, `embed_links`, and `attach_files`. | The operation stops before Sheets when any required permission is missing; no fallback channel is used and the event is logged safely. |  |  |
+| Sources and warnings | Configure zero, one, and multiple complete Shift Registers, including a soft-disabled source; add incomplete source rows and overlapping ranges; open Shift Notice settings. | Soft-disabled complete sources participate; incomplete sources are excluded and warned; overlap losses are merged with the winning source; no-source state shows `⚠️ No Shift Register sources are configured.` and has no envelope. If warning text is long, continuation embeds/fields preserve every entry without truncation. |  |  |
+| Lazy same-spreadsheet frontier | Put previous and next selected frames in one spreadsheet and enable request logging. Trigger one notice where both frames share a worksheet and one where an adjacent source is needed. | The initial frontier reads only required previous/next worksheets, deduplicates a shared worksheet, and expands only at a duration, CUT, or ellipsis edge; each spreadsheet gets one values batch per frontier. |  |  |
+| Lazy cross-spreadsheet frontier | Put the previous and next selected frames in separate spreadsheets and repeat the frontier checks. | Each spreadsheet receives its own grouped values batch; no unrelated worksheet is opened and no source is read more than once for one notice. |  |  |
+| Final labels are non-authoritative | Deliberately replace visible Final Schedule time labels with incorrect text while keeping the database event date, range, and anchor valid. | The notice uses database-derived row addresses and event labels, ignores the visible labels, and does not read or display them. |  |  |
+| Runner frame states | Exercise a staffed Runner row, a nonblank Runner with all five lanes blank, a blank Runner with residual lane names, and an in-envelope source-less hour. | Staffed renders normally; nonblank Runner plus blank lanes is active-empty; blank Runner is CUT and ignores residual names; a source-less in-envelope interval is CUT rather than an active-empty frame. |  |  |
+| Event-hour and civil clock boundaries | Configure boundaries at event hours `24`, `25`, `26`, `27`, `28`, `29`, and `30`, including a next-day civil date; inspect labels, clock emoji, and embed timestamp. | Public labels retain source-local `24..30` notation, the clock emoji and `Embed.timestamp` use the actual aware JST civil instant, and no hour is reduced modulo 24. |  |  |
+| Honso and identity behavior | Move one person between Honso columns and across roles; test duplicate display names, exact `⟨@username⟩` suffixes, and an unresolved label. | Honso columns align by the approved deterministic six-permutation rule; cross-role movement remains visible; duplicate display names expand visually, suffixes resolve only exact usernames, unresolved labels remain escaped text, and no member is pinged. |  |  |
+| CUT window and edge markers | Create a CUT run longer than seven rows, then exercise one-sided backfill and both leading/trailing continuation cases. | The current row is included, the window contains at most seven chronological rows, unused capacity backfills from the other side, and both edge ellipses appear only when the CUT run continues beyond the visible card. |  |  |
+| Locales and one-message delivery | Set announcement languages to JA, ZH-TW, EN, and a multi-language order, then trigger one normal notice and one failure notice. | One Discord message contains one ordered localized embed per configured language, with the attachment referenced only by the first normal embed; copy, empty values, and failure copy match each locale. |  |  |
+| Preparation, retry, and failure | Observe a scheduled tick during the 30-second preparation window; inject one transient pre-send DB/Sheets failure, a deterministic render/limit failure, and a generic Discord send exception. | Preparation starts 30 seconds early; transient work retries only before the boundary-plus-five-minute cutoff; deterministic failure waits for the tick then sends one generic failure embed; an ambiguous send exception is logged once with no retry or follow-up failure. |  |  |
+| Restart and no backfill | Stop and restart the worker with a configured future minute, once before and once after a reached tick. | Startup restores only still-future work, never backfills a reached tick, and does not create a duplicate delivery task. |  |  |
+| `send_latest` recovery | Invoke `/shift_notice send_latest` before the first eligible tick, during the envelope, after the final boundary, and after a deliberate pre-send failure. | Before the first tick reports no eligible boundary; the command resends the latest reached/final boundary in the owner channel, returns an ephemeral result, never retries an ambiguous send, and does not publish the automatic failure embed on pre-send failure. |  |  |
+| Actual Discord upload | In a development guild, upload one normal image and one seven-row CUT image produced by the production renderer. | Discord displays the normal `1972px`-wide image and the CUT image at `1972 × 800`; attachment upload succeeds within the guild limit and no supporter ping occurs. |  |  |
+
+Schema rollout is additive: fresh databases create `shift_notice_config` through
+model discovery, while existing deployments require a reviewed database-specific
+migration before enabling the feature. Verify the guild uniqueness constraint,
+nullable minute, cascading FeatureChannel relation, unchanged existing tables,
+and an empty fresh table. For rollback, deploy code that does not load the model
+and leave `shift_notice_config` in place; dropping it or deleting rows is
+separately approved destructive work.
+
 ## Announcement Languages
 
 Run these checks after Team Register and Shift Register settings exist in the
