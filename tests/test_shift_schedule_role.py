@@ -6,10 +6,12 @@ import pytest
 
 from utils.shift_schedule_role import (
     DuplicateScheduleRoleGroup,
+    ScheduleRoleLabelMatch,
     ScheduleRolePlan,
     ScheduleRoleResolution,
     ScheduleRoleUpdateMode,
     plan_schedule_role_update,
+    resolve_schedule_role_label_matches,
     resolve_schedule_role_labels,
 )
 
@@ -19,6 +21,64 @@ class FakeMember:
     id: int
     name: str
     display_name: str
+
+
+def test_label_matches_use_exact_username_suffix_without_fallback() -> None:
+    result = resolve_schedule_role_label_matches(
+        (
+            "Alias ⟨@alice_one⟩",
+            "Alias ⟨@missing_user⟩",
+        ),
+        (
+            FakeMember(1, "alice_one", "Alice"),
+            FakeMember(2, "other_user", "Alias ⟨@missing_user⟩"),
+        ),
+    )
+
+    assert result == (
+        ScheduleRoleLabelMatch("Alias ⟨@alice_one⟩", (1,)),
+        ScheduleRoleLabelMatch("Alias ⟨@missing_user⟩", ()),
+    )
+
+
+def test_label_matches_use_exact_display_names_in_member_order() -> None:
+    result = resolve_schedule_role_label_matches(
+        ("Bob", "Alice"),
+        (
+            FakeMember(3, "alice_three", "Alice"),
+            FakeMember(1, "bob_user", "Bob"),
+            FakeMember(2, "alice_two", "Alice"),
+        ),
+    )
+
+    assert result == (
+        ScheduleRoleLabelMatch("Bob", (1,)),
+        ScheduleRoleLabelMatch("Alice", (3, 2)),
+    )
+
+
+def test_label_matches_preserve_unresolved_and_first_label_occurrence() -> None:
+    result = resolve_schedule_role_label_matches(
+        ("Missing", "Bob", "Missing", "Bob"),
+        (FakeMember(1, "bob_user", "Bob"),),
+    )
+
+    assert result == (
+        ScheduleRoleLabelMatch("Missing", ()),
+        ScheduleRoleLabelMatch("Bob", (1,)),
+    )
+
+
+def test_different_labels_may_match_the_same_member() -> None:
+    result = resolve_schedule_role_label_matches(
+        ("Alice ⟨@alice_one⟩", "Alice"),
+        (FakeMember(1, "alice_one", "Alice"),),
+    )
+
+    assert result == (
+        ScheduleRoleLabelMatch("Alice ⟨@alice_one⟩", (1,)),
+        ScheduleRoleLabelMatch("Alice", (1,)),
+    )
 
 
 def test_resolver_uses_two_mutually_exclusive_exact_paths() -> None:
@@ -34,6 +94,7 @@ def test_resolver_uses_two_mutually_exclusive_exact_paths() -> None:
             "Alias ⟨@missing_user⟩",
             "Alice",
             "Bob",
+            "Bob ⟨@bob_user⟩",
             "bob_user",
         ),
         members,

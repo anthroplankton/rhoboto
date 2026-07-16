@@ -25,6 +25,7 @@ from models.feature_channel_message_state import (
 )
 from models.guild_language_settings import GuildLanguageSettings
 from models.room_number import RoomNumberConfig
+from models.shift_notice import ShiftNoticeConfig
 from models.shift_register import ShiftRegisterConfig
 from models.shift_timeline_event_state import (
     ShiftTimelineEventKind,
@@ -70,6 +71,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
             "FeatureChannelMessageState",
             "GuildLanguageSettings",
             "RoomNumberConfig",
+            "ShiftNoticeConfig",
             "ShiftRegisterConfig",
             "ShiftTimelineEventState",
             "TeamRegisterConfig",
@@ -80,6 +82,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         team_description = TeamRegisterConfig.describe(serializable=True)
         shift_description = ShiftRegisterConfig.describe(serializable=True)
         room_description = RoomNumberConfig.describe(serializable=True)
+        shift_notice_description = ShiftNoticeConfig.describe(serializable=True)
         event_description = ShiftTimelineEventState.describe(serializable=True)
         notification_config_description = AdminNotificationsConfig.describe(
             serializable=True
@@ -97,6 +100,7 @@ async def test_tortoise_model_registry_init_smoke() -> None:
         assert team_description["table"] == "team_register"
         assert shift_description["table"] == "shift_register"
         assert room_description["table"] == "room_number_config"
+        assert shift_notice_description["table"] == "shift_notice_config"
         assert event_description["table"] == "shift_timeline_event_state"
         fields_by_name = {
             field["name"]: field for field in event_description["data_fields"]
@@ -252,6 +256,66 @@ async def test_admin_notifications_config_singletons_defaults_and_feature_cascad
             )
 
         assert await AdminNotificationsConfig.all().count() == 1
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_shift_notice_config_singleton_nullable_minute_and_feature_cascade() -> (
+    None
+):
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        shift_feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2000,
+            feature_name="shift_register",
+        )
+        shift_register = await ShiftRegisterConfig.create(
+            feature_channel=shift_feature_channel,
+            sheet_url="https://docs.google.com/spreadsheets/d/shift/edit",
+            entry_worksheet_id=101,
+            draft_worksheet_id=102,
+            final_schedule_worksheet_id=103,
+        )
+        shift_rows_before = await ShiftRegisterConfig.filter(
+            id=shift_register.id
+        ).values()
+        feature_channel = await FeatureChannel.create(
+            guild_id=1001,
+            channel_id=2001,
+            feature_name="shift_notice",
+        )
+        config = await ShiftNoticeConfig.create(
+            feature_channel=feature_channel,
+            guild_id=1001,
+        )
+
+        assert config.minute_of_hour is None
+
+        with pytest.raises(IntegrityError):
+            await ShiftNoticeConfig.create(
+                feature_channel=await FeatureChannel.create(
+                    guild_id=1001,
+                    channel_id=2002,
+                    feature_name="shift_notice",
+                ),
+                guild_id=1001,
+            )
+
+        with pytest.raises(IntegrityError):
+            await ShiftNoticeConfig.create(
+                feature_channel=feature_channel,
+                guild_id=1002,
+            )
+
+        await feature_channel.delete()
+
+        assert await ShiftNoticeConfig.all().count() == 0
+        assert await ShiftRegisterConfig.filter(id=shift_register.id).values() == (
+            shift_rows_before
+        )
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 

@@ -24,6 +24,12 @@ class DuplicateScheduleRoleGroup:
 
 
 @dataclass(frozen=True)
+class ScheduleRoleLabelMatch:
+    label: str
+    member_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
 class ScheduleRoleResolution:
     unique_member_ids: tuple[int, ...]
     duplicate_groups: tuple[DuplicateScheduleRoleGroup, ...]
@@ -49,45 +55,53 @@ def _ordered_unique(values: Iterable[int]) -> tuple[int, ...]:
     return tuple(dict.fromkeys(values))
 
 
-def resolve_schedule_role_labels(
+def resolve_schedule_role_label_matches(
     labels: Sequence[str],
     members: Sequence[Member],
-) -> ScheduleRoleResolution:
+) -> tuple[ScheduleRoleLabelMatch, ...]:
     members_by_username = {member.name: member for member in members}
     members_by_display_name: dict[str, list[Member]] = {}
     for member in members:
         members_by_display_name.setdefault(member.display_name, []).append(member)
 
-    unique_member_ids: list[int] = []
-    seen_unique_member_ids: set[int] = set()
-    duplicate_groups: list[DuplicateScheduleRoleGroup] = []
-    unresolved_labels: list[str] = []
+    matches: list[ScheduleRoleLabelMatch] = []
     for label in dict.fromkeys(labels):
         suffix = DRAFT_USERNAME_SUFFIX_PATTERN.search(label)
         if suffix is not None:
             member = members_by_username.get(suffix.group(1))
-            if member is None:
-                unresolved_labels.append(label)
-            elif member.id not in seen_unique_member_ids:
-                unique_member_ids.append(member.id)
-                seen_unique_member_ids.add(member.id)
-            continue
+            member_ids = () if member is None else (member.id,)
+        else:
+            member_ids = _ordered_unique(
+                member.id for member in members_by_display_name.get(label, [])
+            )
+        matches.append(ScheduleRoleLabelMatch(label, member_ids))
 
-        candidates = members_by_display_name.get(label, [])
-        if len(candidates) == 1:
-            member_id = candidates[0].id
+    return tuple(matches)
+
+
+def resolve_schedule_role_labels(
+    labels: Sequence[str],
+    members: Sequence[Member],
+) -> ScheduleRoleResolution:
+    unique_member_ids: list[int] = []
+    seen_unique_member_ids: set[int] = set()
+    duplicate_groups: list[DuplicateScheduleRoleGroup] = []
+    unresolved_labels: list[str] = []
+    for match in resolve_schedule_role_label_matches(labels, members):
+        if len(match.member_ids) == 1:
+            member_id = match.member_ids[0]
             if member_id not in seen_unique_member_ids:
                 unique_member_ids.append(member_id)
                 seen_unique_member_ids.add(member_id)
-        elif len(candidates) > 1:
+        elif match.member_ids:
             duplicate_groups.append(
                 DuplicateScheduleRoleGroup(
-                    label=label,
-                    member_ids=_ordered_unique(member.id for member in candidates),
+                    label=match.label,
+                    member_ids=match.member_ids,
                 )
             )
         else:
-            unresolved_labels.append(label)
+            unresolved_labels.append(match.label)
 
     return ScheduleRoleResolution(
         unique_member_ids=tuple(unique_member_ids),
