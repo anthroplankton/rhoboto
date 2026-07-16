@@ -436,20 +436,41 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 負荷與 Split shift、主要 baseline 變動，以及受保護資料。不得忽略問題後宣稱
 全部通過。
 
-摘要之後輸出以下兩個精確 marker。marker 之間只能放要貼到 Google Sheets 的
-TSV，不得輸出標題、時刻、Runner、列號、Markdown code fence、註解或摘要。
+摘要之後依照以下固定結構輸出：
+
+1. 單獨輸出精確的開始 marker：`{_PASTE_BEGIN}`。
+2. 下一行輸出 Markdown code fence。開頭必須是三個反引號加上 `tsv`。
+3. code fence 內只能放要貼到 Google Sheets 的 TSV，不得放標題、時刻、Runner、
+   列號、marker、註解、摘要或其他說明。
+4. TSV 後關閉 Markdown code fence。
+5. 最後單獨輸出精確的結束 marker：`{_PASTE_END}`。
+
+code fence 內的 TSV 必須符合下列規則：
+
 - 必須恰好有 {row_count} 列，順序完全等於 `visible_hours`。
-- 每列恰好五個以 tab 分隔的 cell，順序完全等於 `paste_columns`：`アンコ`、
-  `本走①`、`本走②`、`本走③`、`待機`。
-- 正常募集列的每個非空白值必須逐字複製 `participants[*].canonical_name`。
-- 空白 cell 必須保持空白，不得輸出空格、`-`、`null`、`None` 或 `""`。五個 cell
-  都空白的列仍須保留四個 tab。
+- 每列恰好五個以真正 tab 字元分隔的 cell，順序完全等於 `paste_columns`：
+  `アンコ`、`本走①`、`本走②`、`本走③`、`待機`。
+- 不得使用空格模擬 tab，也不得輸出字面文字 `\\t`。
+- 正常募集列的每個非空白值必須逐字複製
+  `participants[*].canonical_name`。
+- 空白 cell 必須保持空白，不得輸出空格、`-`、`null`、`None` 或 `""`。
+- 第一個 cell 為空白時，該列必須以 tab 字元開頭。
+- 最後一個 cell 為空白時，該列必須以 tab 字元結尾。
+- 五個 cell 都空白的列仍須保留四個 tab。
 - 受保護非募集列必須逐字複製 baseline 五欄，是 canonical-name 規則的唯一例外。
-- 管理員只會複製 marker 之間的內容並貼到 `{payload["paste_target"]}`。
+- 管理員只會複製 code fence 內的內容，並貼到
+  `{payload["paste_target"]}`。
+- 輸出前必須再次驗證：code fence 內恰好有 {row_count} 列，而且每列以 tab
+  分割後恰好有五個 cell。
+
+正確輸出結構如下；範例中的 TSV 內容只是格式示意：
+
+{_PASTE_BEGIN}
+```tsv
+<TSV 共 {row_count} 列，每列五個 tab 分隔 cell>
+```
+{_PASTE_END}
 
 {empty_participants_rule}
 受保護非募集列仍須原樣保留。
-
-{_PASTE_BEGIN}
-{_PASTE_END}
 """

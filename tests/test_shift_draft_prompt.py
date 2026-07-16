@@ -434,7 +434,9 @@ def test_prompt_defines_original_message_split_shift_visual_and_tsv_contract() -
         "總移動距離最短",
         "`participants[*].canonical_name`",
         "檢查是否排錯、漏看或忽視任何需求",
-        "不得輸出標題、時刻、Runner、列號",
+        "code fence 內只能放要貼到 Google Sheets 的 TSV",
+        "不得放標題、時刻、Runner、",
+        "列號、marker、註解、摘要或其他說明",
     ):
         assert text in prompt
 
