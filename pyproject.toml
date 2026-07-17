@@ -17,6 +17,8 @@ dependencies = [
     "pandas>=2.0.0",
     "pypdfium2>=5.11.0",
     "pillow>=12.3.0",
+    "emoji>=2.14.1",
+    "fonttools>=4.62.0",
 ]
 
 [dependency-groups]

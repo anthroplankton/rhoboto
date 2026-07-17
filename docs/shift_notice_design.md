@@ -40,7 +40,7 @@ This feature includes:
 - Pure schedule-frame, identity, continuity, handoff, and CUT-window logic.
 - A production renderer derived from the v12 local prototype.
 - Localized public embeds and a generic localized failure embed.
-- Bundled deterministic font and status-emoji assets.
+- Bundled deterministic text, symbol, color-emoji, and status-emoji assets.
 - Focused automated tests, manual integration checks, and ignored local preview
   images.
 
@@ -54,10 +54,10 @@ This feature does not include:
 - A generic scheduler, notification framework, spreadsheet repository, or image
   cache.
 - A custom thread pool, temporary render files, or runtime asset downloads.
-- Arbitrary emoji fallback for supporter display names.
 - Changes to existing Shift Register worksheet layouts, columns, commands, or
   stored identifiers.
-- New environment variables, Google API scopes, or Python dependencies.
+- New environment variables, Google API scopes, or Python dependencies unrelated
+  to the renderer's bundled font selection and emoji tokenization.
 
 ## Terminology
 
@@ -558,7 +558,7 @@ The approved production differences are limited to:
 - event hours through 30;
 - the seven-row CUT window and edge ellipses;
 - true 2x raster dimensions and 192-DPI metadata;
-- a bundled Noto font; and
+- bundled text, symbol, and color-emoji fonts; and
 - bundled PNG Twemoji status assets.
 
 Do not port the prototype CLI, catalog generator, review wireframes, SVG rendering
@@ -579,20 +579,54 @@ stack, or prototype-only dependency files.
 
 ### Font and emoji assets
 
-Bundle the full `NotoSansCJKjp-VF.otf` variable font, approximately 29.3 MB, and
-use its regular and bold axes through Pillow. Bundle its OFL license beside the
-asset.
+Keep Pillow as the raster renderer and bundle every font used by supporter-name
+rendering. Select the first bundled text font whose cmap covers the complete text
+token, in this fixed order:
 
-Bundle the six fixed official Twemoji 17.0.3 `72x72` PNG assets used by the v12
-status vocabulary and include the required CC-BY attribution. They are `🔃`
-(`1f503`), `↘️` (`2198`), `↙️` (`2199`), `⏬` (`23ec`), `⏹️` (`23f9`), and `⬇️`
-(`2b07`). Pin the upstream version and record the vendored asset origin in the
-implementation change.
+1. `NotoSansCJKjp-VF.otf` for the existing Japanese, Chinese, Latin, and general
+   UI text;
+2. `NotoSans-VF.ttf` for broader Latin, Greek, Cyrillic, and combining-mark
+   coverage;
+3. `NotoSansSymbols2-Regular.ttf` for symbols;
+4. `unifont.otf` as the final broad BMP fallback.
 
-Pillow is already a dependency. Do not add `resvg`, an emoji package, or runtime
-font discovery/downloads. Arbitrary emoji in supporter names receive no special
-fallback: keep the name unchanged, allow an unsupported glyph to render as tofu,
-and rely on the embed identity as authoritative.
+Route recognized emoji sequences to the bundled `NotoColorEmoji.ttf`. Load its
+native color bitmap strike through Pillow, scale it in memory to the selected
+name size, and composite it into the text run. Use the `emoji` package only to
+identify complete emoji tokens, including ZWJ sequences, skin-tone modifiers,
+regional-indicator flags, keycaps, and variation selectors. Use `fontTools` only
+to inspect the bundled fonts' cmap coverage. Cache loaded fonts, color glyphs,
+and coverage; never discover system fonts or download assets at render time.
+Render every sequence recognized by the `emoji` package in color, matching the
+common terminal and Discord presentation. Only an explicit `U+FE0E` text
+variation selector keeps an emoji-capable character in the text stack.
+
+Treat an emoji sequence as indivisible during font selection, measurement, and
+middle-ellipsis truncation. Keep combining marks and variation selectors with
+their preceding text token. Measure every adjacent font run, then draw the runs
+on one shared baseline so mixed text and emoji remain vertically aligned inside
+the existing chip geometry. Preserve the current shrink-first sizing and chip
+padding. For example, `🎨🌙 Demo ૮( •ᴗ• )ა` must render the two emoji in color and
+select bundled text fallbacks for the remaining supported characters without
+changing the source display name.
+
+If no bundled text font covers a non-emoji token, render an explicit `□` in the
+image only. Do not normalize, rewrite, or persist a modified display name; the
+embed identity remains authoritative. A recognized emoji sequence unsupported
+by the bundled color font follows the same explicit image-only replacement.
+
+Bundle complete upstream licenses beside all fonts. Pin every upstream version,
+record the source path and SHA-256 digest, and keep the vendored font bytes
+unmodified.
+
+Keep the six fixed official Twemoji 17.0.3 `72x72` PNG assets for the v12 status
+vocabulary; supporter-name emoji do not replace these status icons. Include the
+required CC-BY attribution. The status assets are `🔃` (`1f503`), `↘️` (`2198`),
+`↙️` (`2199`), `⏬` (`23ec`), `⏹️` (`23f9`), and `⬇️` (`2b07`). Pin the upstream
+version and record the vendored asset origin in the implementation change.
+
+Do not add a second renderer, `resvg`, an all-in-one font-stack wrapper, runtime
+font discovery, or runtime asset downloads.
 
 ## Public Discord Message Contract
 
@@ -1042,7 +1076,12 @@ Add focused tests for at least the following:
 
 - Normal width `1972 px`, seven-row CUT size `1972 × 800`, and 192-DPI metadata.
 - Approved v12 status, inactive lane, geometry, long-name, and movement behavior.
-- Bundled font/emoji loading without network or system fonts.
+- Bundled fallback rendering for `🎨🌙 Demo ૮( •ᴗ• )ა` without network or system
+  fonts.
+- Indivisible ZWJ, skin-tone, flag, and keycap emoji during middle-ellipsis
+  truncation.
+- Shared-baseline alignment, shrink-first fitting, and explicit unsupported-token
+  replacement for mixed-font names.
 - Japanese image role labels under every announcement language.
 - Exact Japanese, Traditional Chinese, and English copy branches.
 - Three fixed non-inline field applicability rules and localized empty values.

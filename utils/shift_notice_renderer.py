@@ -6,12 +6,15 @@ from __future__ import annotations
 
 import io
 import math
+import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
-from functools import cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import emoji
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from utils.shift_notice import ShiftNoticeCaseKind, ShiftNoticeCutWindow
@@ -24,14 +27,30 @@ _LANE_COUNT = len(LANE_LABELS)
 _OUTPUT_SCALE = 2
 _ANTIALIAS = 2
 _WORK_SCALE = _OUTPUT_SCALE * _ANTIALIAS
+_EMOJI_STRIKE_SIZE = 109
+_VARIATION_SELECTOR_RANGES = ((0xFE00, 0xFE0F), (0xE0100, 0xE01EF))
+_TEXT_VARIATION_SELECTOR = "\ufe0e"
 
 ASSET_DIR = Path(__file__).parents[1] / "resources/assets/shift_notice"
 FONT_PATH = ASSET_DIR / "NotoSansCJKjp-VF.otf"
+NOTO_SANS_PATH = ASSET_DIR / "NotoSans-VF.ttf"
+SYMBOLS_FONT_PATH = ASSET_DIR / "NotoSansSymbols2-Regular.ttf"
+UNIFONT_PATH = ASSET_DIR / "unifont.otf"
+EMOJI_FONT_PATH = ASSET_DIR / "NotoColorEmoji.ttf"
+TEXT_FONT_PATHS = (FONT_PATH, NOTO_SANS_PATH, SYMBOLS_FONT_PATH, UNIFONT_PATH)
+NAME_FONT_PATHS = (*TEXT_FONT_PATHS, EMOJI_FONT_PATH)
 _TWEMOJI_DIR = ASSET_DIR / "twemoji"
 
 
 class ShiftNoticeRenderError(RuntimeError):
     """Raised when a valid Shift Notice input cannot be rendered."""
+
+
+@dataclass(frozen=True)
+class _NameRun:
+    text: str
+    font_path: Path
+    embedded_color: bool = False
 
 
 @dataclass(frozen=True)
@@ -399,6 +418,193 @@ def _font(logical_size: int, *, bold: bool) -> ImageFont.FreeTypeFont:
     font = ImageFont.truetype(FONT_PATH, size=logical_size * _WORK_SCALE)
     font.set_variation_by_name("Bold" if bold else "Regular")
     return font
+
+
+@cache
+def _font_cmap(font_path: Path) -> frozenset[int]:
+    font = TTFont(font_path, lazy=True)
+    try:
+        return frozenset(font.getBestCmap() or {})
+    finally:
+        font.close()
+
+
+@cache
+def _name_font(font_path: Path, logical_size: int) -> ImageFont.FreeTypeFont:
+    font = ImageFont.truetype(font_path, size=logical_size * _WORK_SCALE)
+    if font_path in {FONT_PATH, NOTO_SANS_PATH}:
+        font.set_variation_by_name("Bold")
+    return font
+
+
+@cache
+def _emoji_font() -> ImageFont.FreeTypeFont:
+    return ImageFont.truetype(EMOJI_FONT_PATH, size=_EMOJI_STRIKE_SIZE)
+
+
+def _is_variation_selector(character: str) -> bool:
+    codepoint = ord(character)
+    return any(start <= codepoint <= end for start, end in _VARIATION_SELECTOR_RANGES)
+
+
+def _plain_name_tokens(text: str) -> list[str]:
+    tokens: list[str] = []
+    for character in text:
+        if tokens and (
+            unicodedata.combining(character)
+            or _is_variation_selector(character)
+            or character == "\u200d"
+        ):
+            tokens[-1] += character
+        else:
+            tokens.append(character)
+    return tokens
+
+
+def _name_tokens(name: str) -> tuple[tuple[str, bool], ...]:
+    tokens: list[tuple[str, bool]] = []
+    cursor = 0
+    for match in emoji.emoji_list(name):
+        start = match["match_start"]
+        end = match["match_end"]
+        tokens.extend(
+            (token, False) for token in _plain_name_tokens(name[cursor:start])
+        )
+        matched = name[start:end]
+        if end < len(name) and name[end] == _TEXT_VARIATION_SELECTOR:
+            matched += _TEXT_VARIATION_SELECTOR
+            end += 1
+            is_emoji = False
+        else:
+            is_emoji = True
+        if is_emoji:
+            tokens.append((matched, True))
+        else:
+            tokens.extend((token, False) for token in _plain_name_tokens(matched))
+        cursor = end
+    tokens.extend((token, False) for token in _plain_name_tokens(name[cursor:]))
+    return tuple(tokens)
+
+
+def _font_supports(font_path: Path, text: str) -> bool:
+    required = {
+        ord(character)
+        for character in text
+        if character != "\u200d" and not _is_variation_selector(character)
+    }
+    return bool(required) and required <= _font_cmap(font_path)
+
+
+@lru_cache(maxsize=512)
+def _name_runs(name: str) -> tuple[_NameRun, ...]:
+    runs: list[_NameRun] = []
+    for text, is_emoji in _name_tokens(name):
+        if is_emoji and _font_supports(EMOJI_FONT_PATH, text):
+            run = _NameRun(text, EMOJI_FONT_PATH, embedded_color=True)
+        elif not is_emoji:
+            font_path = next(
+                (path for path in TEXT_FONT_PATHS if _font_supports(path, text)),
+                None,
+            )
+            run = _NameRun(text, font_path) if font_path else _NameRun("□", FONT_PATH)
+        else:
+            run = _NameRun("□", FONT_PATH)
+        if (
+            runs
+            and runs[-1].font_path == run.font_path
+            and runs[-1].embedded_color == run.embedded_color
+        ):
+            previous = runs[-1]
+            runs[-1] = _NameRun(
+                previous.text + run.text,
+                run.font_path,
+                run.embedded_color,
+            )
+        else:
+            runs.append(run)
+    return tuple(runs)
+
+
+def _name_run_bounds(
+    draw: ImageDraw.ImageDraw,
+    name: str,
+    logical_size: int,
+) -> tuple[float, float, float, float]:
+    cursor = 0.0
+    left = top = math.inf
+    right = bottom = -math.inf
+    for run in _name_runs(name):
+        bounds, advance = _name_run_metrics(draw, run, logical_size)
+        left = min(left, cursor + bounds[0])
+        top = min(top, bounds[1])
+        right = max(right, cursor + bounds[2])
+        bottom = max(bottom, bounds[3])
+        cursor += advance
+    return (0, 0, 0, 0) if left == math.inf else (left, top, right, bottom)
+
+
+def _name_run_metrics(
+    draw: ImageDraw.ImageDraw,
+    run: _NameRun,
+    logical_size: int,
+) -> tuple[tuple[float, float, float, float], float]:
+    if run.embedded_color:
+        font = _emoji_font()
+        scale = logical_size * _WORK_SCALE / _EMOJI_STRIKE_SIZE
+        bounds = draw.textbbox(
+            (0, 0),
+            run.text,
+            font=font,
+            anchor="ls",
+            embedded_color=True,
+        )
+        return (
+            tuple(value * scale for value in bounds),
+            draw.textlength(run.text, font=font, embedded_color=True) * scale,
+        )
+    font = _name_font(run.font_path, logical_size)
+    return (
+        draw.textbbox((0, 0), run.text, font=font, anchor="ls"),
+        draw.textlength(run.text, font=font),
+    )
+
+
+@lru_cache(maxsize=512)
+def _emoji_run_image(text: str, logical_size: int) -> Image.Image:
+    font = _emoji_font()
+    probe = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
+    left, top, right, bottom = probe.textbbox(
+        (0, 0),
+        text,
+        font=font,
+        anchor="ls",
+        embedded_color=True,
+    )
+    image = Image.new("RGBA", (max(1, right - left), max(1, bottom - top)))
+    ImageDraw.Draw(image).text(
+        (-left, -top),
+        text,
+        font=font,
+        anchor="ls",
+        embedded_color=True,
+    )
+    scale = logical_size * _WORK_SCALE / _EMOJI_STRIKE_SIZE
+    return image.resize(
+        (
+            max(1, round(image.width * scale)),
+            max(1, round(image.height * scale)),
+        ),
+        Image.Resampling.LANCZOS,
+    )
+
+
+def _name_width(
+    draw: ImageDraw.ImageDraw,
+    name: str,
+    logical_size: int,
+) -> float:
+    left, _top, right, _bottom = _name_run_bounds(draw, name, logical_size)
+    return (right - left) / _WORK_SCALE
 
 
 @cache
@@ -770,22 +976,25 @@ class _Renderer:
         self,
         draw: ImageDraw.ImageDraw,
         name: str,
-        font: ImageFont.FreeTypeFont,
+        logical_size: int,
         max_text_width: float,
     ) -> str:
-        if self.measure_text(draw, name, font)[0] <= max_text_width:
+        if _name_width(draw, name, logical_size) <= max_text_width:
             return name
         ellipsis = "…"
-        if self.measure_text(draw, ellipsis, font)[0] > max_text_width:
+        if _name_width(draw, ellipsis, logical_size) > max_text_width:
             return ellipsis
-        low, high = 2, len(name)
+        tokens = [text for text, _is_emoji in _name_tokens(name)]
+        low, high = 2, len(tokens)
         best = ellipsis
         while low <= high:
             keep = (low + high) // 2
             prefix = max(1, math.ceil(keep * 0.6))
             suffix = max(1, keep - prefix)
-            candidate = f"{name[:prefix]}{ellipsis}{name[-suffix:]}"
-            if self.measure_text(draw, candidate, font)[0] <= max_text_width:
+            candidate = (
+                f"{''.join(tokens[:prefix])}{ellipsis}{''.join(tokens[-suffix:])}"
+            )
+            if _name_width(draw, candidate, logical_size) <= max_text_width:
                 best = candidate
                 low = keep + 1
             else:
@@ -797,7 +1006,7 @@ class _Renderer:
         draw: ImageDraw.ImageDraw,
         name: str,
         max_width: float,
-    ) -> tuple[ImageFont.FreeTypeFont, float, float, str]:
+    ) -> tuple[int, float, float, str]:
         """Choose the first v12 size that fits, then middle-ellipsize."""
 
         candidates = (
@@ -810,29 +1019,65 @@ class _Renderer:
             (9, 1),
         )
         for size, padding in candidates:
-            font = self.font(size, bold=True)
-            text_width = self.measure_text(draw, name, font)[0]
+            text_width = _name_width(draw, name, size)
             chip_width = max(
                 self.layout.name_chip_min_width,
                 text_width + padding * 2,
             )
             if chip_width <= max_width:
-                return font, padding, chip_width, name
+                return size, padding, chip_width, name
 
-        font = self.font(9, bold=True)
+        size = 9
         padding = 1
         display = self._truncate_name_to_width(
             draw,
             name,
-            font,
+            size,
             max_width - padding * 2,
         )
-        text_width = self.measure_text(draw, display, font)[0]
+        text_width = _name_width(draw, display, size)
         chip_width = min(
             max_width,
             max(self.layout.name_chip_min_width, text_width + padding * 2),
         )
-        return font, padding, chip_width, display
+        return size, padding, chip_width, display
+
+    def draw_centered_name(
+        self,
+        canvas: Canvas,
+        rect: tuple[float, float, float, float],
+        name: str,
+        logical_size: int,
+        fill: str,
+    ) -> None:
+        left, top, right, bottom = _name_run_bounds(
+            canvas.draw,
+            name,
+            logical_size,
+        )
+        x0, y0, x1, y1 = rect
+        x = Canvas.p((x0 + x1) / 2) - (right - left) / 2 - left
+        baseline = Canvas.p((y0 + y1) / 2) - (bottom - top) / 2 - top
+        for run in _name_runs(name):
+            bounds, advance = _name_run_metrics(
+                canvas.draw,
+                run,
+                logical_size,
+            )
+            if run.embedded_color:
+                canvas.image.alpha_composite(
+                    _emoji_run_image(run.text, logical_size),
+                    dest=(round(x + bounds[0]), round(baseline + bounds[1])),
+                )
+            else:
+                canvas.draw.text(
+                    (round(x), round(baseline)),
+                    run.text,
+                    font=_name_font(run.font_path, logical_size),
+                    fill=fill,
+                    anchor="ls",
+                )
+            x += advance
 
     def draw_name_chip(
         self,
@@ -843,7 +1088,7 @@ class _Renderer:
         if not name:
             return
         x0, y0, x1, y1 = rect
-        font, _padding, chip_width, display = self.name_style(
+        logical_size, _padding, chip_width, display = self.name_style(
             canvas.draw,
             name,
             x1 - x0 - 18,
@@ -888,7 +1133,13 @@ class _Renderer:
             fill=self.theme.name_bg,
             outline=self.theme.name_border,
         )
-        self.draw_centered_text(canvas, chip_rect, display, font, self.theme.text)
+        self.draw_centered_name(
+            canvas,
+            chip_rect,
+            display,
+            logical_size,
+            self.theme.text,
+        )
 
     def draw_label_blank(self, canvas: Canvas, row_y: float) -> None:
         layout = self.layout

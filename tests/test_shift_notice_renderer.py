@@ -43,11 +43,19 @@ def renderer_module() -> ModuleType:
 def test_vendored_assets_and_complete_licenses_exist() -> None:
     binary_assets = [
         ASSET_DIR / "NotoSansCJKjp-VF.otf",
+        ASSET_DIR / "NotoSans-VF.ttf",
+        ASSET_DIR / "NotoSansSymbols2-Regular.ttf",
+        ASSET_DIR / "NotoColorEmoji.ttf",
+        ASSET_DIR / "unifont.otf",
         *(ASSET_DIR / "twemoji" / name for name in TWEMOJI_FILENAMES),
     ]
 
     assert all(path.is_file() and path.stat().st_size > 0 for path in binary_assets)
     assert (ASSET_DIR / "OFL.txt").is_file()
+    assert (ASSET_DIR / "OFL-NOTO-SANS.txt").is_file()
+    assert (ASSET_DIR / "OFL-NOTO-SYMBOLS.txt").is_file()
+    assert (ASSET_DIR / "OFL-NOTO-EMOJI.txt").is_file()
+    assert (ASSET_DIR / "COPYING-UNIFONT.txt").is_file()
     assert (ASSET_DIR / "LICENSE-GRAPHICS").is_file()
 
 
@@ -81,9 +89,13 @@ def test_attribution_records_pins_paths_digests_and_unmodified_bytes() -> None:
 
     assert "notofonts/noto-cjk@Sans2.004" in text
     assert "Sans/Variable/OTF/NotoSansCJKjp-VF.otf" in text
+    assert "notofonts/latin-greek-cyrillic@" in text
+    assert "notofonts/symbols@" in text
+    assert "googlefonts/noto-emoji@" in text
+    assert "unifoundry.com/unifont" in text
     assert "jdecked/twemoji@v17.0.3" in text
     assert all(filename in text for filename in TWEMOJI_FILENAMES)
-    assert text.count("sha256:") == 9
+    assert text.count("sha256:") == 17
     assert "unmodified" in text.lower()
     assert "render time" in text.lower()
 
@@ -933,19 +945,50 @@ def test_name_fitting_shrinks_before_using_middle_ellipsis(
     draw = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     shrink_only = "長い名前テスト長い名前"
 
-    font, _pad, _width, display = renderer.name_style(draw, shrink_only, 128)
+    size, _pad, _width, display = renderer.name_style(draw, shrink_only, 128)
     assert display == shrink_only
-    assert font.size < renderer.font(17, bold=True).size
+    assert size < renderer.layout.name_size
 
     very_long = "支援者名が非常に長いサンプル表示ABCDEFGHIJKLMN"
-    _font, _pad, width, display = renderer.name_style(draw, very_long, 128)
+    _size, _pad, width, display = renderer.name_style(draw, very_long, 128)
     assert width <= 128
     assert display.startswith(very_long[0])
     assert display.endswith(very_long[-1])
     assert "…" in display
 
 
-def test_unsupported_name_emoji_never_downloads_or_uses_another_font(
+@pytest.mark.parametrize(
+    ("compound", "max_width"),
+    [
+        ("👨‍👩‍👧‍👦", 65),
+        ("👍🏽", 65),
+        ("🇹🇼", 65),
+        ("1️⃣", 65),
+        ("e\u0301", 58),
+    ],
+)
+def test_middle_ellipsis_never_splits_compound_name_tokens(
+    renderer_module: ModuleType,
+    compound: str,
+    max_width: float,
+) -> None:
+    renderer = renderer_module._Renderer()  # noqa: SLF001
+    draw = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    display = renderer._truncate_name_to_width(  # noqa: SLF001
+        draw,
+        f"AAAAA{compound}BBBBB",
+        9,
+        max_width,
+    )
+
+    assert "…" in display
+    if compound not in display:
+        assert not {
+            character for character in compound if character not in {"\u200d", "\ufe0f"}
+        } & set(display)
+
+
+def test_mixed_name_uses_only_bundled_fallbacks_and_color_emoji(
     renderer_module: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -966,14 +1009,34 @@ def test_unsupported_name_emoji_never_downloads_or_uses_another_font(
         return truetype(font, *args, **kwargs)
 
     renderer_module._font.cache_clear()  # noqa: SLF001
+    renderer_module._name_font.cache_clear()  # noqa: SLF001
+    renderer_module._emoji_font.cache_clear()  # noqa: SLF001
     monkeypatch.setattr(ImageFont, "truetype", track_font)
+    name = "🎨🌙 Demo ૮( •ᴗ• )ა"
+    runs = renderer_module._name_runs(name)  # noqa: SLF001
+    assert [(run.text, run.font_path, run.embedded_color) for run in runs] == [
+        ("🎨🌙", renderer_module.EMOJI_FONT_PATH, True),
+        (" Demo ", renderer_module.FONT_PATH, False),
+        ("૮", renderer_module.UNIFONT_PATH, False),
+        ("( •", renderer_module.FONT_PATH, False),
+        ("ᴗ", renderer_module.NOTO_SANS_PATH, False),
+        ("• )", renderer_module.FONT_PATH, False),
+        ("ა", renderer_module.UNIFONT_PATH, False),
+    ]
+    assert renderer_module._name_runs("⏻")[0].font_path == (  # noqa: SLF001
+        renderer_module.SYMBOLS_FONT_PATH
+    )
+    unsupported = renderer_module._name_runs("\U0010ffff")  # noqa: SLF001
+    assert [(run.text, run.font_path) for run in unsupported] == [
+        ("□", renderer_module.FONT_PATH)
+    ]
     value = renderer_module.ShiftNoticeRenderInput(
         ShiftNoticeCaseKind.START,
         None,
         _frame(
             renderer_module,
             "14–15",
-            (None, "未収録🦄名前", None, None, None),
+            (None, name, None, None, None),
             (None, "1h", None, None, None),
         ),
         None,
@@ -983,7 +1046,39 @@ def test_unsupported_name_emoji_never_downloads_or_uses_another_font(
     assert _open_rendered(data).width == 1972
     assert renderer_module.FONT_PATH == ASSET_DIR / "NotoSansCJKjp-VF.otf"
     assert loaded_font_paths
-    assert set(loaded_font_paths) == {renderer_module.FONT_PATH}
+    assert set(loaded_font_paths) <= set(renderer_module.NAME_FONT_PATHS)
+    assert {
+        renderer_module.FONT_PATH,
+        renderer_module.NOTO_SANS_PATH,
+        renderer_module.EMOJI_FONT_PATH,
+        renderer_module.UNIFONT_PATH,
+    } <= set(loaded_font_paths)
+
+
+def test_name_chip_draws_embedded_emoji_color(renderer_module: ModuleType) -> None:
+    renderer = renderer_module._Renderer()  # noqa: SLF001
+    canvas = renderer_module.Canvas(Image.new("RGBA", (640, 240), "white"))
+
+    renderer.draw_name_chip(canvas, (0, 0, 160, 60), "🌙")
+
+    assert any(
+        red > 180 and green > 120 and blue < 100 and alpha > 0
+        for red, green, blue, alpha in canvas.image.get_flattened_data()
+    )
+
+
+def test_name_runs_respect_unicode_text_and_emoji_presentation(
+    renderer_module: ModuleType,
+) -> None:
+    for text in ("©︎", "☀︎", "❤︎"):
+        runs = renderer_module._name_runs(text)  # noqa: SLF001
+        assert "".join(run.text for run in runs) == text
+        assert not any(run.embedded_color for run in runs)
+
+    for emoji_text in ("©", "☀", "❤", "©️", "☀️", "❤️"):
+        runs = renderer_module._name_runs(emoji_text)  # noqa: SLF001
+        assert "".join(run.text for run in runs) == emoji_text
+        assert all(run.embedded_color for run in runs)
 
 
 def test_renderer_rejects_invalid_presentation_shapes(
