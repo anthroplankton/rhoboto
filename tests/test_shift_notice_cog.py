@@ -31,6 +31,7 @@ from utils.shift_notice import (
     JST,
     ShiftNoticeCaseKind,
     ShiftNoticeCatalog,
+    ShiftNoticeCutWindow,
     ShiftNoticeFrame,
     ShiftNoticeFrameState,
     ShiftNoticePerson,
@@ -160,6 +161,40 @@ def _snapshot(target: datetime = datetime(2026, 8, 1, 14, tzinfo=JST)):
         remaining_hours=MappingProxyType({alice.key: 1, bob.key: 1}),
         cut_window=None,
     )
+
+
+def test_cut_render_input_focuses_the_next_interval_in_a_fixed_window() -> None:
+    rows = tuple(
+        ShiftNoticeFrame(
+            civil_start=datetime(2026, 8, 1, hour, tzinfo=JST),
+            event_hour=hour,
+            source_id=1,
+            state=ShiftNoticeFrameState.CUT,
+            lanes=(None,) * 5,
+        )
+        for hour in range(12, 19)
+    )
+    snapshot = ShiftNoticeSnapshot(
+        target_boundary=rows[-1].civil_start,
+        case=ShiftNoticeCaseKind.CUT,
+        previous=rows[-2],
+        next=rows[-1],
+        ending=(),
+        continuing=(),
+        starting=(),
+        cumulative_hours=MappingProxyType({}),
+        remaining_hours=MappingProxyType({}),
+        cut_window=ShiftNoticeCutWindow(
+            rows=rows,
+            truncated_before=False,
+            truncated_after=False,
+        ),
+    )
+
+    value = shift_notice._snapshot_render_input(snapshot)
+
+    assert value.next is not None
+    assert value.next.range_label == "18–19"
 
 
 def _manager(*, catalog: ShiftNoticeCatalog | None = None, snapshot=None):

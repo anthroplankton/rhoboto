@@ -186,7 +186,12 @@ def _snapshot_render_input(snapshot: ShiftNoticeSnapshot) -> ShiftNoticeRenderIn
     )
     next_frame = (
         _render_frame(snapshot.next, snapshot.remaining_hours)
-        if snapshot.case in {ShiftNoticeCaseKind.START, ShiftNoticeCaseKind.TRANSITION}
+        if snapshot.case
+        in {
+            ShiftNoticeCaseKind.START,
+            ShiftNoticeCaseKind.TRANSITION,
+            ShiftNoticeCaseKind.CUT,
+        }
         else None
     )
     return ShiftNoticeRenderInput(
