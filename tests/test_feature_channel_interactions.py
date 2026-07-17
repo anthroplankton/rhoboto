@@ -7934,6 +7934,10 @@ async def test_shift_deadline_close_sends_then_cleans_up_and_completes(
         "2日目｜シフト登録の受付を自動で締め切りました 🙇\n",
         "Day 2 | Shift registration has been automatically closed 🙇\n",
     ]
+    assert all(
+        embed.timestamp == config_item.submission_deadline_at
+        for embed in channel.send_attempts[0]["embeds"]
+    )
     assert channel.edit_names == ["〆shift"]
     assert cleanup_calls
     assert manager_instances[0].mark_calls == [(55, 123, 9001)]

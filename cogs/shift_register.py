@@ -1371,6 +1371,8 @@ class ShiftRegister(
                     ),
                     include_footer=True,
                 )
+                for embed in embeds:
+                    embed.timestamp = fresh_config.submission_deadline_at
                 message = await channel.send(
                     embeds=embeds,
                     view=ShiftDeadlineCloseView(self._guide_sheet_url(fresh_config)),
