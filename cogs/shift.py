@@ -5,8 +5,12 @@ from typing import TYPE_CHECKING, override
 from discord import Interaction, app_commands
 from discord.app_commands import locale_str
 
-from cogs.base.feature_channel_base import FeatureChannelBase, FeatureChannelUserBase
+from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.register_feature_channel_user_base import (
+    RegisterFeatureChannelUserBase,
+)
 from cogs.shift_register import ShiftRegister
+from models.shift_register import ShiftRegisterConfig
 from utils.shift_register_manager import (
     ShiftRegisterManager,
     fresh_shift_channel_transaction,
@@ -15,13 +19,17 @@ from utils.shift_register_structs import ShiftRegisterGoogleSheetsMetadata
 
 if TYPE_CHECKING:
     from bot import Rhoboto
-    from cogs.base.feature_channel_context import ConfiguredFeatureChannelContext
+    from cogs.base.register_feature_channel_context import (
+        ConfiguredRegisterFeatureChannelContext,
+    )
     from utils.structs_base import UserInfo
 
 
 class Shift(
-    FeatureChannelUserBase[
-        ShiftRegister, ShiftRegisterManager, ShiftRegisterGoogleSheetsMetadata
+    RegisterFeatureChannelUserBase[
+        ShiftRegisterConfig,
+        ShiftRegisterGoogleSheetsMetadata,
+        ShiftRegisterManager,
     ],
     group_name=locale_str("shift"),
 ):
@@ -30,12 +38,14 @@ class Shift(
 
     FeatureChannelType = ShiftRegister
     ManagerType = ShiftRegisterManager
-    GoogleSheetsMetadataType = ShiftRegisterGoogleSheetsMetadata
 
     @override
     async def _delete_user_data_transaction(
         self,
-        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig,
+            ShiftRegisterManager,
+        ],
         user_info: UserInfo,
     ) -> None:
         manager = context.manager
@@ -50,7 +60,10 @@ class Shift(
     @override
     async def _guide_template_values(
         self,
-        context: ConfiguredFeatureChannelContext[ShiftRegisterManager],
+        context: ConfiguredRegisterFeatureChannelContext[
+            ShiftRegisterConfig,
+            ShiftRegisterManager,
+        ],
     ) -> dict[str, object]:
         values = await super()._guide_template_values(context)
         values[

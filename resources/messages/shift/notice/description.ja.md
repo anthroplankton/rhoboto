@@ -1,0 +1,2 @@
+{% if is_failure %}シフト交代情報を表示できませんでした。
+管理者は /shift_notice send_latest で再送できます。{% elif case == "transition" %}{{ next_event_hour_label }}の交代内容と、その前後のシフト状況です。{% elif case == "start" %}{{ next_event_hour_label }}前後のシフト状況です。{% elif case == "end" %}{{ next_event_hour_label }}前後のシフト状況です。{% elif case == "cut" %}{{ next_event_hour_label }}前後のシフト状況です。{% endif %}{% if not is_failure and next_is_internal_cut %}{{ "\n" }}{{ next_event_hour_range_label }}はシフトカットです。{% elif not is_failure and next_is_active_empty %}{{ "\n" }}次の時間帯には支援者様がいません。{% endif %}

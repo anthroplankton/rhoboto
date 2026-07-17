@@ -3,30 +3,63 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import override
 
 import pytest
 
 from cogs.base.discord_context import require_guild_channel_source
-from cogs.base.feature_channel_context import (
-    FeatureChannelContextMixin,
+from cogs.base.feature_channel_base import FeatureChannelBase
+from cogs.base.message_upsert_feature_channel_base import (
     MessageParseResult,
     MessageParseStatus,
 )
+from cogs.base.register_feature_channel_context import (
+    RegisterFeatureChannelContextMixin,
+)
 from models.feature_channel import FeatureChannel
-from tests.fakes import ConfiguredManager, FakeInteraction, MissingConfigManager
+from models.team_register import TeamRegisterConfig
+from tests.fakes import FakeInteraction
+from utils.manager_base import ManagerBase
 from utils.structs_base import UserInfo
+from utils.team_register_structs import TeamRegisterGoogleSheetsMetadata
 
 
-class ContextSubject(FeatureChannelContextMixin[ConfiguredManager]):
+class ContextManager(ManagerBase[TeamRegisterConfig, TeamRegisterGoogleSheetsMetadata]):
+    SheetConfigType = TeamRegisterConfig
+    GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
+
+    @override
+    async def get_sheet_config_or_none(self) -> TeamRegisterConfig | None:
+        return TeamRegisterConfig(
+            sheet_url="https://sheet.example",
+            team_worksheet_ids=[],
+            summary_worksheet_id=1,
+            encore_role_ids=[],
+        )
+
+
+class MissingContextManager(ContextManager):
+    @override
+    async def get_sheet_config_or_none(self) -> TeamRegisterConfig | None:
+        return None
+
+
+class ContextSubject(
+    RegisterFeatureChannelContextMixin[
+        TeamRegisterConfig,
+        TeamRegisterGoogleSheetsMetadata,
+        ContextManager,
+    ]
+):
     feature_name = "team_register"
     feature_display_name = "Team Register"
-    ManagerType = ConfiguredManager
+    ManagerType = ContextManager
 
 
 async def fake_feature_channel_get(
     *, guild_id: int, channel_id: int, feature_name: str
-) -> SimpleNamespace:
-    return SimpleNamespace(
+) -> FeatureChannel:
+    return FeatureChannel(
         guild_id=guild_id,
         channel_id=channel_id,
         feature_name=feature_name,
@@ -46,13 +79,13 @@ async def test_feature_channel_context_uses_manager_type(
         action="inspect feature channel context",
     )
 
-    context = await subject._get_feature_channel_context(source)
+    context = await subject._get_register_feature_channel_context(source)
 
     assert context.guild_id == 111
     assert context.channel_id == 222
     assert not hasattr(context, "guild")
     assert context.feature_channel.feature_name == "team_register"
-    assert isinstance(context.manager, ConfiguredManager)
+    assert isinstance(context.manager, ContextManager)
     assert context.manager.feature_channel is context.feature_channel
 
 
@@ -67,11 +100,11 @@ async def test_configured_context_returns_feature_config_without_followup(
         interaction,
         action="inspect feature channel context",
     )
-    feature_channel_context = await subject._get_feature_channel_context(
+    feature_channel_context = await subject._get_register_feature_channel_context(
         source,
     )
 
-    context = await subject._get_configured_feature_channel_context(
+    context = await subject._get_configured_register_feature_channel_context(
         feature_channel_context
     )
 
@@ -88,10 +121,16 @@ async def test_configured_context_returns_feature_config_without_followup(
 async def test_configured_context_missing_config_returns_none_without_followup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class MissingConfigSubject(FeatureChannelContextMixin[MissingConfigManager]):
+    class MissingConfigSubject(
+        RegisterFeatureChannelContextMixin[
+            TeamRegisterConfig,
+            TeamRegisterGoogleSheetsMetadata,
+            MissingContextManager,
+        ]
+    ):
         feature_name = "team_register"
         feature_display_name = "Team Register"
-        ManagerType = MissingConfigManager
+        ManagerType = MissingContextManager
 
     monkeypatch.setattr(FeatureChannel, "get", fake_feature_channel_get)
     interaction = FakeInteraction()
@@ -100,11 +139,11 @@ async def test_configured_context_missing_config_returns_none_without_followup(
         interaction,
         action="inspect feature channel context",
     )
-    feature_channel_context = await subject._get_feature_channel_context(
+    feature_channel_context = await subject._get_register_feature_channel_context(
         source,
     )
 
-    context = await subject._get_configured_feature_channel_context(
+    context = await subject._get_configured_register_feature_channel_context(
         feature_channel_context
     )
 
@@ -117,7 +156,7 @@ async def test_missing_config_followup_uses_feature_display_name() -> None:
     interaction = FakeInteraction()
     subject = ContextSubject()
 
-    await subject._send_missing_config_followup(interaction)
+    await subject._send_missing_register_config_followup(interaction)
 
     assert interaction.followup.messages == [
         (
@@ -146,7 +185,7 @@ async def test_enabled_feature_channel_lookup_filters_disabled(
     monkeypatch.setattr(FeatureChannel, "get_or_none", fake_get_or_none)
 
     assert (
-        await ContextSubject._get_enabled_feature_channel_or_none(
+        await FeatureChannelBase._get_enabled_feature_channel_or_none(
             111,
             222,
             "enabled",
@@ -154,7 +193,7 @@ async def test_enabled_feature_channel_lookup_filters_disabled(
         is rows["enabled"]
     )
     assert (
-        await ContextSubject._get_enabled_feature_channel_or_none(
+        await FeatureChannelBase._get_enabled_feature_channel_or_none(
             111,
             222,
             "disabled",
@@ -162,7 +201,7 @@ async def test_enabled_feature_channel_lookup_filters_disabled(
         is None
     )
     assert (
-        await ContextSubject._get_enabled_feature_channel_or_none(
+        await FeatureChannelBase._get_enabled_feature_channel_or_none(
             111,
             222,
             "missing",
@@ -175,17 +214,17 @@ async def test_enabled_feature_channel_lookup_filters_disabled(
 async def test_feature_channel_context_or_none_respects_enabled_requirement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    disabled_row = SimpleNamespace(
+    disabled_row = FeatureChannel(
         guild_id=111,
         channel_id=222,
         feature_name="team_register",
         is_enabled=False,
     )
-    rows = {"current": disabled_row}
+    rows: dict[str, FeatureChannel | None] = {"current": disabled_row}
 
     async def fake_get_or_none(
         *, guild_id: int, channel_id: int, feature_name: str
-    ) -> object | None:
+    ) -> FeatureChannel | None:
         assert guild_id == 111
         assert channel_id == 222
         assert feature_name == "team_register"
@@ -195,7 +234,7 @@ async def test_feature_channel_context_or_none_respects_enabled_requirement(
     interaction = FakeInteraction()
     subject = ContextSubject()
 
-    context = await subject._get_feature_channel_context_or_none(
+    context = await subject._get_register_feature_channel_context_or_none(
         guild_id=interaction.guild.id,
         channel_id=222,
     )
@@ -205,11 +244,11 @@ async def test_feature_channel_context_or_none_respects_enabled_requirement(
     assert context.channel_id == 222
     assert not hasattr(context, "guild")
     assert context.feature_channel is disabled_row
-    assert isinstance(context.manager, ConfiguredManager)
+    assert isinstance(context.manager, ContextManager)
     assert context.manager.feature_channel is disabled_row
 
     assert (
-        await subject._get_feature_channel_context_or_none(
+        await subject._get_register_feature_channel_context_or_none(
             guild_id=interaction.guild.id,
             channel_id=222,
             require_enabled=True,
@@ -220,7 +259,7 @@ async def test_feature_channel_context_or_none_respects_enabled_requirement(
     rows["current"] = None
 
     assert (
-        await subject._get_feature_channel_context_or_none(
+        await subject._get_register_feature_channel_context_or_none(
             guild_id=interaction.guild.id,
             channel_id=222,
         )

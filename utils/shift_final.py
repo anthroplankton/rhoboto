@@ -126,6 +126,12 @@ class FinalSchedulePlan:
 
 
 @dataclass(frozen=True)
+class DraftScheduleInspection:
+    rows: tuple[FinalScheduleRow, ...]
+    issues: tuple[FinalScheduleValidationError, ...]
+
+
+@dataclass(frozen=True)
 class EventDayWritePlan:
     status: EventDayWriteStatus
     anchor: A1Cell | None = None
@@ -202,6 +208,51 @@ def parse_a1_cell(value: str) -> A1Cell:
     if column > GOOGLE_SHEETS_MAX_COLUMNS or row > GOOGLE_SHEETS_MAX_ROWS:
         raise FinalScheduleInputError
     return A1Cell(row=row, column=column, a1=normalized)
+
+
+def parse_a1_range(value: str) -> A1Rectangle:
+    if not isinstance(value, str):
+        raise FinalScheduleInputError
+    endpoints = unicodedata.normalize("NFKC", value).split(":")
+    if len(endpoints) != 2:  # noqa: PLR2004
+        raise FinalScheduleInputError
+    start, end = (parse_a1_cell(endpoint) for endpoint in endpoints)
+    if start.row > end.row or start.column > end.column:
+        raise FinalScheduleInputError
+    return A1Rectangle(start=start, end=end)
+
+
+def find_final_schedule_data_range(
+    grid: Sequence[Sequence[object]],
+) -> A1Rectangle | None:
+    min_row: int | None = None
+    min_column: int | None = None
+    max_row = 0
+    max_column = 0
+
+    for row, values in enumerate(grid, start=1):
+        for column, value in enumerate(values, start=1):
+            if value is None or value == "":
+                continue
+            min_row = row if min_row is None else min(min_row, row)
+            min_column = column if min_column is None else min(min_column, column)
+            max_row = max(max_row, row)
+            max_column = max(max_column, column)
+
+    if min_row is None or min_column is None:
+        return None
+
+    start = A1Cell(
+        row=min_row,
+        column=min_column,
+        a1=f"{_column_label(min_column)}{min_row}",
+    )
+    end = A1Cell(
+        row=max_row,
+        column=max_column,
+        a1=f"{_column_label(max_column)}{max_row}",
+    )
+    return A1Rectangle(start=start, end=end)
 
 
 def format_event_day(value: date, pattern: str) -> str:
@@ -287,71 +338,23 @@ def build_final_schedule(
     grid: Sequence[Sequence[object]],
     request: ScheduleUpdateRequest,
 ) -> FinalSchedulePlan:
-    if not grid:
-        raise FinalScheduleValidationError(
-            FinalScheduleValidationKind.EMPTY,
-            expected=tuple(DraftWorksheetContent.COLUMNS),
-            detected=None,
-        )
-    if list(grid[0][:7]) != list(DraftWorksheetContent.COLUMNS):
-        raise FinalScheduleValidationError(
-            FinalScheduleValidationKind.HEADER,
-            row=1,
-            column=1,
-            expected=tuple(DraftWorksheetContent.COLUMNS),
-            detected=tuple(grid[0][:7]),
-        )
+    inspection = inspect_draft_schedule_rows(
+        grid,
+        expected_hours=request.expected_hours,
+        recruitment_slots=request.recruitment_slots,
+    )
+    if inspection.issues:
+        raise inspection.issues[0]
 
-    rows: list[FinalScheduleRow] = []
-    conflicts: list[FinalRoleConflict] = []
-    for row_index, hour in enumerate(request.expected_hours, start=1):
-        if row_index >= len(grid):
-            raise FinalScheduleValidationError(
-                FinalScheduleValidationKind.AXIS,
-                row=row_index + 1,
-                column=1,
-                expected=hour_label(hour),
-                detected=None,
-            )
-        source_row = grid[row_index]
-        if not source_row or source_row[0] != hour_label(hour):
-            raise FinalScheduleValidationError(
-                FinalScheduleValidationKind.AXIS,
-                row=row_index + 1,
-                column=1,
-                expected=hour_label(hour),
-                detected=source_row[0] if source_row else None,
-            )
-        values = [
-            _final_cell_value(source_row[column], row=row_index + 1, column=column + 1)
-            if column < len(source_row)
-            else ""
-            for column in range(1, 7)
-        ]
-        role_values = (values[1], *values[2:5], values[5])
-        conflicts.extend(_row_conflicts(hour, role_values))
-        rows.append(
-            FinalScheduleRow(
-                hour=hour,
-                is_recruitment=hour in request.recruitment_slots,
-                runner=values[0],
-                encore=values[1],
-                honso=(values[2], values[3], values[4]),
-                standby=values[5],
-            )
+    rows = list(inspection.rows)
+    conflicts = [
+        conflict
+        for row in rows
+        for conflict in _row_conflicts(
+            row.hour,
+            (row.encore, *row.honso, row.standby),
         )
-
-    next_row = len(request.expected_hours) + 1
-    if next_row < len(grid):
-        next_value = grid[next_row][0] if grid[next_row] else ""
-        if next_value in ShiftParser.HOUR_LABELS:
-            raise FinalScheduleValidationError(
-                FinalScheduleValidationKind.EXTRA_AXIS,
-                row=next_row + 1,
-                column=1,
-                expected="",
-                detected=next_value,
-            )
+    ]
     if conflicts:
         raise FinalScheduleConflictError(tuple(conflicts))
 
@@ -363,18 +366,96 @@ def build_final_schedule(
     )
 
 
-def _final_cell_value(value: object, *, row: int, column: int) -> str:
-    if value is None or value == "":
-        return ""
-    if not isinstance(value, str):
-        raise FinalScheduleValidationError(
-            FinalScheduleValidationKind.ROLE_VALUE,
-            row=row,
-            column=column,
-            expected=str,
-            detected=value,
+def inspect_draft_schedule_rows(
+    grid: Sequence[Sequence[object]],
+    *,
+    expected_hours: Sequence[int],
+    recruitment_slots: frozenset[int],
+) -> DraftScheduleInspection:
+    if not grid:
+        return DraftScheduleInspection(
+            rows=(),
+            issues=(
+                FinalScheduleValidationError(
+                    FinalScheduleValidationKind.EMPTY,
+                    expected=tuple(DraftWorksheetContent.COLUMNS),
+                    detected=None,
+                ),
+            ),
         )
-    return value
+
+    issues: list[FinalScheduleValidationError] = []
+    if list(grid[0][:7]) != list(DraftWorksheetContent.COLUMNS):
+        issues.append(
+            FinalScheduleValidationError(
+                FinalScheduleValidationKind.HEADER,
+                row=1,
+                column=1,
+                expected=tuple(DraftWorksheetContent.COLUMNS),
+                detected=tuple(grid[0][:7]),
+            )
+        )
+
+    rows: list[FinalScheduleRow] = []
+    for row_index, hour in enumerate(expected_hours, start=1):
+        source_row = grid[row_index] if row_index < len(grid) else []
+        detected_axis = source_row[0] if source_row else None
+        if detected_axis != hour_label(hour):
+            issues.append(
+                FinalScheduleValidationError(
+                    FinalScheduleValidationKind.AXIS,
+                    row=row_index + 1,
+                    column=1,
+                    expected=hour_label(hour),
+                    detected=detected_axis,
+                )
+            )
+
+        values: list[str] = []
+        for column in range(1, 7):
+            value = source_row[column] if column < len(source_row) else ""
+            if value is None or value == "":
+                values.append("")
+            elif isinstance(value, str):
+                values.append(value)
+            else:
+                issues.append(
+                    FinalScheduleValidationError(
+                        FinalScheduleValidationKind.ROLE_VALUE,
+                        row=row_index + 1,
+                        column=column + 1,
+                        expected=str,
+                        detected=value,
+                    )
+                )
+                values.append("")
+
+        rows.append(
+            FinalScheduleRow(
+                hour=hour,
+                is_recruitment=hour in recruitment_slots,
+                runner=values[0],
+                encore=values[1],
+                honso=(values[2], values[3], values[4]),
+                standby=values[5],
+            )
+        )
+
+    next_row = len(expected_hours) + 1
+    if next_row < len(grid):
+        next_value = grid[next_row][0] if grid[next_row] else ""
+        if next_value in ShiftParser.HOUR_LABELS:
+            issues.append(
+                FinalScheduleValidationError(
+                    FinalScheduleValidationKind.EXTRA_AXIS,
+                    row=next_row + 1,
+                    column=1,
+                    expected="",
+                    detected=next_value,
+                )
+            )
+
+    return DraftScheduleInspection(tuple(rows), tuple(issues))
 
 
 def _row_conflicts(

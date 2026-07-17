@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import asynccontextmanager
 from datetime import date
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -8,13 +9,16 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from utils import shift_register_manager as manager_module
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
 from utils.shift_final import (
     FinalScheduleValidationError,
     ScheduleUpdateRequest,
     build_schedule_update_request,
+    parse_a1_range,
 )
 from utils.shift_register_manager import (
+    FinalScheduleImageRangeError,
     FinalScheduleReconfirmationRequired,
     ShiftRegisterManager,
 )
@@ -28,9 +32,10 @@ from utils.shift_register_structs import (
 )
 from utils.shift_scheduler import hour_label
 from utils.storage_errors import StorageError, StorageErrorKind
+from utils.structs_base import WorksheetContractError
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
 
 class FinalBatchWorksheet:
@@ -58,12 +63,13 @@ class FinalBatchWorksheet:
 
 
 class FinalValueSheet:
-    def __init__(
+    def __init__(  # noqa: PLR0913
         self,
         draft: FinalBatchWorksheet,
         final: FinalBatchWorksheet,
         *,
         draft_grid: list[list[object]] | None = None,
+        final_grid: list[list[object]] | None = None,
         read_error: Exception | None = None,
         write_error: Exception | None = None,
     ) -> None:
@@ -76,17 +82,27 @@ class FinalValueSheet:
             [hour_label(4), "Runner", "=MANUAL()", "A", "", "", ""],
             [hour_label(5), "", "", "", "", "", ""],
         ]
+        self.final_grid = final_grid if final_grid is not None else []
         self.read_error = read_error
         self.write_error = write_error
+        self.pdf_exports: list[tuple[int, str]] = []
+        self.events: list[str] | None = None
 
     async def batch_get_worksheet_values(
         self,
         worksheets: Sequence[FinalBatchWorksheet],
     ) -> dict[int, list[list[object]]]:
         self.batch_reads.append([worksheet.id for worksheet in worksheets])
+        if self.events is not None and self.final.id in self.batch_reads[-1]:
+            self.events.append("final_values_read")
         if self.read_error is not None:
             raise self.read_error
-        return {self.draft.id: self.draft_grid}
+        return {
+            worksheet.id: (
+                self.final_grid if worksheet.id == self.final.id else self.draft_grid
+            )
+            for worksheet in worksheets
+        }
 
     async def batch_update_grid(
         self,
@@ -97,6 +113,16 @@ class FinalValueSheet:
         self.batch_updates.append(copy.deepcopy(list(worksheet_requests)))
         if self.write_error is not None:
             raise self.write_error
+
+    async def export_worksheet_range_pdf(
+        self,
+        worksheet: FinalBatchWorksheet,
+        range_a1: str,
+    ) -> bytes:
+        self.pdf_exports.append((worksheet.id, range_a1))
+        if self.events is not None:
+            self.events.append("final_pdf_export")
+        return b"%PDF-test"
 
 
 def make_request() -> ScheduleUpdateRequest:
@@ -151,14 +177,18 @@ def draft_grid_for_event() -> list[list[object]]:
 
 def make_metadata(
     draft: FinalBatchWorksheet,
-    final: FinalBatchWorksheet,
+    final: FinalBatchWorksheet | None,
 ) -> ShiftRegisterGoogleSheetsMetadata:
     return ShiftRegisterGoogleSheetsMetadata(
         "https://docs.google.com/spreadsheets/d/final/edit",
         [
             EntryWorksheetMetadata(1, "Shift Entry", None),
             DraftWorksheetMetadata(draft.id, draft.title, draft),
-            FinalScheduleWorksheetMetadata(final.id, final.title, final),
+            FinalScheduleWorksheetMetadata(
+                3 if final is None else final.id,
+                "Shift Final Schedule" if final is None else final.title,
+                final,
+            ),
         ],
     )
 
@@ -185,6 +215,158 @@ def make_manager(
 
 
 @pytest.mark.asyncio
+async def test_export_final_schedule_pdf_discovers_one_complete_value_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(
+        3,
+        "Shift Final Schedule",
+        row_count=5,
+        col_count=4,
+    )
+    sheet = FinalValueSheet(
+        draft,
+        final,
+        final_grid=[
+            [],
+            ["", '=IF(A1="", "", A1)', "", 0],
+            [],
+            ["", "", False, " "],
+        ],
+    )
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=None,
+    )
+
+    assert result == b"%PDF-test"
+    assert sheet.batch_reads == [[final.id]]
+    assert sheet.pdf_exports == [(final.id, "B2:D4")]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_uses_explicit_range_without_value_read() -> (
+    None
+):
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule", row_count=5, col_count=4)
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=parse_a1_range("B2:D4"),
+    )
+
+    assert result == b"%PDF-test"
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == [(final.id, "B2:D4")]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_empty_automatic_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[])
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(FinalScheduleImageRangeError):
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=None,
+        )
+
+    assert sheet.batch_reads == [[final.id]]
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_out_of_grid_explicit_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule", row_count=5, col_count=4)
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(FinalScheduleImageRangeError):
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=parse_a1_range("A1:E5"),
+        )
+
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_rejects_missing_final_worksheet() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, None)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(StorageError) as caught:
+        await manager.export_final_schedule_pdf(
+            metadata,
+            final_schedule_range=None,
+        )
+
+    assert caught.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET
+    assert sheet.batch_reads == []
+    assert sheet.pdf_exports == []
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_export_final_schedule_pdf_holds_final_lock_through_export(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def recording_transactions(_resources: object) -> AsyncIterator[None]:
+        events.append("worksheet_lock_enter")
+        try:
+            yield
+        finally:
+            events.append("worksheet_lock_exit")
+
+    monkeypatch.setattr(
+        manager_module,
+        "worksheet_transactions",
+        recording_transactions,
+    )
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[["value"]])
+    sheet.events = events
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    await manager.export_final_schedule_pdf(
+        metadata,
+        final_schedule_range=None,
+    )
+
+    assert events == [
+        "worksheet_lock_enter",
+        "final_values_read",
+        "final_pdf_export",
+        "worksheet_lock_exit",
+    ]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
 async def test_update_from_draft_reads_only_draft_and_writes_one_batch() -> None:
     draft = FinalBatchWorksheet(2, "Shift Draft")
     final = FinalBatchWorksheet(3, "Shift Final Schedule")
@@ -205,6 +387,112 @@ async def test_update_from_draft_reads_only_draft_and_writes_one_batch() -> None
     assert len(sheet.batch_updates) == 1
     assert final.typed_calls[0]["formula_ranges"] == set()
     assert final.typed_calls[0]["data"][0]["range"] == "B2:G3"
+
+
+@pytest.mark.asyncio
+async def test_final_role_source_default_range_and_sparse_values() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(
+        draft,
+        final,
+        final_grid=[
+            [],
+            ["", "", "Alice", "", "Bob", "Alice"],
+            ["", "", "Carol"],
+        ],
+    )
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.read_final_schedule_role_source(
+        metadata,
+        final_schedule_range=None,
+        recruitment_ranges=RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        saved_anchor="B2",
+    )
+
+    assert result.selected_range.a1 == "C2:G3"
+    assert result.labels == ("Alice", "Bob", "Carol")
+    assert result.projected_values == (
+        (2, 3, "Alice"),
+        (2, 5, "Bob"),
+        (2, 6, "Alice"),
+        (3, 3, "Carol"),
+    )
+    assert sheet.batch_reads == [[final.id]]
+    assert sheet.batch_updates == []
+
+
+@pytest.mark.asyncio
+async def test_final_role_source_explicit_range_bypasses_derived_inputs() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(
+        draft,
+        final,
+        final_grid=[["Alice", ""], ["", "Bob"]],
+    )
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.read_final_schedule_role_source(
+        metadata,
+        final_schedule_range=parse_a1_range("A1:B2"),
+        recruitment_ranges=None,
+        saved_anchor="not-a-cell",
+    )
+
+    assert result.selected_range.a1 == "A1:B2"
+    assert result.labels == ("Alice", "Bob")
+    assert result.projected_values == ((1, 1, "Alice"), (2, 2, "Bob"))
+
+
+@pytest.mark.asyncio
+async def test_final_role_source_sparse_large_range() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[["Alice", "", "Bob"]])
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.read_final_schedule_role_source(
+        metadata,
+        final_schedule_range=parse_a1_range("A1:Z100"),
+        recruitment_ranges=None,
+        saved_anchor="not-a-cell",
+    )
+
+    assert result.projected_values == ((1, 1, "Alice"), (1, 3, "Bob"))
+
+
+@pytest.mark.asyncio
+async def test_final_role_source_rejects_missing_or_non_text() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    sheet = FinalValueSheet(draft, final, final_grid=[[123]])
+    missing_metadata = make_metadata(draft, None)
+    manager = make_manager(sheet, missing_metadata)
+
+    with pytest.raises(StorageError) as missing:
+        await manager.read_final_schedule_role_source(
+            missing_metadata,
+            final_schedule_range=parse_a1_range("A1:A1"),
+            recruitment_ranges=None,
+            saved_anchor="not-a-cell",
+        )
+    assert missing.value.kind is StorageErrorKind.GOOGLE_SHEETS_MISSING_WORKSHEET
+
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+    with pytest.raises(WorksheetContractError) as invalid:
+        await manager.read_final_schedule_role_source(
+            metadata,
+            final_schedule_range=parse_a1_range("A1:A1"),
+            recruitment_ranges=None,
+            saved_anchor="not-a-cell",
+        )
+    assert invalid.value.log_hint == "final_schedule_role_value_not_text"
 
 
 @pytest.mark.asyncio

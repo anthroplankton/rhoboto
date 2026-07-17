@@ -55,6 +55,8 @@ from utils.team_register_structs import (
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
+    from models.team_register import TeamRegisterConfig
+
 ENCORE_ROLE_SELECT_MAX_VALUES = 25
 TEAM_REGISTER_DISPLAY_NAME = "Team Register"
 TEAM_REGISTER_CURRENT_CONTROLS = (
@@ -230,7 +232,7 @@ async def send_settings_missing(interaction: Interaction) -> None:
 async def get_fresh_team_register_config_or_respond(
     team_register_manager: TeamRegisterManager,
     interaction: Interaction,
-) -> object | None:
+) -> TeamRegisterConfig | None:
     try:
         team_register = await team_register_manager.get_fresh_sheet_config()
     except SETTINGS_STORAGE_EXCEPTIONS as exc:
@@ -251,7 +253,7 @@ async def get_fresh_team_register_config_or_respond(
 async def build_team_register_settings_panel(
     team_register_manager: TeamRegisterManager,
     interaction: Interaction,
-    team_register: object,
+    team_register: TeamRegisterConfig,
     *,
     is_save_action: bool = False,
     metadata: TeamRegisterGoogleSheetsMetadata | None = None,
@@ -264,7 +266,7 @@ async def build_team_register_settings_panel(
         metadata or await team_register_manager.fetch_google_sheets_metadata()
     )
     roles = list(interaction.guild.roles) if interaction.guild else []
-    encore_role_ids = list(getattr(team_register, "encore_role_ids", []))
+    encore_role_ids = list(team_register.encore_role_ids)
     latest_guide_enabled = await resolve_latest_guide_enabled(
         enabled=latest_guide_enabled,
         state_resolver=latest_guide_state_resolver,
@@ -505,7 +507,9 @@ class TeamRegisterButton(Button):
         if not await require_settings_permissions(interaction):
             return
 
-        async def build_current_panel(team_register: object) -> SettingsPanel:
+        async def build_current_panel(
+            team_register: TeamRegisterConfig,
+        ) -> SettingsPanel:
             return await build_team_register_settings_panel(
                 self.team_register_manager,
                 interaction,

@@ -24,8 +24,14 @@ class _InvalidValuesBatchResponseError(ValueError):
     pass
 
 
+class _InvalidPdfExportResponseError(ValueError):
+    pass
+
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    from requests import Response
 
 RGB_CHANNEL_MAX = 0xFF
 BORDER_NAMES = (
@@ -229,6 +235,10 @@ class AsyncioGspreadWorksheet:
     @property
     def title(self) -> str:
         return self._worksheet.title
+
+    @property
+    def is_gridlines_hidden(self) -> bool:
+        return self._worksheet.ws.is_gridlines_hidden
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._worksheet, name)
@@ -756,6 +766,61 @@ class GoogleSheet:
         except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
             _raise_google_sheets_error(exc, "read_worksheet")
         return result
+
+    async def export_worksheet_range_pdf(
+        self,
+        worksheet: AsyncioGspreadWorksheet,
+        range_a1: str,
+    ) -> bytes:
+        """Export one worksheet rectangle as a Google-rendered PDF."""
+        try:
+            sh = await self.sheet
+            grid_range = a1_range_to_grid_range(range_a1)
+            params: dict[str, str | int | float] = {
+                "format": "pdf",
+                "gid": worksheet.id,
+                "r1": grid_range["startRowIndex"],
+                "c1": grid_range["startColumnIndex"],
+                "r2": grid_range["endRowIndex"],
+                "c2": grid_range["endColumnIndex"],
+                "portrait": "false",
+                "fitw": "true",
+                "top_margin": 0.1,
+                "bottom_margin": 0.1,
+                "left_margin": 0.1,
+                "right_margin": 0.1,
+                "sheetnames": "false",
+                "printtitle": "false",
+                "pagenum": "UNDEFINED",
+                "fzr": "false",
+                "gridlines": "false" if worksheet.is_gridlines_hidden else "true",
+                "attachment": "true",
+            }
+            endpoint = f"https://docs.google.com/spreadsheets/d/{sh.ss.id}/export"
+
+            def request_pdf() -> Response:
+                return sh.ss.client.request("get", endpoint, params=params)
+
+            response = await sh.agcm._call(request_pdf)  # noqa: SLF001
+            content_type = (
+                response.headers.get("Content-Type", "")
+                .partition(";")[0]
+                .strip()
+                .casefold()
+            )
+            pdf_bytes = response.content
+            if (
+                not response.ok
+                or content_type != "application/pdf"
+                or not isinstance(pdf_bytes, bytes)
+                or not pdf_bytes
+            ):
+                raise _InvalidPdfExportResponseError
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "export_worksheet")
+        return pdf_bytes
 
     async def get_worksheet(self, worksheet_id: int) -> AsyncioGspreadWorksheet | None:
         """

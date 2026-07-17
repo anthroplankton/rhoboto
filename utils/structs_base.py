@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 CELL_PATTERN = re.compile(r"^[A-Z]+[1-9][0-9]*$")
 _SAFE_WORKSHEET_CONTRACT_LOG_HINTS = {
     "invalid_worksheet_contract",
+    "final_schedule_role_value_not_text",
     "required_header_missing",
     "required_header_duplicate",
 }

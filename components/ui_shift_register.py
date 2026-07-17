@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol
 
 from discord import ButtonStyle, Embed, Interaction, Object, TextStyle
@@ -111,10 +113,16 @@ class AutoCloseScheduleChangeCallback(Protocol):
     def __call__(self, change: ShiftTimelineScheduleChange) -> None: ...
 
 
+AdminNotificationsReconcileCallback = Callable[[int], None]
+
+
 @dataclass(frozen=True)
 class ShiftAutoCloseCallbacks:
     toggle: AutoCloseToggleCallback
     schedule_changed: AutoCloseScheduleChangeCallback
+    request_admin_notifications_reconcile: (
+        AdminNotificationsReconcileCallback | None
+    ) = None
 
 
 class ShiftDeadlineCloseView(View):
@@ -158,13 +166,14 @@ class GenerateShiftScheduleConfirmView(View):
         destination_label: str,
         destination_url: str,
         timeout: float = 20.0,
+        destructive: bool = True,
     ) -> None:
         super().__init__(timeout=timeout)
         self.requesting_user_id = requesting_user_id
         self.destination_label = destination_label
         self.destination_url = destination_url
         self.value: bool | None = None
-        self.add_item(GenerateShiftScheduleConfirmButton())
+        self.add_item(GenerateShiftScheduleConfirmButton(destructive=destructive))
         self.add_item(GenerateShiftScheduleCancelButton())
 
     async def authorize(self, interaction: Interaction) -> bool:
@@ -182,8 +191,11 @@ class GenerateShiftScheduleConfirmView(View):
 
 
 class GenerateShiftScheduleConfirmButton(Button):
-    def __init__(self) -> None:
-        super().__init__(label="確認生成", style=ButtonStyle.danger)
+    def __init__(self, *, destructive: bool) -> None:
+        super().__init__(
+            label="確認生成",
+            style=ButtonStyle.danger if destructive else ButtonStyle.primary,
+        )
 
     async def callback(self, interaction: Interaction) -> None:
         view = self.view
@@ -219,6 +231,160 @@ class GenerateShiftScheduleCancelButton(Button):
             ),
             view=None,
         )
+        view.stop()
+
+
+class GenerateShiftDraftConfirmView(GenerateShiftScheduleConfirmView):
+    """Confirm Draft generation while retaining optional per-run LLM needs."""
+
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        destination_label: str,
+        destination_url: str,
+        destructive: bool = True,
+    ) -> None:
+        super().__init__(
+            requesting_user_id=requesting_user_id,
+            destination_label=destination_label,
+            destination_url=destination_url,
+            timeout=300.0,
+            destructive=destructive,
+        )
+        self.administrator_requirements = ""
+        self.add_item(GenerateShiftDraftRequirementsButton())
+
+
+class GenerateShiftDraftRequirementsButton(Button):
+    def __init__(self) -> None:
+        super().__init__(
+            label="填寫 LLM 排班需求",
+            style=ButtonStyle.primary,
+        )
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(
+            view, GenerateShiftDraftConfirmView
+        ) or not await view.authorize(interaction):
+            return
+        await interaction.response.send_modal(ShiftDraftRequirementsModal(view))
+
+
+class ShiftDraftRequirementsModal(Modal):
+    """Edit requirements retained only until this Draft confirmation ends."""
+
+    def __init__(self, view: GenerateShiftDraftConfirmView) -> None:
+        super().__init__(title="LLM 排班需求")
+        self.confirm_view = view
+        self.requirements: TextInput = TextInput(
+            label="這次排班的額外需求（選填）",  # noqa: RUF001
+            placeholder=(
+                "例如：Alice 需排 18-20 本走；Bob 20 點後不可排"  # noqa: RUF001
+            ),
+            default=view.administrator_requirements,
+            required=False,
+            max_length=4000,
+            style=TextStyle.paragraph,
+        )
+        self.add_item(self.requirements)
+
+    async def on_submit(self, interaction: Interaction) -> None:
+        if not await self.confirm_view.authorize(interaction):
+            return
+        self.confirm_view.administrator_requirements = self.requirements.value
+        message = (
+            "✅ 已儲存這次生成使用的 LLM 排班需求。"
+            if self.requirements.value
+            else "✅ 已清除這次生成使用的 LLM 排班需求。"
+        )
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+class ScheduleRoleDecision(StrEnum):
+    CONFIRM = "confirm"
+    INCLUDE = "include"
+    SKIP = "skip"
+    CANCEL = "cancel"
+    PERMISSION_LOST = "permission_lost"
+
+
+class AssignScheduleRoleConfirmView(View):
+    def __init__(
+        self,
+        *,
+        requesting_user_id: int,
+        has_duplicates: bool,
+        replace_mode: bool,
+        timeout: float = 20.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.requesting_user_id = requesting_user_id
+        self.decision: ScheduleRoleDecision | None = None
+        if has_duplicates:
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "包含重複成員並執行",
+                    ScheduleRoleDecision.INCLUDE,
+                    ButtonStyle.primary,
+                )
+            )
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "略過重複成員並執行",
+                    ScheduleRoleDecision.SKIP,
+                    ButtonStyle.danger if replace_mode else ButtonStyle.secondary,
+                )
+            )
+        else:
+            self.add_item(
+                ScheduleRoleDecisionButton(
+                    "確認清除並更新",
+                    ScheduleRoleDecision.CONFIRM,
+                    ButtonStyle.danger,
+                )
+            )
+        self.add_item(
+            ScheduleRoleDecisionButton(
+                "取消",
+                ScheduleRoleDecision.CANCEL,
+                ButtonStyle.secondary,
+            )
+        )
+
+    async def authorize(self, interaction: Interaction) -> bool:
+        if interaction.user.id != self.requesting_user_id:
+            await interaction.response.send_message(
+                "⚠️ 只有執行此 command 的管理員可以操作。",
+                ephemeral=True,
+            )
+            return False
+        if await require_settings_permissions(interaction):
+            return True
+        self.decision = ScheduleRoleDecision.PERMISSION_LOST
+        self.stop()
+        return False
+
+
+class ScheduleRoleDecisionButton(Button):
+    def __init__(
+        self,
+        label: str,
+        decision: ScheduleRoleDecision,
+        style: ButtonStyle,
+    ) -> None:
+        super().__init__(label=label, style=style)
+        self.decision = decision
+
+    async def callback(self, interaction: Interaction) -> None:
+        view = self.view
+        if not isinstance(
+            view, AssignScheduleRoleConfirmView
+        ) or not await view.authorize(interaction):
+            return
+        view.decision = self.decision
+        await interaction.response.defer()
         view.stop()
 
 
@@ -822,6 +988,21 @@ class ShiftTimelineModal(Modal):
             return
         if result.schedule_change is not None and self.auto_close_callbacks is not None:
             self.auto_close_callbacks.schedule_changed(result.schedule_change)
+        if (
+            self.auto_close_callbacks is not None
+            and self.auto_close_callbacks.request_admin_notifications_reconcile
+            is not None
+        ):
+            try:
+                self.auto_close_callbacks.request_admin_notifications_reconcile(
+                    self.shift_register_manager.feature_channel.guild_id
+                )
+            except Exception:
+                logger.exception(
+                    "Admin Notifications reconciliation request failed after "
+                    "Shift timeline save. Guild=%s",
+                    self.shift_register_manager.feature_channel.guild_id,
+                )
         await _send_saved_shift_register_panel(
             interaction,
             self.shift_register_manager,

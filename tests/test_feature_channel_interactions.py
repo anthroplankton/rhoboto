@@ -7,33 +7,63 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from typing import ClassVar
+from typing import ClassVar, override
+from unittest.mock import Mock
 
 import pytest
-from discord import ButtonStyle, Embed, File, HTTPException, NotFound
+from discord import (
+    ButtonStyle,
+    Embed,
+    File,
+    HTTPException,
+    Interaction,
+    Message,
+    NotFound,
+    Role,
+    app_commands,
+)
+from discord.ext import commands
 from tortoise.exceptions import DBConnectionError
 
 from bot import config
-from cogs.base import feature_channel_base
-from cogs.base.discord_context import require_guild_channel_source
+from cogs.base import (
+    feature_channel_base,
+    register_feature_channel_base,
+    register_feature_channel_user_base,
+)
+from cogs.base.discord_context import (
+    GuildChannelSource,
+    require_guild_channel_source,
+)
 from cogs.base.feature_channel_base import (
     FeatureChannelBase,
-    FeatureChannelUserBase,
     FeatureNotEnabled,
     StorageCheckFailure,
 )
-from cogs.base.feature_channel_context import (
-    ConfiguredFeatureChannelContext,
-    FeatureChannelContextMixin,
+from cogs.base.message_upsert_feature_channel_base import (
     MessageParseResult,
+    MessageUpsertFeatureChannelBase,
+    MessageUpsertOutcome,
+)
+from cogs.base.register_feature_channel_base import RegisterFeatureChannelBase
+from cogs.base.register_feature_channel_context import (
+    ConfiguredRegisterFeatureChannelContext,
+    RegisterFeatureChannelContext,
+    RegisterFeatureChannelContextMixin,
+)
+from cogs.base.register_feature_channel_user_base import (
+    RegisterFeatureChannelUserBase,
 )
 from cogs.shift import Shift
 from cogs.shift_register import (
-    _SHIFT_REPORT_SECTION_PREFIXES,
     ShiftRegister,
     ShiftReportAssignment,
+    _format_draft_prompt_validation_error,
     _format_generate_draft_confirmation,
+    _format_generate_prompt_from_draft_confirmation,
+    _format_generate_prompt_from_draft_report,
     _format_shift_assignment_section,
+    _replace_with_shift_report,
     _split_shift_report,
 )
 from cogs.team import Team
@@ -53,6 +83,7 @@ from models.shift_timeline_event_state import (
     ShiftTimelineEventKind,
     ShiftTimelineEventStatus,
 )
+from models.team_register import TeamRegisterConfig
 from tests.fakes import (
     ConfiguredManager,
     FakeContext,
@@ -62,29 +93,44 @@ from tests.fakes import (
 )
 from utils.announcement_languages import RenderedAnnouncement
 from utils.google_sheets_errors import GoogleSheetsError, GoogleSheetsErrorKind
+from utils.manager_base import ManagerBase
 from utils.shift_register_manager import (
     SHIFT_REGISTER_SHEET_WRITE_LOCK,
     TEAM_SOURCE_UNAVAILABLE_DRAFT_WARNING,
     TEAM_SOURCE_UNSET_DRAFT_WARNING,
     DraftGenerationResult,
+    DraftPromptGenerationResult,
+    DraftPromptValidationError,
+    DraftPromptValidationIssue,
+    DraftPromptValidationKind,
     ShiftDeadlineExecution,
+    ShiftRegisterManager,
     ShiftTimelineScheduleChange,
     TeamSourceStatus,
 )
 from utils.shift_register_structs import (
     DraftWorksheetMetadata,
+    EntryWorksheetMetadata,
+    FinalScheduleWorksheetMetadata,
     RecruitmentTimeRanges,
     Shift as RegisterShift,
     ShiftParser,
+    ShiftRegisterGoogleSheetsMetadata,
 )
 from utils.shift_scheduler import DraftSchedule, HourShiftAssignment
 from utils.storage_errors import StorageError, StorageErrorKind
 from utils.structs_base import (
     UserInfo,
     WorksheetContractError,
+    WorksheetMetadata,
     required_unique_header_index,
 )
-from utils.team_register_structs import Team as RegisterTeam, TeamParser
+from utils.team_register_manager import TeamRegisterManager
+from utils.team_register_structs import (
+    Team as RegisterTeam,
+    TeamParser,
+    TeamRegisterGoogleSheetsMetadata,
+)
 
 PRIVATE_DATABASE_ERROR = "private database"
 
@@ -106,13 +152,14 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
     report = "\n".join(
         [
             "draft generated",
-            _SHIFT_REPORT_SECTION_PREFIXES[0]
-            + "、".join(f"😀user{index}" for index in range(8)),
-            _SHIFT_REPORT_SECTION_PREFIXES[1] + "assigned",
+            "⚠️ 編成未登録：" + "、".join(f"😀user{index}" for index in range(8)),
+            "- 募集時間【4-8】",
+            "- 已排入（安可｜本走；待機）：",
             "hour 4: 😀alice, 😀bob, 😀carol",
-            _SHIFT_REPORT_SECTION_PREFIXES[2] + "unassigned",
+            "- 未排入（位置已滿）：",
             "hour 4: 😀dave, 😀eve",
-            "notes attached",
+            "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，"
+            "不會隨 Sheet 調整更新。",
         ]
     )
 
@@ -120,19 +167,17 @@ def test_split_shift_report_uses_semantic_boundaries_with_unicode_limit() -> Non
 
     assert len(messages) > 1
     assert all(len(message.encode("utf-16-le")) // 2 <= 80 for message in messages)
+    assert any(message.startswith("⚠️ 編成未登録：") for message in messages)
+    assert any(message.startswith("- 募集時間【") for message in messages)
+    assert any(message.startswith("- 未排入（") for message in messages)
     assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[0]) for message in messages
-    )
-    assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[1]) for message in messages
-    )
-    assert any(
-        message.startswith(_SHIFT_REPORT_SECTION_PREFIXES[2]) for message in messages
+        message.startswith("附件包含生成時資料的 Notes 快照與 LLM 排班 prompt")
+        for message in messages
     )
     assert "".join(messages).replace("\n", "") == report.replace("\n", "")
 
 
-def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
+def test_split_shift_report_keeps_recruitment_with_assignments() -> None:
     report = "\n".join(
         [
             "### ✅ 班表草稿已產生",
@@ -145,9 +190,71 @@ def test_split_shift_report_keeps_fitting_preamble_before_assignments() -> None:
 
     messages = _split_shift_report(report, limit=200)
 
-    assert messages[0] == "\n".join(report.splitlines()[:3])
-    assert messages[1].startswith("- 已排入（安可｜本走；待機）：")
+    assert messages[0] == report.splitlines()[0]
+    assert messages[1].startswith("⚠️ 編成未登録：")
+    assert messages[2].startswith("- 募集時間【4-12】")
+    assert "- 已排入（安可｜本走；待機）：" in messages[2]
     assert all(len(message.encode("utf-16-le")) // 2 <= 200 for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_replace_with_shift_report_puts_view_on_final_chunk() -> None:
+    interaction = FakeInteraction()
+    original_message = SimpleNamespace(id=100)
+
+    async def edit_original_response(
+        content: object = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        interaction.original_response_edits.append((content, kwargs))
+        return original_message
+
+    interaction.edit_original_response = edit_original_response  # type: ignore[method-assign]
+    view = object()
+    report = "\n".join(f"line {index}: {'x' * 120}" for index in range(30))
+
+    control_message = await _replace_with_shift_report(
+        interaction,
+        report,
+        view=view,
+    )
+
+    assert interaction.original_response_edits[0][1]["view"] is None
+    assert all(
+        kwargs.get("view") is None
+        for _content, kwargs in interaction.followup.messages[:-1]
+    )
+    assert interaction.followup.messages[-1][1]["view"] is view
+    assert interaction.followup.messages[-1][1]["wait"] is True
+    assert control_message is interaction.followup.sent_message_objects[-1]
+
+
+@pytest.mark.asyncio
+async def test_replace_with_shift_report_keeps_view_on_one_chunk() -> None:
+    interaction = FakeInteraction()
+    original_message = SimpleNamespace(id=100)
+
+    async def edit_original_response(
+        content: object = None,
+        **kwargs: object,
+    ) -> SimpleNamespace:
+        interaction.original_response_edits.append((content, kwargs))
+        return original_message
+
+    interaction.edit_original_response = edit_original_response  # type: ignore[method-assign]
+    view = object()
+
+    control_message = await _replace_with_shift_report(
+        interaction,
+        "short report",
+        view=view,
+    )
+
+    assert interaction.original_response_edits == [
+        ("short report", {"view": view}),
+    ]
+    assert interaction.followup.messages == []
+    assert control_message is original_message
 
 
 def test_format_shift_assignment_section_uses_shared_draft_grammar() -> None:
@@ -232,6 +339,101 @@ def test_generate_draft_confirmation_formats_missing_team_source(
 
     assert expected in content
     assert "[Team Summary]" not in content
+
+
+def test_generate_prompt_from_draft_has_no_command_parameters() -> None:
+    assert ShiftRegister.generate_prompt_from_draft.name == (
+        "generate_prompt_from_draft"
+    )
+    assert ShiftRegister.generate_prompt_from_draft.parameters == []
+
+
+def test_generate_prompt_from_draft_confirmation_is_read_only_and_not_pending() -> None:
+    content = _format_generate_prompt_from_draft_confirmation(
+        RecruitmentTimeRanges.from_json([{"start": 4, "end": 6}]),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+        TeamSourceStatus.AVAILABLE,
+        "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+    )
+
+    assert "更新 [Team Summary]" in content
+    assert "只讀取 [Shift Draft]" in content
+    assert "不會覆寫或變更" in content
+    assert "Runner（`B` 欄）" in content
+    assert "閾值（`L` 欄）" in content
+    assert "募集時間【4-6】" in content
+    assert "‼️" not in content
+    assert "🔄" not in content
+
+
+def test_draft_prompt_validation_report_lists_every_cell_and_escapes_values() -> None:
+    report = _format_draft_prompt_validation_error(
+        DraftPromptValidationError(
+            (
+                DraftPromptValidationIssue(
+                    DraftPromptValidationKind.DRAFT_AXIS,
+                    "A2",
+                    "4-5",
+                    "5-6",
+                ),
+                DraftPromptValidationIssue(
+                    DraftPromptValidationKind.SUPPORTER_IDENTITY,
+                    "C2",
+                    "Shift Entry 的完整 canonical name",
+                    "<@123> **unknown**",
+                ),
+            )
+        )
+    )
+
+    assert report.startswith("### ⚠️📏 LLM 排班 prompt 未產生")
+    assert "`A2`" in report
+    assert "`C2`" in report
+    assert "<@123>" not in report
+    assert "未更新 Team Summary" in report
+    assert "Shift Draft 保持不變" in report
+
+
+@pytest.mark.parametrize(
+    ("status", "summary_url", "warning", "expected_marker"),
+    [
+        (
+            TeamSourceStatus.AVAILABLE,
+            "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+            None,
+            "🔄 已更新 [Team Summary]",
+        ),
+        (
+            TeamSourceStatus.UNSET,
+            None,
+            TEAM_SOURCE_UNSET_DRAFT_WARNING,
+            TEAM_SOURCE_UNSET_DRAFT_WARNING,
+        ),
+    ],
+)
+def test_generate_prompt_from_draft_report_uses_completed_state_markers(
+    status: TeamSourceStatus,
+    summary_url: str | None,
+    warning: str | None,
+    expected_marker: str,
+) -> None:
+    report = _format_generate_prompt_from_draft_report(
+        DraftPromptGenerationResult(
+            llm_prompt="prompt",
+            encore_power_threshold=35,
+            team_source_status=status,
+            team_source_warning=warning,
+            team_summary_url=summary_url,
+        ),
+        "https://docs.google.com/spreadsheets/d/abc/edit#gid=222",
+    )
+
+    assert report.startswith("### ✅ LLM 排班 prompt 已產生")
+    assert "`35`" in report
+    assert expected_marker in report
+    assert "👀 已讀取 [Shift Draft]" in report
+    assert "未修改" in report
+    assert ("🔄" in report) is (summary_url is not None)
 
 
 def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
@@ -321,7 +523,8 @@ def test_format_shift_draft_report_lists_each_hour_with_code_numbers() -> None:
         "  - -# `11-12`：缺｜缺 `3`；`Grace`\n"
         "- 未排入（位置已滿）：\n"
         "  - -# `4-5`：<@333>、`Dave`\n"
-        "附件是生成時資料的 Notes 快照，不會隨 Sheet 調整更新。"
+        "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt，"
+        "不會隨 Sheet 調整更新。"
     )
     assert "`8-9`" not in report
     assert "`7-8`" in report
@@ -349,7 +552,7 @@ def test_format_shift_draft_report_compacts_zero_entry_initialization() -> None:
     assert "`4-5`" not in report
     assert "`5-6`" not in report
     assert "募集時間【4-6】" in report
-    assert "附件是生成時資料的 Notes 快照" in report
+    assert "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt" in report
 
 
 @pytest.mark.parametrize(
@@ -373,7 +576,7 @@ def test_format_shift_draft_report_places_team_warning_before_assignments(
     assert report.index("已排入") == report.index("募集時間") + len(
         f"募集時間【{RecruitmentTimeRanges.default().announcement_display()}】\n- "
     )
-    assert report.index("已排入") < report.index("附件是生成時資料")
+    assert report.index("已排入") < report.index("附件包含生成時資料")
     assert "[Team Summary]" not in report
 
 
@@ -399,6 +602,10 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
     )
     ranges = RecruitmentTimeRanges.from_json([{"start": 4, "end": 5}])
     notes_snapshot = "メモ\n募集時間【4-5】\nAlice：シフト合計 1h／original message"
+    llm_prompt = (
+        "繁體中文稽核\n<<<GOOGLE_SHEETS_TSV_BEGIN:C2>>>\n<<<GOOGLE_SHEETS_TSV_END>>>"
+    )
+    expected_administrator_requirements = "Alice 必須排本走\n請檢查是否漏掉需求"
 
     class Manager:
         async def get_saved_team_summary_destination(
@@ -437,16 +644,19 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
             member_by_names: dict[str, object],
             encore_power_threshold: float,
             runner: UserInfo | None,
+            administrator_requirements: str,
         ) -> DraftGenerationResult:
             assert list(member_by_names) == ["carol"]
             assert encore_power_threshold == 35
             assert runner is None
+            assert administrator_requirements == expected_administrator_requirements
             return DraftGenerationResult(
                 schedule=schedule,
                 team_source_status=TeamSourceStatus.AVAILABLE,
                 team_source_warning=None,
                 recruitment_ranges=ranges,
                 notes_snapshot=notes_snapshot,
+                llm_prompt=llm_prompt,
                 unregistered_usernames=(
                     "carol",
                     *(f"user{index}" for index in range(300)),
@@ -456,7 +666,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
                 ),
             )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     config = SimpleNamespace(
@@ -470,6 +680,7 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
 
     class ConfirmView:
         value = True
+        administrator_requirements = expected_administrator_requirements
 
         def __init__(
             self,
@@ -491,11 +702,11 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_channel_context
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
+    subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = recording_lock
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction(
         guild=SimpleNamespace(
@@ -536,14 +747,40 @@ async def test_generate_shift_draft_links_to_draft_worksheet_id(  # noqa: C901
         in (content or "")
     )
     assert "⚠️ 編成未登録：<@333>" in (content or "")
-    kwargs = interaction.followup.messages[0][1]
-    attachment = kwargs["file"]
-    assert isinstance(attachment, File)
-    assert attachment.filename == "shift-draft-notes.txt"
-    attachment.fp.seek(0)
-    assert attachment.fp.read().decode("utf-8") == notes_snapshot
+    kwargs = interaction.followup.messages[-1][1]
+    attachments = kwargs["files"]
+    assert len(attachments) == 2
+    assert all(isinstance(attachment, File) for attachment in attachments)
+    attachments_by_name = {
+        attachment.filename: attachment for attachment in attachments
+    }
+    assert set(attachments_by_name) == {
+        "shift-draft-notes.txt",
+        "shift-draft-llm-prompt.txt",
+    }
+    for attachment in attachments:
+        attachment.fp.seek(0)
     assert (
-        sum("file" in kwargs for _content, kwargs in interaction.followup.messages) == 1
+        attachments_by_name["shift-draft-notes.txt"].fp.read().decode("utf-8")
+        == notes_snapshot
+    )
+    assert (
+        attachments_by_name["shift-draft-llm-prompt.txt"].fp.read().decode("utf-8")
+        == llm_prompt
+    )
+    assert (
+        sum(
+            "files" in followup_kwargs
+            for _content, followup_kwargs in interaction.followup.messages
+        )
+        == 1
+    )
+    assert all(
+        "file" not in followup_kwargs
+        for _content, followup_kwargs in interaction.followup.messages
+    )
+    assert "附件包含生成時資料的 Notes 快照與 LLM 排班 prompt" in (
+        interaction.followup.messages[-1][0] or ""
     )
     assert all(
         kwargs["ephemeral"] is True
@@ -595,7 +832,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
         draft_worksheet_id=222,
     )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -603,6 +840,7 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -623,11 +861,11 @@ async def test_generate_shift_draft_reports_contract_error_without_storage_alias
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_channel_context
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
+    subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -707,7 +945,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
         draft_worksheet_id=222,
     )
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -715,6 +953,7 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -735,11 +974,11 @@ async def test_generate_shift_draft_failure_uses_actual_id_change(  # noqa: C901
         yield
 
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_channel_context
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
+    subject._get_configured_register_feature_channel_context = get_configured_context
     subject.sheet_write_lock = unlocked
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -773,7 +1012,7 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
             msg = "Google Sheets must not be accessed before confirmation"
             raise AssertionError(msg)
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         return object()
 
     async def get_configured_context(_context: object) -> SimpleNamespace:
@@ -804,10 +1043,10 @@ async def test_generate_draft_cancel_or_timeout_skips_google_sheets(
             pass
 
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_channel_context
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
+    subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -846,7 +1085,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
             msg = "changed destinations must abort before Google Sheets"
             raise AssertionError(msg)
 
-    async def get_feature_channel_context(_source: object) -> object:
+    async def get_feature_channel_context(**_kwargs: object) -> object:
         nonlocal feature_context_calls
         feature_context_calls += 1
         return object()
@@ -875,6 +1114,7 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
 
     class ConfirmView:
         value = True
+        administrator_requirements = ""
 
         def __init__(
             self,
@@ -891,10 +1131,10 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
             pass
 
     subject = ShiftRegister(fake_bot())
-    subject._get_feature_channel_context = get_feature_channel_context
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = get_feature_channel_context
+    subject._get_configured_register_feature_channel_context = get_configured_context
     monkeypatch.setattr(
-        "cogs.shift_register.GenerateShiftScheduleConfirmView", ConfirmView
+        "cogs.shift_register.GenerateShiftDraftConfirmView", ConfirmView
     )
     interaction = FakeInteraction()
 
@@ -908,6 +1148,428 @@ async def test_generate_draft_changed_destinations_skip_google_sheets(
     )
 
 
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_confirms_refresh_and_attaches_one_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    metadata = SimpleNamespace(
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet=DraftWorksheetMetadata(222, "Shift Draft", None),
+    )
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url=metadata.sheet_url,
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, str]:
+            events.append("destination")
+            return (
+                TeamSourceStatus.AVAILABLE,
+                "https://docs.google.com/spreadsheets/d/team/edit#gid=333",
+            )
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            events.append("fresh")
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+            events.append("sheet")
+            return metadata
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            _metadata: object,
+            *,
+            member_by_names: dict[str, object],
+            administrator_requirements: str,
+        ) -> DraftPromptGenerationResult:
+            events.append("generate")
+            assert list(member_by_names) == ["carol"]
+            assert administrator_requirements == "Carol 最多兩小時"
+            return DraftPromptGenerationResult(
+                llm_prompt="prompt body",
+                encore_power_threshold=36,
+                team_source_status=TeamSourceStatus.AVAILABLE,
+                team_source_warning=None,
+                team_summary_url=(
+                    "https://docs.google.com/spreadsheets/d/team/edit#gid=333"
+                ),
+            )
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = "Carol 最多兩小時"
+
+        def __init__(
+            self,
+            *,
+            requesting_user_id: int,
+            destination_label: str,
+            destination_url: str,
+            destructive: bool,
+        ) -> None:
+            assert requesting_user_id == 333
+            assert destination_label == "目前 Shift Draft"
+            assert destination_url.endswith("#gid=222")
+            assert destructive is False
+
+        async def wait(self) -> None:
+            events.append("wait")
+
+    @asynccontextmanager
+    async def recording_lock(_channel_id: int) -> object:
+        events.append("lock")
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = recording_lock
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction(
+        guild=SimpleNamespace(
+            id=111,
+            members=[
+                SimpleNamespace(
+                    name="carol",
+                    display_name="Carol",
+                    roles=[],
+                )
+            ],
+        )
+    )
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert events == [
+        "destination",
+        "wait",
+        "lock",
+        "fresh",
+        "destination",
+        "sheet",
+        "generate",
+    ]
+    confirmation, kwargs = interaction.original_response_edits[0]
+    assert "只讀取 [Shift Draft]" in confirmation
+    assert kwargs["view"].__class__ is ConfirmView
+    assert len(interaction.followup.messages) == 1
+    report, send_kwargs = interaction.followup.messages[0]
+    assert "### ✅ LLM 排班 prompt 已產生" in report
+    assert "🔄 已更新 [Team Summary]" in report
+    assert "👀 已讀取 [Shift Draft]" in report
+    assert send_kwargs["ephemeral"] is True
+    attachment = send_kwargs["file"]
+    assert isinstance(attachment, File)
+    assert attachment.filename == "shift-draft-llm-prompt.txt"
+    attachment.fp.seek(0)
+    assert attachment.fp.read().decode("utf-8") == "prompt body"
+    assert "files" not in send_kwargs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmation", [False, None])
+async def test_generate_prompt_from_draft_cancel_or_timeout_skips_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    confirmation: bool | None,
+) -> None:
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def fetch_google_sheets_metadata(self) -> None:
+            message = "Sheets must not be accessed before confirmation"
+            raise AssertionError(message)
+
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = confirmation
+        administrator_requirements = "discarded"
+
+        def __init__(self, **kwargs: object) -> None:
+            assert kwargs["destructive"] is False
+
+        async def wait(self) -> None:
+            pass
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert interaction.followup.messages == []
+    if confirmation is None:
+        assert interaction.original_response_edits[-1] == (
+            ("✖️ 確認逾時，未更新 Team Summary、未產生 prompt；Shift Draft 保持不變。"),
+            {"view": None},
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_settings_drift_stops_before_sheets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                recruitment_time_ranges=[{"start": 4, "end": 6}],
+                sheet_url=initial.sheet_url,
+                draft_worksheet_id=222,
+            )
+
+        async def fetch_google_sheets_metadata(self) -> None:
+            message = "drift must stop before Sheets"
+            raise AssertionError(message)
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=initial)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert interaction.followup.messages == []
+    assert interaction.original_response_edits[-1] == (
+        (
+            "⚠️ 募集時段或 Sheet 目的地已變更，未更新 Team Summary、"
+            "未產生 prompt；Shift Draft 保持不變。請重新執行 command。"
+        ),
+        {"view": None},
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_validation_sends_no_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise DraftPromptValidationError(
+                (
+                    DraftPromptValidationIssue(
+                        DraftPromptValidationKind.SUPPORTER_IDENTITY,
+                        "C2",
+                        "Shift Entry 的完整 canonical name",
+                        "<@123>",
+                    ),
+                )
+            )
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    combined = "\n".join(
+        content or "" for content, _kwargs in interaction.followup.messages
+    )
+    assert "`C2`" in combined
+    assert "<@123>" not in combined
+    assert all(
+        "file" not in kwargs and "files" not in kwargs
+        for _content, kwargs in interaction.followup.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_generate_prompt_from_draft_storage_failure_routes_without_attachment(  # noqa: C901
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        recruitment_time_ranges=[{"start": 4, "end": 5}],
+        sheet_url="https://docs.google.com/spreadsheets/d/abc/edit",
+        draft_worksheet_id=222,
+    )
+    failure = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
+
+    class Manager:
+        async def get_saved_team_summary_destination(
+            self,
+        ) -> tuple[TeamSourceStatus, None]:
+            return TeamSourceStatus.UNSET, None
+
+        async def get_fresh_sheet_config(self) -> SimpleNamespace:
+            return config
+
+        async def fetch_google_sheets_metadata(self) -> object:
+            return object()
+
+        def log_missing_worksheet_warnings(self, _metadata: object) -> None:
+            pass
+
+        async def generate_prompt_from_draft(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            raise failure
+
+    manager = Manager()
+
+    async def get_context(_source: object) -> SimpleNamespace:
+        return SimpleNamespace(manager=manager, feature_config=config)
+
+    class ConfirmView:
+        value = True
+        administrator_requirements = ""
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def wait(self) -> None:
+            pass
+
+    @asynccontextmanager
+    async def unlocked(_channel_id: int) -> object:
+        yield
+
+    routed: list[tuple[Exception, str]] = []
+
+    async def record_storage_error(
+        _interaction: object,
+        error: Exception,
+        *,
+        source: object,
+        operation: str,
+    ) -> None:
+        assert source is not None
+        routed.append((error, operation))
+
+    subject = ShiftRegister(fake_bot())
+    subject._get_shift_finalization_context_or_none = get_context
+    subject._send_interaction_storage_error_or_raise = record_storage_error
+    subject.sheet_write_lock = unlocked
+    monkeypatch.setattr(
+        "cogs.shift_register.GenerateShiftDraftConfirmView",
+        ConfirmView,
+    )
+    interaction = FakeInteraction()
+
+    await ShiftRegister.generate_prompt_from_draft.callback(subject, interaction)
+
+    assert routed == [(failure, "shift_register_generate_prompt_from_draft")]
+    assert interaction.followup.messages == []
+    assert all(
+        "file" not in kwargs and "files" not in kwargs
+        for _content, kwargs in interaction.original_response_edits
+    )
+
+
 async def fake_feature_channel_get(
     *, guild_id: int, channel_id: int, feature_name: str
 ) -> SimpleNamespace:
@@ -918,10 +1580,15 @@ async def fake_feature_channel_get(
     )
 
 
-async def fake_feature_channel_get_or_none(
-    *, guild_id: int, channel_id: int, feature_name: str
-) -> SimpleNamespace:
-    return SimpleNamespace(
+def feature_channel_row(
+    feature_name: str,
+    *,
+    feature_channel_id: int = 77,
+    guild_id: int = 111,
+    channel_id: int = 222,
+) -> FeatureChannel:
+    return FeatureChannel(
+        id=feature_channel_id,
         guild_id=guild_id,
         channel_id=channel_id,
         feature_name=feature_name,
@@ -929,8 +1596,21 @@ async def fake_feature_channel_get_or_none(
     )
 
 
-async def fake_enabled_feature_channel_by_id(**query: int) -> SimpleNamespace:
-    return SimpleNamespace(id=query["id"], is_enabled=True)
+async def fake_feature_channel_get_or_none(
+    *, guild_id: int, channel_id: int, feature_name: str
+) -> FeatureChannel:
+    return feature_channel_row(
+        feature_name,
+        guild_id=guild_id,
+        channel_id=channel_id,
+    )
+
+
+async def fake_enabled_feature_channel_by_id(**query: int) -> FeatureChannel:
+    return feature_channel_row(
+        "shift_register",
+        feature_channel_id=query["id"],
+    )
 
 
 class FakeMessage:
@@ -968,6 +1648,16 @@ class IdRecordingFollowup(FakeDiscordFollowup):
         return message
 
 
+class FakeRegisterChannel:
+    id = 222
+
+    async def send(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(id=456)
+
+    async def fetch_message(self, message_id: int) -> SimpleNamespace:
+        return SimpleNamespace(id=message_id)
+
+
 class FakeRegisterMessage(FakeMessage):
     def __init__(self, *, content: str = "hello", author_bot: bool = False) -> None:
         super().__init__()
@@ -978,7 +1668,7 @@ class FakeRegisterMessage(FakeMessage):
             display_name="Alice",
         )
         self.guild = SimpleNamespace(id=111)
-        self.channel = SimpleNamespace(id=222)
+        self.channel = FakeRegisterChannel()
 
 
 class NullLogger:
@@ -1103,6 +1793,8 @@ class AutoGuideMessage:
 
 
 class AutoGuideChannel:
+    id = 222
+
     def __init__(
         self,
         *,
@@ -1167,7 +1859,7 @@ def auto_guide_subject(**attributes: object) -> SimpleNamespace:
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
-        bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
+        bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto"), cogs={}),
         auto_guide_template_key="team.auto_guide",
         auto_guide_lock=RecordingLock(),
         logger=NullLogger(),
@@ -1191,8 +1883,8 @@ def shift_auto_guide_config() -> SimpleNamespace:
     )
 
 
-def shift_auto_guide_context() -> ConfiguredFeatureChannelContext:
-    return ConfiguredFeatureChannelContext(
+def shift_auto_guide_context() -> ConfiguredRegisterFeatureChannelContext:
+    return ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=SimpleNamespace(
@@ -1281,6 +1973,8 @@ async def test_shift_auto_close_manual_hard_clear_auto_close_cancels_after_commi
     manager = _ManualLifecycleManager(feature_channel, "service.json", events=events)
     scheduler = SimpleNamespace(cancel=lambda *_args: events.append("cancel"))
     subject = ShiftRegister(fake_bot())
+    notification_request = Mock()
+    subject._request_admin_notifications_reconcile = notification_request
     subject.ManagerType = lambda *_args: manager  # type: ignore[method-assign]
     subject.sheet_write_lock = RecordingLock()
     subject._timeline_scheduler = scheduler  # type: ignore[assignment]
@@ -1313,6 +2007,7 @@ async def test_shift_auto_close_manual_hard_clear_auto_close_cancels_after_commi
     await subject._clear_feature_settings(111, 222)
     assert events == ["clear", "cancel"]
     assert key not in subject._pending_message_ids
+    notification_request.assert_called_once_with(111)
 
 
 @pytest.mark.asyncio
@@ -1361,6 +2056,21 @@ async def test_shift_auto_close_manual_lifecycle_missing_rows_are_idempotent(
     await subject._clear_feature_settings(111, 222)
 
 
+def test_shift_register_requests_admin_notification_reconcile_from_loaded_cog() -> None:
+    request = Mock()
+    bot = fake_bot()
+    bot.get_cog = lambda name: (
+        SimpleNamespace(request_reconcile_guild=request)
+        if name == "AdminNotifications"
+        else None
+    )
+    subject = ShiftRegister(bot)
+
+    subject._request_admin_notifications_reconcile(111)
+
+    request.assert_called_once_with(111)
+
+
 class _RegistrationRaceManager:
     def __init__(
         self,
@@ -1403,8 +2113,8 @@ class _RegistrationRaceManager:
 
 def _registration_race_context(
     manager: _RegistrationRaceManager,
-) -> ConfiguredFeatureChannelContext:
-    return ConfiguredFeatureChannelContext(
+) -> ConfiguredRegisterFeatureChannelContext:
+    return ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=manager.feature_channel,
@@ -1427,7 +2137,7 @@ async def test_shift_registration_close_race_rechecks_inside_lock(
     before_lock = asyncio.Event()
     release_to_lock = asyncio.Event()
 
-    async def get_context_or_none(**_kwargs: object) -> object:
+    async def get_context_or_none(_message: object) -> object:
         early_lookup.set()
         return context
 
@@ -1436,7 +2146,7 @@ async def test_shift_registration_close_race_rechecks_inside_lock(
         await release_to_lock.wait()
         return context
 
-    async def parse(_message: object) -> object:
+    def parse(_message: object) -> object:
         shift, user_info = shift_register_submission()
         return MessageParseResult.parsed(shift, user_info=user_info)
 
@@ -1451,14 +2161,14 @@ async def test_shift_registration_close_race_rechecks_inside_lock(
 
     monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
     monkeypatch.setattr(
-        FeatureChannelBase,
+        RegisterFeatureChannelBase,
         "_refresh_auto_guide_if_enabled",
         base_refresh,
     )
-    subject._get_feature_channel_context_or_none = (  # type: ignore[method-assign]
+    subject._get_message_feature_channel_context_or_none = (  # type: ignore[method-assign]
         get_context_or_none
     )
-    subject._get_configured_feature_channel_context = (  # type: ignore[method-assign]
+    subject._get_configured_message_context = (  # type: ignore[method-assign]
         get_configured_context
     )
     subject._parse_message_submission = parse  # type: ignore[method-assign]
@@ -1488,14 +2198,14 @@ async def test_shift_registration_close_race_wins_then_deadline_closes(
     subject = ShiftRegister(fake_bot())
     early_lookup = asyncio.Event()
 
-    async def get_context_or_none(**_kwargs: object) -> object:
+    async def get_context_or_none(_message: object) -> object:
         early_lookup.set()
         return context
 
     async def get_configured_context(_context: object) -> object:
         return context
 
-    async def parse(_message: object) -> object:
+    def parse(_message: object) -> object:
         shift, user_info = shift_register_submission()
         return MessageParseResult.parsed(shift, user_info=user_info)
 
@@ -1508,10 +2218,10 @@ async def test_shift_registration_close_race_wins_then_deadline_closes(
         return feature_channel
 
     monkeypatch.setattr(FeatureChannel, "get_or_none", get_or_none)
-    subject._get_feature_channel_context_or_none = (  # type: ignore[method-assign]
+    subject._get_message_feature_channel_context_or_none = (  # type: ignore[method-assign]
         get_context_or_none
     )
-    subject._get_configured_feature_channel_context = (  # type: ignore[method-assign]
+    subject._get_configured_message_context = (  # type: ignore[method-assign]
         get_configured_context
     )
     subject._parse_message_submission = parse  # type: ignore[method-assign]
@@ -1704,18 +2414,57 @@ class PanelManager(ConfiguredManager):
         PanelManager.last_instance = self
 
 
-class MessageOrchestrationManager(ConfiguredManager):
+def team_test_config(sheet_url: str) -> TeamRegisterConfig:
+    return TeamRegisterConfig(
+        sheet_url=sheet_url,
+        team_worksheet_ids=[],
+        summary_worksheet_id=1,
+        encore_role_ids=[],
+    )
+
+
+def shift_test_config(
+    sheet_url: str,
+    *,
+    recruitment_time_ranges: list[dict[str, int]] | None = None,
+) -> ShiftRegisterConfig:
+    return ShiftRegisterConfig(
+        sheet_url=sheet_url,
+        entry_worksheet_id=1,
+        draft_worksheet_id=2,
+        final_schedule_worksheet_id=3,
+        recruitment_time_ranges=(
+            recruitment_time_ranges
+            if recruitment_time_ranges is not None
+            else [{"start": 4, "end": 28}]
+        ),
+    )
+
+
+class MessageOrchestrationManager(
+    ManagerBase[TeamRegisterConfig, TeamRegisterGoogleSheetsMetadata]
+):
+    SheetConfigType = TeamRegisterConfig
+    GoogleSheetsMetadataType = TeamRegisterGoogleSheetsMetadata
     last_instance: MessageOrchestrationManager | None = None
 
-    def __init__(self, feature_channel: object, service_account_path: str) -> None:
+    def __init__(
+        self,
+        feature_channel: FeatureChannel,
+        service_account_path: str,
+    ) -> None:
         super().__init__(feature_channel, service_account_path)
         MessageOrchestrationManager.last_instance = self
 
+    @override
+    async def get_sheet_config_or_none(self) -> TeamRegisterConfig | None:
+        return team_test_config("https://sheet.example")
 
-class OrderedTeamUpsertManager(ConfiguredManager):
+
+class OrderedTeamUpsertManager(TeamRegisterManager):
     def __init__(
         self,
-        feature_channel: object,
+        feature_channel: FeatureChannel,
         service_account_path: str,
         *,
         ensure_error: Exception | None = None,
@@ -1732,19 +2481,21 @@ class OrderedTeamUpsertManager(ConfiguredManager):
         )
         self.fresh_sheet_urls: list[str] = []
 
-    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+    @override
+    async def get_fresh_sheet_config(self) -> TeamRegisterConfig:
         self.fresh_sheet_urls.append(self.current_sheet_url)
-        return SimpleNamespace(sheet_url=self.current_sheet_url)
+        return team_test_config(self.current_sheet_url)
 
+    @override
     async def upsert_user_registration(
         self,
-        user_info: UserInfo,
-        roles: list[object],
+        user: UserInfo,
+        roles: list[Role],
         main_team: RegisterTeam,
         encore_team: RegisterTeam | None,
         *backup_teams: RegisterTeam,
     ) -> None:
-        assert user_info.username == "alice"
+        assert user.username == "alice"
         assert roles == []
         assert main_team.username == "alice"
         assert encore_team is None
@@ -1758,10 +2509,10 @@ class OrderedTeamUpsertManager(ConfiguredManager):
             raise self.summary_error
 
 
-class OrderedShiftUpsertManager(ConfiguredManager):
+class OrderedShiftUpsertManager(ShiftRegisterManager):
     def __init__(
         self,
-        feature_channel: object,
+        feature_channel: FeatureChannel,
         service_account_path: str,
         *,
         ensure_error: Exception | None = None,
@@ -1770,59 +2521,92 @@ class OrderedShiftUpsertManager(ConfiguredManager):
     ) -> None:
         super().__init__(feature_channel, service_account_path)
         self.events: list[str] = []
-        self.metadata = SimpleNamespace(
-            name="metadata",
-            worksheets=[SimpleNamespace(id=1)],
+        self.current_sheet_url = (
+            "https://docs.google.com/spreadsheets/d/shift-message/edit"
         )
-        self.ensured_metadata = SimpleNamespace(
-            name="ensured_metadata",
-            worksheets=[SimpleNamespace(id=2 if ensure_changes_ids else 1)],
+        self.metadata = ShiftRegisterGoogleSheetsMetadata(
+            sheet_url=self.current_sheet_url,
+            worksheets=[
+                EntryWorksheetMetadata(id=1, title="Entry", worksheet=None),
+                DraftWorksheetMetadata(id=2, title="Draft", worksheet=None),
+                FinalScheduleWorksheetMetadata(
+                    id=3,
+                    title="Final",
+                    worksheet=None,
+                ),
+            ],
+        )
+        self.ensured_metadata = ShiftRegisterGoogleSheetsMetadata(
+            sheet_url=self.current_sheet_url,
+            worksheets=[
+                EntryWorksheetMetadata(
+                    id=4 if ensure_changes_ids else 1,
+                    title="Entry",
+                    worksheet=None,
+                ),
+                DraftWorksheetMetadata(id=2, title="Draft", worksheet=None),
+                FinalScheduleWorksheetMetadata(
+                    id=3,
+                    title="Final",
+                    worksheet=None,
+                ),
+            ],
         )
         self.ensure_error = ensure_error
         self.upsert_error = upsert_error
         self.ensure_changes_ids = ensure_changes_ids
-        self.current_sheet_url = (
-            "https://docs.google.com/spreadsheets/d/shift-message/edit"
-        )
         self.fresh_sheet_urls: list[str] = []
 
-    async def get_fresh_sheet_config(self) -> SimpleNamespace:
+    @override
+    async def get_fresh_sheet_config(self) -> ShiftRegisterConfig:
         self.fresh_sheet_urls.append(self.current_sheet_url)
-        return SimpleNamespace(
-            sheet_url=self.current_sheet_url,
+        return shift_test_config(
+            self.current_sheet_url,
             recruitment_time_ranges=[{"start": 4, "end": 28}],
         )
 
-    async def fetch_google_sheets_metadata(self) -> SimpleNamespace:
+    @override
+    async def fetch_google_sheets_metadata(
+        self,
+    ) -> ShiftRegisterGoogleSheetsMetadata:
         self.events.append("fetch_metadata")
         return self.metadata
 
-    def log_missing_worksheet_warnings(self, metadata: object) -> None:
+    @override
+    def log_missing_worksheet_warnings(
+        self,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+    ) -> None:
         assert metadata is self.metadata
         self.events.append("log_missing")
 
+    @override
     async def ensure_worksheets_and_upsert_sheet_config(
         self,
-        metadata: object,
-    ) -> SimpleNamespace:
+        metadata: ShiftRegisterGoogleSheetsMetadata,
+        counts: dict[type[WorksheetMetadata], int] | None = None,
+    ) -> ShiftRegisterGoogleSheetsMetadata:
         assert metadata is self.metadata
+        assert counts is None
         self.events.append("ensure")
         if self.ensure_error is not None:
             raise self.ensure_error
         return self.ensured_metadata
 
+    @override
     async def upsert_or_delete_user_shift(
         self,
-        user_info: UserInfo,
+        user: UserInfo,
         shift: RegisterShift | None,
+        metadata: ShiftRegisterGoogleSheetsMetadata,
         *,
-        metadata: object,
-        recruitment_ranges: RecruitmentTimeRanges,
+        recruitment_ranges: RecruitmentTimeRanges | None = None,
     ) -> None:
-        assert user_info.username == "alice"
+        assert user.username == "alice"
         assert shift is not None
         metadata = await self.ensure_worksheets_and_upsert_sheet_config(metadata)
         assert metadata is self.ensured_metadata
+        assert recruitment_ranges is not None
         assert recruitment_ranges.to_json() == [{"start": 4, "end": 28}]
         self.events.append("upsert")
         if self.upsert_error is not None:
@@ -1834,70 +2618,127 @@ class OrderedShiftUpsertManager(ConfiguredManager):
 
 
 class MissingMessageConfigManager(MessageOrchestrationManager):
-    async def get_sheet_config_or_none(self) -> None:
+    @override
+    async def get_sheet_config_or_none(self) -> TeamRegisterConfig | None:
         return None
 
 
-class RecordingMessageSubject(FeatureChannelContextMixin[MessageOrchestrationManager]):
+class RecordingMessageSubject(
+    RegisterFeatureChannelContextMixin[
+        TeamRegisterConfig,
+        TeamRegisterGoogleSheetsMetadata,
+        MessageOrchestrationManager,
+    ],
+    MessageUpsertFeatureChannelBase[
+        RegisterFeatureChannelContext[MessageOrchestrationManager],
+        ConfiguredRegisterFeatureChannelContext[
+            TeamRegisterConfig,
+            MessageOrchestrationManager,
+        ],
+        object,
+        str,
+    ],
+    group_name="recording_message_test",
+):
     feature_name = "team_register"
+    feature_display_name = "Team Register Test"
     ManagerType = MessageOrchestrationManager
 
     def __init__(self, parse_result: MessageParseResult[object]) -> None:
+        super().__init__(
+            SimpleNamespace(
+                tree=SimpleNamespace(add_command=lambda _command: None),
+                user=object(),
+                cogs={},
+            )
+        )
         self.parse_result = parse_result
         self.logger = NullLogger()
-        self.bot = SimpleNamespace(user=object())
         self.configured_calls: list[
             tuple[
-                object,
-                ConfiguredFeatureChannelContext[MessageOrchestrationManager],
+                Message,
+                ConfiguredRegisterFeatureChannelContext[
+                    TeamRegisterConfig,
+                    MessageOrchestrationManager,
+                ],
                 object,
                 UserInfo,
             ]
         ] = []
 
-    async def _get_message_feature_channel_context_or_none(
+    @override
+    async def setup_after_enable(self, interaction: Interaction) -> None:
+        del interaction
+
+    @override
+    def _build_message_context(
         self,
-        message: object,
-    ) -> object | None:
-        get_context = FeatureChannelBase._get_message_feature_channel_context_or_none
-        return await get_context(self, message)
+        membership: FeatureChannel,
+    ) -> RegisterFeatureChannelContext[MessageOrchestrationManager]:
+        return self._build_register_feature_channel_context(membership)
 
-    async def _process_feature_channel_message_with_outcome(
+    @override
+    async def _get_configured_message_context(
         self,
-        message: object,
-        feature_channel_context: object,
-    ) -> object:
-        process = FeatureChannelBase._process_feature_channel_message_with_outcome
-        return await process(self, message, feature_channel_context)
+        context: RegisterFeatureChannelContext[MessageOrchestrationManager],
+    ) -> (
+        ConfiguredRegisterFeatureChannelContext[
+            TeamRegisterConfig,
+            MessageOrchestrationManager,
+        ]
+        | None
+    ):
+        return await self._get_configured_register_feature_channel_context(context)
 
-    def _log_received_message(self, message: object) -> None:
-        FeatureChannelBase._log_received_message(self, message)
-
-    async def _add_invalid_registration_reactions(self, message: object) -> None:
-        add_reactions = FeatureChannelBase._add_invalid_registration_reactions
-        await add_reactions(self, message)
-
-    async def _parse_message_submission(
+    @override
+    async def _process_enabled_message(
         self,
-        _message: object,
+        message: Message,
+        context: RegisterFeatureChannelContext[MessageOrchestrationManager],
+    ) -> None:
+        await RegisterFeatureChannelBase._process_enabled_message(
+            self,
+            message,
+            context,
+        )
+
+    @override
+    def _parse_message_submission(
+        self,
+        message: Message,
     ) -> MessageParseResult[object]:
+        del message
         return self.parse_result
 
+    @override
     async def _process_configured_message_submission(
         self,
-        message: object,
-        context: ConfiguredFeatureChannelContext[MessageOrchestrationManager],
+        message: Message,
+        context: ConfiguredRegisterFeatureChannelContext[
+            TeamRegisterConfig,
+            MessageOrchestrationManager,
+        ],
         submission: object,
         user_info: UserInfo,
     ) -> str:
         self.configured_calls.append((message, context, submission, user_info))
         return "processed"
 
+    @override
+    async def _process_context_menu_message(
+        self,
+        interaction: Interaction,
+        message: Message,
+        source: GuildChannelSource,
+    ) -> None:
+        del interaction, message, source
+
 
 def fake_bot() -> SimpleNamespace:
     return SimpleNamespace(
         tree=SimpleNamespace(add_command=lambda _command: None),
         user=None,
+        cogs={},
     )
 
 
@@ -1920,15 +2761,19 @@ async def fake_context_menu_feature_channel_context(_message: object) -> object:
 
 def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
     subject = SimpleNamespace(**attributes)
-    for method_name in (
-        "_get_feature_channel_context",
-        "_get_enabled_feature_channel_or_none",
-        "_get_feature_channel_context_or_none",
-        "_get_configured_feature_channel_context",
-        "_build_feature_channel_context",
-        "_send_missing_config_followup",
+    context_method_names = (
+        "_get_register_feature_channel_context",
+        "_get_register_feature_channel_context_or_none",
+        "_get_configured_register_feature_channel_context",
+        "_build_register_feature_channel_context",
+        "_send_missing_register_config_followup",
+    )
+    core_method_names = (
         "_interaction_storage_context",
         "_send_interaction_storage_error_or_raise",
+        "_validate_lifecycle_owner",
+    )
+    register_method_names = (
         "_guide_sheet_url",
         "_guide_template_values",
         "_auto_guide_is_enabled",
@@ -1944,48 +2789,96 @@ def feature_channel_context_subject(**attributes: object) -> SimpleNamespace:
         "_disable_auto_guide_and_delete_message",
         "_delete_auto_guide_message_for_hard_clear",
         "toggle_auto_guide_from_settings",
+        "_process_context_menu_message",
+        "_process_enabled_message",
+        "_cleanup_after_disable",
+        "_cleanup_before_clear",
+    )
+    for owner, method_names in (
+        (RegisterFeatureChannelContextMixin, context_method_names),
+        (FeatureChannelBase, core_method_names),
+        (RegisterFeatureChannelBase, register_method_names),
     ):
-        method = getattr(FeatureChannelBase, method_name)
-        setattr(subject, method_name, method.__get__(subject, type(subject)))
+        for method_name in method_names:
+            method = getattr(owner, method_name)
+            setattr(subject, method_name, method.__get__(subject, type(subject)))
+
+    if not hasattr(subject, "_get_feature_channel_or_none"):
+
+        async def get_feature_channel_or_none(
+            guild_id: int,
+            channel_id: int,
+            feature_name: str | None = None,
+            *,
+            require_enabled: bool = False,
+        ) -> object | None:
+            return await FeatureChannelBase._get_feature_channel_or_none(
+                guild_id,
+                channel_id,
+                feature_name or subject.feature_name,
+                require_enabled=require_enabled,
+            )
+
+        subject._get_feature_channel_or_none = get_feature_channel_or_none
+    if not hasattr(subject, "_get_enabled_feature_channel_or_none"):
+
+        async def get_enabled_feature_channel_or_none(
+            guild_id: int,
+            channel_id: int,
+            feature_name: str | None = None,
+        ) -> object | None:
+            return await FeatureChannelBase._get_enabled_feature_channel_or_none(
+                guild_id,
+                channel_id,
+                feature_name or subject.feature_name,
+            )
+
+        subject._get_enabled_feature_channel_or_none = (
+            get_enabled_feature_channel_or_none
+        )
     if not hasattr(subject, "_delete_user_data_transaction"):
-        method = FeatureChannelUserBase._delete_user_data_transaction
+        method = RegisterFeatureChannelUserBase._delete_user_data_transaction
         subject._delete_user_data_transaction = method.__get__(subject, type(subject))
+    return subject
+
+
+def register_message_listener_subject(**attributes: object) -> SimpleNamespace:
+    subject = SimpleNamespace(**attributes)
+    method = RegisterFeatureChannelBase._process_enabled_message
+    subject._process_enabled_message = method.__get__(subject, type(subject))
     return subject
 
 
 def ordered_team_upsert_context(
     manager: OrderedTeamUpsertManager,
-) -> ConfiguredFeatureChannelContext[OrderedTeamUpsertManager]:
-    return ConfiguredFeatureChannelContext(
+) -> ConfiguredRegisterFeatureChannelContext[
+    TeamRegisterConfig,
+    OrderedTeamUpsertManager,
+]:
+    return ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
-        feature_channel=SimpleNamespace(
-            guild_id=111,
-            channel_id=222,
-            feature_name="team_register",
-        ),
+        feature_channel=feature_channel_row("team_register"),
         manager=manager,
-        feature_config=SimpleNamespace(
-            sheet_url=("https://docs.google.com/spreadsheets/d/team-message/edit"),
-            landing_worksheet_id=None,
+        feature_config=team_test_config(
+            "https://docs.google.com/spreadsheets/d/team-message/edit"
         ),
     )
 
 
 def ordered_shift_upsert_context(
     manager: OrderedShiftUpsertManager,
-) -> ConfiguredFeatureChannelContext[OrderedShiftUpsertManager]:
-    return ConfiguredFeatureChannelContext(
+) -> ConfiguredRegisterFeatureChannelContext[
+    ShiftRegisterConfig,
+    OrderedShiftUpsertManager,
+]:
+    return ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
-        feature_channel=SimpleNamespace(
-            guild_id=111,
-            channel_id=222,
-            feature_name="shift_register",
-        ),
+        feature_channel=feature_channel_row("shift_register"),
         manager=manager,
-        feature_config=SimpleNamespace(
-            sheet_url="https://sheet.example",
+        feature_config=shift_test_config(
+            "https://sheet.example",
             recruitment_time_ranges=[{"start": 4, "end": 28}],
         ),
     )
@@ -2023,7 +2916,9 @@ def test_feature_channel_context_helpers_are_not_module_level() -> None:
     assert hasattr(FeatureChannelBase, "_send_interaction_storage_error_or_raise")
     assert not hasattr(feature_channel_base, "_get_interaction_channel_context")
     assert not hasattr(FeatureChannelBase, "_get_interaction_channel_context")
-    assert not hasattr(feature_channel_base, "_get_configured_feature_channel_context")
+    assert not hasattr(
+        feature_channel_base, "_get_configured_register_feature_channel_context"
+    )
     assert not hasattr(feature_channel_base, "get_configured_feature_channel_context")
     assert not hasattr(feature_channel_base, "send_public_announcement_followups")
 
@@ -2041,9 +2936,12 @@ async def test_configured_feature_channel_context_exposes_feature_config(
         interaction,
         action="inspect feature context",
     )
-    get_context = FeatureChannelBase._get_feature_channel_context
+    get_context = (
+        RegisterFeatureChannelContextMixin._get_register_feature_channel_context
+    )
     feature_channel_context = await get_context(subject, source)
-    get_configured_context = FeatureChannelBase._get_configured_feature_channel_context
+    mixin = RegisterFeatureChannelContextMixin
+    get_configured_context = mixin._get_configured_register_feature_channel_context
     context = await get_configured_context(
         subject,
         feature_channel_context,
@@ -2075,9 +2973,12 @@ async def test_configured_feature_channel_context_missing_config_is_pure_lookup(
         interaction,
         action="inspect feature context",
     )
-    get_context = FeatureChannelBase._get_feature_channel_context
+    get_context = (
+        RegisterFeatureChannelContextMixin._get_register_feature_channel_context
+    )
     feature_channel_context = await get_context(subject, source)
-    get_configured_context = FeatureChannelBase._get_configured_feature_channel_context
+    mixin = RegisterFeatureChannelContextMixin
+    get_configured_context = mixin._get_configured_register_feature_channel_context
     context = await get_configured_context(
         subject,
         feature_channel_context,
@@ -2151,7 +3052,7 @@ async def test_app_command_predicate_disabled_uses_interaction_locale(
 
 
 @pytest.mark.asyncio
-async def test_app_command_predicate_db_failure_sends_safe_check_error(
+async def test_app_command_wrapped_db_failure_sends_safe_check_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def failing_lookup(
@@ -2184,7 +3085,10 @@ async def test_app_command_predicate_db_failure_sends_safe_check_error(
     await FeatureChannelBase.cog_app_command_error(
         subject,
         interaction,
-        exc_info.value,
+        app_commands.CommandInvokeError(
+            SimpleNamespace(name="wrapped-storage-check"),
+            exc_info.value,
+        ),
     )
 
     contents = interaction_contents(interaction)
@@ -2226,7 +3130,7 @@ async def test_prefix_command_predicate_uses_lookup_key_and_display_error(
 
 
 @pytest.mark.asyncio
-async def test_prefix_command_predicate_db_failure_replies_safe_check_error(
+async def test_prefix_command_wrapped_db_failure_replies_safe_check_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def failing_lookup(
@@ -2262,7 +3166,11 @@ async def test_prefix_command_predicate_db_failure_replies_safe_check_error(
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    await FeatureChannelBase.cog_command_error(subject, ctx, exc_info.value)
+    await FeatureChannelBase.cog_command_error(
+        subject,
+        ctx,
+        commands.CommandInvokeError(exc_info.value),
+    )
 
     assert len(replies) == 1
     assert_safe_storage_content(replies[0])
@@ -2344,34 +3252,31 @@ async def test_enable_response_uses_feature_display_name() -> None:
 
 @pytest.mark.asyncio
 async def test_disable_response_uses_feature_display_name() -> None:
-    context = auto_guide_context()
+    membership = object()
 
-    async def fake_get_feature_channel_context_or_none(
-        *,
+    async def fake_get_feature_channel_or_none(
         guild_id: int,
         channel_id: int,
+        _feature_name: str | None = None,
+        *,
         require_enabled: bool = False,
     ) -> object:
         assert (guild_id, channel_id, require_enabled) == (111, 222, True)
-        return context
+        return membership
 
     async def fake_disable_channel(_guild_id: int, _channel_id: int) -> bool:
         return True
 
-    async def fake_disable_auto_guide_and_delete_message(_context: object) -> bool:
-        return True
+    async def fake_cleanup_after_disable(membership_arg: object) -> None:
+        assert membership_arg is membership
 
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
         _disable_channel=fake_disable_channel,
     )
-    subject._get_feature_channel_context_or_none = (
-        fake_get_feature_channel_context_or_none
-    )
-    subject._disable_auto_guide_and_delete_message = (
-        fake_disable_auto_guide_and_delete_message
-    )
+    subject._get_feature_channel_or_none = fake_get_feature_channel_or_none
+    subject._cleanup_after_disable = fake_cleanup_after_disable
     interaction = FakeInteraction()
 
     await FeatureChannelBase.disable.callback(subject, interaction)
@@ -2384,39 +3289,36 @@ async def test_disable_response_uses_feature_display_name() -> None:
 
 @pytest.mark.asyncio
 async def test_disable_sends_auto_guide_warning_when_cleanup_fails() -> None:
-    context = auto_guide_context()
+    membership = object()
     calls: list[str] = []
 
-    async def fake_get_feature_channel_context_or_none(
-        *,
+    async def fake_get_feature_channel_or_none(
         guild_id: int,
         channel_id: int,
+        _feature_name: str | None = None,
+        *,
         require_enabled: bool = False,
     ) -> object:
         assert (guild_id, channel_id, require_enabled) == (111, 222, True)
         calls.append("get_context")
-        return context
+        return membership
 
     async def fake_disable_channel(_guild_id: int, _channel_id: int) -> bool:
         calls.append("disable")
         return True
 
-    async def fake_disable_auto_guide_and_delete_message(context_arg: object) -> bool:
-        assert context_arg is context
+    async def fake_cleanup_after_disable(membership_arg: object) -> str:
+        assert membership_arg is membership
         calls.append("auto_guide")
-        return False
+        return register_feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING
 
     subject = feature_channel_context_subject(
         feature_name="team_register",
         feature_display_name="Team Register",
         _disable_channel=fake_disable_channel,
     )
-    subject._get_feature_channel_context_or_none = (
-        fake_get_feature_channel_context_or_none
-    )
-    subject._disable_auto_guide_and_delete_message = (
-        fake_disable_auto_guide_and_delete_message
-    )
+    subject._get_feature_channel_or_none = fake_get_feature_channel_or_none
+    subject._cleanup_after_disable = fake_cleanup_after_disable
     interaction = FakeInteraction()
 
     await FeatureChannelBase.disable.callback(subject, interaction)
@@ -2426,7 +3328,7 @@ async def test_disable_sends_auto_guide_warning_when_cleanup_fails() -> None:
     ]
     assert interaction.followup.messages == [
         (
-            feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING,
+            register_feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING,
             {"ephemeral": True},
         )
     ]
@@ -2435,10 +3337,11 @@ async def test_disable_sends_auto_guide_warning_when_cleanup_fails() -> None:
 
 @pytest.mark.asyncio
 async def test_disable_response_uses_feature_display_name_when_not_enabled() -> None:
-    async def fake_get_feature_channel_context_or_none(
-        *,
+    async def fake_get_feature_channel_or_none(
         guild_id: int,
         channel_id: int,
+        _feature_name: str | None = None,
+        *,
         require_enabled: bool = False,
     ) -> None:
         assert (guild_id, channel_id, require_enabled) == (111, 222, True)
@@ -2453,10 +3356,8 @@ async def test_disable_response_uses_feature_display_name_when_not_enabled() -> 
         _disable_channel=fail_if_called,
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context_or_none = (
-        fake_get_feature_channel_context_or_none
-    )
-    subject._disable_auto_guide_and_delete_message = fail_if_called
+    subject._get_feature_channel_or_none = fake_get_feature_channel_or_none
+    subject._cleanup_after_disable = fail_if_called
     interaction = FakeInteraction()
 
     await FeatureChannelBase.disable.callback(subject, interaction)
@@ -2471,7 +3372,7 @@ async def test_disable_response_uses_feature_display_name_when_not_enabled() -> 
 async def test_disable_and_clear_confirmed_deletes_auto_guide_before_clear_and_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    context = auto_guide_context()
+    membership = object()
     calls: list[str] = []
 
     class ConfirmView:
@@ -2480,22 +3381,23 @@ async def test_disable_and_clear_confirmed_deletes_auto_guide_before_clear_and_w
         async def wait(self) -> None:
             calls.append("wait")
 
-    async def fake_get_feature_channel_context_or_none(
-        *,
+    async def fake_get_feature_channel_or_none(
         guild_id: int,
         channel_id: int,
+        _feature_name: str | None = None,
+        *,
         require_enabled: bool = False,
     ) -> object:
         assert (guild_id, channel_id, require_enabled) == (111, 222, False)
         calls.append("get_context")
-        return context
+        return membership
 
-    async def fake_delete_auto_guide_message_for_hard_clear(
-        context_arg: object,
-    ) -> bool:
-        assert context_arg is context
+    async def fake_cleanup_before_clear(membership_arg: object) -> str:
+        assert membership_arg is membership
         calls.append("auto_guide")
-        return False
+        return (
+            register_feature_channel_base.HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING
+        )
 
     async def fake_clear_feature_settings(guild_id: int, channel_id: int) -> None:
         assert (guild_id, channel_id) == (111, 222)
@@ -2511,12 +3413,8 @@ async def test_disable_and_clear_confirmed_deletes_auto_guide_before_clear_and_w
         feature_display_name="Team Register",
         _clear_feature_settings=fake_clear_feature_settings,
     )
-    subject._get_feature_channel_context_or_none = (
-        fake_get_feature_channel_context_or_none
-    )
-    subject._delete_auto_guide_message_for_hard_clear = (
-        fake_delete_auto_guide_message_for_hard_clear
-    )
+    subject._get_feature_channel_or_none = fake_get_feature_channel_or_none
+    subject._cleanup_before_clear = fake_cleanup_before_clear
     interaction = FakeInteraction()
 
     await FeatureChannelBase.disable_and_clear.callback(subject, interaction)
@@ -2529,7 +3427,7 @@ async def test_disable_and_clear_confirmed_deletes_auto_guide_before_clear_and_w
             {"ephemeral": True},
         ),
         (
-            feature_channel_base.HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING,
+            register_feature_channel_base.HARD_CLEAR_LATEST_GUIDE_DELETE_FAILED_WARNING,
             {"ephemeral": True},
         ),
     ]
@@ -2554,15 +3452,16 @@ async def test_disable_and_clear_hard_clear_does_not_save_auto_guide_state(
         async def wait(self) -> None:
             calls.append("wait")
 
-    async def fake_get_feature_channel_context_or_none(
-        *,
+    async def fake_get_feature_channel_or_none(
         guild_id: int,
         channel_id: int,
+        _feature_name: str | None = None,
+        *,
         require_enabled: bool = False,
     ) -> object:
         assert (guild_id, channel_id, require_enabled) == (111, 222, False)
         calls.append("get_context")
-        return context
+        return context.feature_channel
 
     async def fake_get_auto_guide_state(feature_channel: object) -> object:
         assert feature_channel is context.feature_channel
@@ -2579,10 +3478,9 @@ async def test_disable_and_clear_hard_clear_does_not_save_auto_guide_state(
         ConfirmView,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
-        raising=False,
     )
     subject = feature_channel_context_subject(
         feature_name="team_register",
@@ -2595,8 +3493,11 @@ async def test_disable_and_clear_hard_clear_does_not_save_auto_guide_state(
         ),
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context_or_none = (
-        fake_get_feature_channel_context_or_none
+    subject._get_feature_channel_or_none = fake_get_feature_channel_or_none
+    subject._build_register_feature_channel_context = lambda membership: (
+        context
+        if membership is context.feature_channel
+        else pytest.fail("unexpected membership")
     )
     interaction = FakeInteraction()
 
@@ -2641,9 +3542,8 @@ async def test_disable_and_clear_cancel_or_timeout_skips_auto_guide_delete(
         feature_display_name="Team Register",
         _clear_feature_settings=fail_if_called,
     )
-    subject._get_feature_channel_context_or_none = fail_if_called
-    subject._disable_auto_guide_and_delete_message = fail_if_called
-    subject._delete_auto_guide_message_for_hard_clear = fail_if_called
+    subject._get_feature_channel_or_none = fail_if_called
+    subject._cleanup_before_clear = fail_if_called
     interaction = FakeInteraction()
 
     await FeatureChannelBase.disable_and_clear.callback(subject, interaction)
@@ -2669,7 +3569,9 @@ async def test_user_guide_defers_before_followup(
         bot=SimpleNamespace(user=SimpleNamespace(mention="@Rhoboto")),
     )
 
-    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
+    await RegisterFeatureChannelUserBase.send_guide_message(
+        subject, interaction, "team.guide"
+    )
 
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
@@ -2689,9 +3591,9 @@ async def test_setup_after_enable_db_failure_sends_safe_storage_message() -> Non
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = failing_context
+    subject._get_register_feature_channel_context = failing_context
 
-    await FeatureChannelBase.setup_after_enable(subject, interaction)
+    await RegisterFeatureChannelBase.setup_after_enable(subject, interaction)
 
     contents = interaction_contents(interaction)
     assert len(contents) == 1
@@ -2706,14 +3608,14 @@ async def test_message_processing_helpers_build_context_and_user_info(
     monkeypatch.setattr(FeatureChannel, "get_or_none", fake_feature_channel_get_or_none)
     subject = RecordingMessageSubject(MessageParseResult.ignored())
     message = FakeRegisterMessage(content="150/740/33")
-    message_user_info = FeatureChannelBase._message_user_info
-    log_received_message = FeatureChannelBase._log_received_message
+    message_user_info = MessageUpsertFeatureChannelBase._message_user_info
+    log_received_message = MessageUpsertFeatureChannelBase._log_received_message
 
     get_message_context = (
-        FeatureChannelBase._get_message_feature_channel_context_or_none
+        MessageUpsertFeatureChannelBase._get_message_feature_channel_context_or_none
     )
     feature_channel_context = await get_message_context(subject, message)
-    user_info = message_user_info(subject, message)
+    user_info = message_user_info(message)
     log_received_message(subject, message)
 
     assert feature_channel_context is not None
@@ -2735,7 +3637,7 @@ async def test_message_processing_helper_ignores_bot_messages(
     message = FakeRegisterMessage(author_bot=True)
 
     get_message_context = (
-        FeatureChannelBase._get_message_feature_channel_context_or_none
+        MessageUpsertFeatureChannelBase._get_message_feature_channel_context_or_none
     )
     feature_channel_context = await get_message_context(subject, message)
 
@@ -2860,7 +3762,7 @@ async def test_listener_refreshes_auto_guide_after_ordinary_message(
 
     subject._refresh_auto_guide_if_enabled = refresh_auto_guide
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert len(refresh_calls) == 1
     context, channel = refresh_calls[0]
@@ -2897,7 +3799,7 @@ async def test_listener_refreshes_auto_guide_after_upsert_storage_failure(
     subject._process_configured_message_submission = fail_upsert
     subject._refresh_auto_guide_if_enabled = refresh_auto_guide
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.added_reactions == [config.WARNING_EMOJI, "🛠️"]
     assert len(refresh_calls) == 1
@@ -2925,7 +3827,7 @@ async def test_listener_refresh_failure_does_not_add_reactions_or_raise(
 
     subject._refresh_auto_guide_if_enabled = refresh_auto_guide
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert len(subject.configured_calls) == 1
     assert len(refresh_calls) == 1
@@ -2994,7 +3896,7 @@ async def test_context_menu_reports_google_sheets_error_safely() -> None:
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
         subject,
         interaction,
         message,
@@ -3043,7 +3945,7 @@ async def test_context_menu_db_failure_marks_message_and_sends_safe_error(
         logger=log,
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
         subject,
         interaction,
         message,
@@ -3096,7 +3998,9 @@ async def test_context_menu_contract_failure_marks_message_and_responds_safely(
         logger=log,
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
+        subject, interaction, message
+    )
 
     contents = interaction_contents(interaction)
     assert len(contents) == 1
@@ -3138,7 +4042,7 @@ async def test_context_menu_marks_internal_error_and_preserves_traceback() -> No
     )
 
     with pytest.raises(RuntimeError) as exc_info:
-        await FeatureChannelBase.upsert_from_content_menu(
+        await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
             subject,
             interaction,
             message,
@@ -3164,7 +4068,7 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
     ) -> object:
         await message.add_reaction(config.WARNING_EMOJI)
         await message.add_reaction(config.CONFUSED_EMOJI)
-        return feature_channel_base._MessageUpsertOutcome.invalid()
+        return MessageUpsertOutcome.invalid()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
@@ -3178,7 +4082,9 @@ async def test_context_menu_invalid_attempt_keeps_processor_reaction() -> None:
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
+        subject, interaction, message
+    )
 
     assert message.added_reactions == [config.WARNING_EMOJI, config.CONFUSED_EMOJI]
     assert interaction.response.deferred == [True]
@@ -3198,7 +4104,7 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
         _message: FakeMessage,
         _feature_channel_context: object,
     ) -> object:
-        return feature_channel_base._MessageUpsertOutcome.ignored()
+        return MessageUpsertOutcome.ignored()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
@@ -3212,7 +4118,9 @@ async def test_context_menu_ordinary_text_failed_followup_without_reaction() -> 
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
+        subject, interaction, message
+    )
 
     assert interaction.response.deferred == [True]
     assert message.added_reactions == []
@@ -3232,7 +4140,7 @@ async def test_context_menu_success_followup_uses_feature_display_name() -> None
         _message: FakeMessage,
         _feature_channel_context: object,
     ) -> object:
-        return feature_channel_base._MessageUpsertOutcome.processed("{'ok': true}")
+        return MessageUpsertOutcome.processed("{'ok': true}")
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
@@ -3246,7 +4154,9 @@ async def test_context_menu_success_followup_uses_feature_display_name() -> None
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
+        subject, interaction, message
+    )
 
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
@@ -3265,7 +4175,7 @@ async def test_context_menu_missing_config_reports_private_clear_message() -> No
         _message: FakeMessage,
         _feature_channel_context: object,
     ) -> object:
-        return feature_channel_base._MessageUpsertOutcome.missing_config()
+        return MessageUpsertOutcome.missing_config()
 
     interaction = FakeInteraction()
     subject = feature_channel_context_subject(
@@ -3279,7 +4189,9 @@ async def test_context_menu_missing_config_reports_private_clear_message() -> No
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.upsert_from_content_menu(subject, interaction, message)
+    await MessageUpsertFeatureChannelBase.upsert_from_content_menu(
+        subject, interaction, message
+    )
 
     assert interaction.response.deferred == [True]
     assert interaction.followup.messages == [
@@ -3299,7 +4211,7 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         require_enabled: bool,
     ) -> object:
         assert (guild_id, channel_id, require_enabled) == (111, 222, True)
-        return object()
+        return SimpleNamespace(guild_id=guild_id, channel_id=channel_id)
 
     async def get_message_context(message_arg: FakeMessage) -> object:
         assert message_arg is message
@@ -3319,7 +4231,7 @@ async def test_message_listener_marks_google_sheets_error() -> None:
             "Google Sheets is temporarily unavailable. Try again later.",
         )
 
-    subject = SimpleNamespace(
+    subject = register_message_listener_subject(
         _get_message_feature_channel_context_or_none=get_message_context,
         _process_feature_channel_message_with_outcome=raise_google_sheets_error,
         _refresh_auto_guide_if_enabled=_noop_async,
@@ -3328,7 +4240,7 @@ async def test_message_listener_marks_google_sheets_error() -> None:
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.removed_reactions == [(config.PROCESSING_EMOJI, bot_user)]
     assert message.added_reactions == [
@@ -3350,7 +4262,7 @@ async def test_message_listener_marks_worksheet_contract_error() -> None:
     message = FakeRegisterMessage()
 
     async def get_message_context(_message: FakeRegisterMessage) -> object:
-        return object()
+        return SimpleNamespace(guild_id=111, channel_id=222)
 
     async def raise_contract_error(
         message: FakeRegisterMessage,
@@ -3359,7 +4271,7 @@ async def test_message_listener_marks_worksheet_contract_error() -> None:
         await message.add_reaction(config.PROCESSING_EMOJI)
         required_unique_header_index([], "required")
 
-    subject = SimpleNamespace(
+    subject = register_message_listener_subject(
         _get_message_feature_channel_context_or_none=get_message_context,
         _process_feature_channel_message_with_outcome=raise_contract_error,
         _refresh_auto_guide_if_enabled=_noop_async,
@@ -3368,7 +4280,7 @@ async def test_message_listener_marks_worksheet_contract_error() -> None:
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.on_message(subject, message)
+    await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert message.added_reactions == [
         config.PROCESSING_EMOJI,
@@ -3385,7 +4297,7 @@ async def test_message_listener_marks_internal_error_and_preserves_traceback() -
     internal_error = RuntimeError("internal bug")
 
     async def get_message_context(_message: FakeRegisterMessage) -> object:
-        return object()
+        return SimpleNamespace(guild_id=111, channel_id=222)
 
     async def raise_internal_error(
         message: FakeRegisterMessage,
@@ -3394,7 +4306,7 @@ async def test_message_listener_marks_internal_error_and_preserves_traceback() -
         await message.add_reaction(config.PROCESSING_EMOJI)
         raise internal_error
 
-    subject = SimpleNamespace(
+    subject = register_message_listener_subject(
         _get_message_feature_channel_context_or_none=get_message_context,
         _process_feature_channel_message_with_outcome=raise_internal_error,
         _refresh_auto_guide_if_enabled=_noop_async,
@@ -3404,7 +4316,7 @@ async def test_message_listener_marks_internal_error_and_preserves_traceback() -
     )
 
     with pytest.raises(RuntimeError) as exc_info:
-        await FeatureChannelBase.on_message(subject, message)
+        await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert exc_info.value is internal_error
     assert exc_info.traceback[-1].name == "raise_internal_error"
@@ -3430,7 +4342,7 @@ async def test_listener_reaction_failure_does_not_hide_internal_error() -> None:
     message = ReactionFailingMessage()
 
     async def get_message_context(_message: FakeRegisterMessage) -> object:
-        return object()
+        return SimpleNamespace(guild_id=111, channel_id=222)
 
     async def raise_internal_error(
         message: FakeRegisterMessage,
@@ -3440,7 +4352,7 @@ async def test_listener_reaction_failure_does_not_hide_internal_error() -> None:
         raise internal_error
 
     logger = RecordingLogger()
-    subject = SimpleNamespace(
+    subject = register_message_listener_subject(
         _get_message_feature_channel_context_or_none=get_message_context,
         _process_feature_channel_message_with_outcome=raise_internal_error,
         _refresh_auto_guide_if_enabled=_noop_async,
@@ -3450,7 +4362,7 @@ async def test_listener_reaction_failure_does_not_hide_internal_error() -> None:
     )
 
     with pytest.raises(RuntimeError) as exc_info:
-        await FeatureChannelBase.on_message(subject, message)
+        await MessageUpsertFeatureChannelBase.on_message(subject, message)
 
     assert exc_info.value is internal_error
     assert len(logger.exceptions) == 2
@@ -3472,9 +4384,9 @@ async def test_delete_after_confirmation_db_failure_sends_safe_storage_error() -
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context_or_none = failing_context
+    subject._get_register_feature_channel_context_or_none = failing_context
 
-    await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -3500,7 +4412,9 @@ async def test_user_guide_uses_followup_for_missing_config(
         bot=SimpleNamespace(user=None),
     )
 
-    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
+    await RegisterFeatureChannelUserBase.send_guide_message(
+        subject, interaction, "team.guide"
+    )
 
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
@@ -3521,7 +4435,9 @@ async def test_user_guide_missing_config_uses_interaction_locale(
         bot=SimpleNamespace(user=None),
     )
 
-    await FeatureChannelUserBase.send_guide_message(subject, interaction, "team.guide")
+    await RegisterFeatureChannelUserBase.send_guide_message(
+        subject, interaction, "team.guide"
+    )
 
     assert interaction.response.deferred == [True]
     message, kwargs = interaction.followup.messages[0]
@@ -3547,7 +4463,7 @@ async def test_user_guide_missing_channel_raises_after_defer() -> None:
             "message."
         ),
     ):
-        await FeatureChannelUserBase.send_guide_message(
+        await RegisterFeatureChannelUserBase.send_guide_message(
             subject,
             interaction,
             "team.guide",
@@ -3575,13 +4491,13 @@ async def test_disable_auto_guide_and_delete_message_clears_message_id_after_del
         return state
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
 
-    result = await FeatureChannelBase._disable_auto_guide_and_delete_message(
+    result = await RegisterFeatureChannelBase._disable_auto_guide_and_delete_message(
         subject,
         context,
     )
@@ -3611,13 +4527,13 @@ async def test_disable_auto_guide_and_delete_message_clears_message_id_after_not
         return state
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
 
-    result = await FeatureChannelBase._disable_auto_guide_and_delete_message(
+    result = await RegisterFeatureChannelBase._disable_auto_guide_and_delete_message(
         subject,
         context,
     )
@@ -3648,13 +4564,13 @@ async def test_disable_auto_guide_and_delete_message_keeps_message_id_after_http
         return state
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
 
-    result = await FeatureChannelBase._disable_auto_guide_and_delete_message(
+    result = await RegisterFeatureChannelBase._disable_auto_guide_and_delete_message(
         subject,
         context,
     )
@@ -3680,13 +4596,13 @@ async def test_disable_auto_guide_and_delete_message_uses_auto_guide_lock(
         return None
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
 
-    result = await FeatureChannelBase._disable_auto_guide_and_delete_message(
+    result = await RegisterFeatureChannelBase._disable_auto_guide_and_delete_message(
         subject,
         context,
     )
@@ -3712,7 +4628,7 @@ async def test_latest_guide_toggle_enable_saves_before_refresh_and_warns(
         async def save(self) -> None:
             events.append(f"save:{self.is_enabled}")
 
-    async def fake_get_feature_channel_context(source: object) -> object:
+    async def fake_get_register_feature_channel_context(source: object) -> object:
         assert source is interaction
         events.append("get_context")
         return context
@@ -3760,18 +4676,20 @@ async def test_latest_guide_toggle_enable_saves_before_refresh_and_warns(
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = fake_get_feature_channel_context
+    subject._get_register_feature_channel_context = (
+        fake_get_register_feature_channel_context
+    )
     subject._build_settings_panel = fake_build_settings_panel
     subject._refresh_auto_guide_if_enabled = fake_refresh_auto_guide
     subject._disable_auto_guide_and_delete_message = fail_disable
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
 
-    await FeatureChannelBase.toggle_auto_guide_from_settings(
+    await RegisterFeatureChannelBase.toggle_auto_guide_from_settings(
         subject,
         interaction,
         enabled=True,
@@ -3804,7 +4722,7 @@ async def test_latest_guide_toggle_disable_calls_delete_helper_and_warns(
         async def save(self) -> None:
             events.append(f"save:{self.is_enabled}")
 
-    async def fake_get_feature_channel_context(_source: object) -> object:
+    async def fake_get_register_feature_channel_context(_source: object) -> object:
         events.append("get_context")
         return context
 
@@ -3837,18 +4755,20 @@ async def test_latest_guide_toggle_disable_calls_delete_helper_and_warns(
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = fake_get_feature_channel_context
+    subject._get_register_feature_channel_context = (
+        fake_get_register_feature_channel_context
+    )
     subject._build_settings_panel = fake_build_settings_panel
     subject._refresh_auto_guide_if_enabled = fake_refresh
     subject._disable_auto_guide_and_delete_message = fake_disable_auto_guide
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
 
-    await FeatureChannelBase.toggle_auto_guide_from_settings(
+    await RegisterFeatureChannelBase.toggle_auto_guide_from_settings(
         subject,
         interaction,
         enabled=False,
@@ -3858,7 +4778,10 @@ async def test_latest_guide_toggle_disable_calls_delete_helper_and_warns(
 
     assert events == ["get_context", "state", "save:False", "build_panel", "disable"]
     assert interaction.followup.messages == [
-        (feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING, {"ephemeral": True})
+        (
+            register_feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING,
+            {"ephemeral": True},
+        )
     ]
 
 
@@ -3876,7 +4799,7 @@ async def test_latest_guide_toggle_disable_deletes_when_panel_refresh_fails(
         async def save(self) -> None:
             events.append(f"save:{self.is_enabled}")
 
-    async def fake_get_feature_channel_context(_source: object) -> object:
+    async def fake_get_register_feature_channel_context(_source: object) -> object:
         events.append("get_context")
         return context
 
@@ -3903,17 +4826,19 @@ async def test_latest_guide_toggle_disable_deletes_when_panel_refresh_fails(
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = fake_get_feature_channel_context
+    subject._get_register_feature_channel_context = (
+        fake_get_register_feature_channel_context
+    )
     subject._build_settings_panel = fake_build_settings_panel
     subject._disable_auto_guide_and_delete_message = fake_disable_auto_guide
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
 
-    await FeatureChannelBase.toggle_auto_guide_from_settings(
+    await RegisterFeatureChannelBase.toggle_auto_guide_from_settings(
         subject,
         interaction,
         enabled=False,
@@ -3928,7 +4853,10 @@ async def test_latest_guide_toggle_disable_deletes_when_panel_refresh_fails(
     assert "settings view could not be refreshed" in edit_content
     assert edit_kwargs == {"embed": None, "view": None}
     assert interaction.followup.messages == [
-        (feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING, {"ephemeral": True})
+        (
+            register_feature_channel_base.LATEST_GUIDE_DELETE_FAILED_WARNING,
+            {"ephemeral": True},
+        )
     ]
 
 
@@ -3980,14 +4908,14 @@ async def test_auto_guide_disabled_state_skips_config_lookup(
         raise AssertionError(msg)
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
-    subject._get_configured_feature_channel_context = unexpected_config_lookup
+    subject._get_configured_register_feature_channel_context = unexpected_config_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4013,14 +4941,14 @@ async def test_auto_guide_enabled_missing_config_is_silent_noop(
         config_lookups.append(feature_channel_context)
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
-    subject._get_configured_feature_channel_context = missing_config_lookup
+    subject._get_configured_register_feature_channel_context = missing_config_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4036,7 +4964,7 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = auto_guide_context()
-    configured_context = ConfiguredFeatureChannelContext(
+    configured_context = ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=context.feature_channel,
@@ -4085,25 +5013,25 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
         return configured_context
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "render_message_template",
         fake_render_message_template,
     )
@@ -4112,9 +5040,9 @@ async def test_auto_guide_replies_to_manual_anchor_and_records_latest_message(
         "get_or_none",
         fake_message_state_get_or_none,
     )
-    subject._get_configured_feature_channel_context = configured_lookup
+    subject._get_configured_register_feature_channel_context = configured_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4154,7 +5082,7 @@ async def test_auto_guide_delete_failure_logs_and_keeps_new_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = auto_guide_context()
-    configured_context = ConfiguredFeatureChannelContext(
+    configured_context = ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=context.feature_channel,
@@ -4196,25 +5124,25 @@ async def test_auto_guide_delete_failure_logs_and_keeps_new_message(
         return configured_context
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "render_message_template",
         fake_render_message_template,
     )
@@ -4223,9 +5151,9 @@ async def test_auto_guide_delete_failure_logs_and_keeps_new_message(
         "get_or_none",
         fake_message_state_get_or_none,
     )
-    subject._get_configured_feature_channel_context = configured_lookup
+    subject._get_configured_register_feature_channel_context = configured_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4248,7 +5176,7 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = auto_guide_context()
-    configured_context = ConfiguredFeatureChannelContext(
+    configured_context = ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=context.feature_channel,
@@ -4288,25 +5216,25 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
         return configured_context
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "render_message_template",
         fake_render_message_template,
     )
@@ -4315,9 +5243,9 @@ async def test_auto_guide_reply_failure_falls_back_without_footer(
         "get_or_none",
         fake_message_state_get_or_none,
     )
-    subject._get_configured_feature_channel_context = configured_lookup
+    subject._get_configured_register_feature_channel_context = configured_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4346,7 +5274,7 @@ async def test_auto_guide_buttons_use_first_announcement_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = auto_guide_context()
-    configured_context = ConfiguredFeatureChannelContext(
+    configured_context = ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=context.feature_channel,
@@ -4386,22 +5314,22 @@ async def test_auto_guide_buttons_use_first_announcement_language(
         return configured_context
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "render_message_template",
         fake_render_message_template,
     )
@@ -4410,9 +5338,9 @@ async def test_auto_guide_buttons_use_first_announcement_language(
         "get_or_none",
         fake_message_state_get_or_none,
     )
-    subject._get_configured_feature_channel_context = configured_lookup
+    subject._get_configured_register_feature_channel_context = configured_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4431,7 +5359,7 @@ async def test_auto_guide_save_id_failure_keeps_new_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = auto_guide_context()
-    configured_context = ConfiguredFeatureChannelContext(
+    configured_context = ConfiguredRegisterFeatureChannelContext(
         guild_id=111,
         channel_id=222,
         feature_channel=context.feature_channel,
@@ -4471,25 +5399,25 @@ async def test_auto_guide_save_id_failure_keeps_new_message(
         return configured_context
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         fake_get_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_or_create_auto_guide_state",
         fake_get_or_create_auto_guide_state,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
         raising=False,
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "render_message_template",
         fake_render_message_template,
     )
@@ -4498,9 +5426,9 @@ async def test_auto_guide_save_id_failure_keeps_new_message(
         "get_or_none",
         fake_message_state_get_or_none,
     )
-    subject._get_configured_feature_channel_context = configured_lookup
+    subject._get_configured_register_feature_channel_context = configured_lookup
 
-    result = await FeatureChannelBase._refresh_auto_guide_if_enabled(
+    result = await RegisterFeatureChannelBase._refresh_auto_guide_if_enabled(
         subject,
         context,
         channel,
@@ -4536,7 +5464,7 @@ async def test_shift_auto_guide_render_smoke_with_footer(
         return ["ja"]
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
         raising=False,
@@ -4566,7 +5494,7 @@ async def test_render_localized_embeds_preserves_language_order_and_footer(
         return ["en", "ja", "zh_tw"]
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         fake_get_announcement_languages,
     )
@@ -4594,9 +5522,9 @@ async def test_render_localized_embeds_preserves_language_order_and_footer(
     )
 
     assert [embed.title for embed in embeds] == [
-        "Day 2 | Shift registration is now closed 🙇\n",
-        "2日目｜シフト募集を締め切りました 🙇\n",
-        "第2天｜班表登記已截止 🙇\n",
+        "Day 2 | Shift registration has been automatically closed 🙇\n",
+        "2日目｜シフト登録の受付を自動で締め切りました 🙇\n",
+        "第2天｜班表登記已自動截止 🙇\n",
     ]
     assert all(embed.color.value == config.DEFAULT_EMBED_COLOR for embed in embeds)
     assert all(embed.footer.text for embed in embeds)
@@ -4636,11 +5564,11 @@ async def test_team_public_guide_uses_summary_worksheet_gid(
         return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         _noop_async,
     )
 
@@ -4679,11 +5607,11 @@ async def test_shift_public_guide_uses_entry_worksheet_gid(
         return [RenderedAnnouncement(language="en", content="en guide")]
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         _noop_async,
     )
 
@@ -4722,7 +5650,7 @@ async def test_team_user_guide_uses_summary_worksheet_gid(
         return "rendered team guide"
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_message_template",
+        "cogs.base.register_feature_channel_user_base.render_message_template",
         fake_render_message_template,
     )
 
@@ -4759,7 +5687,7 @@ async def test_shift_user_guide_uses_entry_worksheet_gid(
         return "rendered shift guide"
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_message_template",
+        "cogs.base.register_feature_channel_user_base.render_message_template",
         fake_render_message_template,
     )
 
@@ -4801,11 +5729,11 @@ async def test_public_register_guide_sends_announcement_languages_in_order(
         ]
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         _noop_async,
     )
 
@@ -4820,7 +5748,7 @@ async def test_public_register_guide_sends_announcement_languages_in_order(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.send_guide_message(subject, interaction)
+    await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert [content for content, _kwargs in interaction.followup.messages] == [
@@ -4859,11 +5787,11 @@ async def test_public_register_guide_saves_first_manual_anchor(
         saved_anchors.append((feature_channel, message_id))
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         fake_save_manual_guide_anchor,
         raising=False,
     )
@@ -4879,7 +5807,7 @@ async def test_public_register_guide_saves_first_manual_anchor(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.send_guide_message(subject, interaction)
+    await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert [
         (anchor.feature_name, message_id) for anchor, message_id in saved_anchors
@@ -4905,7 +5833,7 @@ async def test_public_register_guide_reports_missing_config(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.send_guide_message(subject, interaction)
+    await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.response.deferred == [False]
     assert interaction.followup.messages == [
@@ -4930,7 +5858,7 @@ async def test_public_register_guide_reports_render_failure(
         return []
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
 
@@ -4941,7 +5869,7 @@ async def test_public_register_guide_reports_render_failure(
         saved_anchors.append((feature_channel, message_id))
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         fake_save_manual_guide_anchor,
         raising=False,
     )
@@ -4956,7 +5884,7 @@ async def test_public_register_guide_reports_render_failure(
         logger=NullLogger(),
     )
 
-    await FeatureChannelBase.send_guide_message(subject, interaction)
+    await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert saved_anchors == []
     assert interaction.followup.messages == [
@@ -4987,11 +5915,11 @@ async def test_public_register_guide_manual_anchor_save_failure_logs_warning(
         raise RuntimeError(msg)
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         fake_save_manual_guide_anchor,
         raising=False,
     )
@@ -5008,7 +5936,7 @@ async def test_public_register_guide_manual_anchor_save_failure_logs_warning(
         logger=logger,
     )
 
-    await FeatureChannelBase.send_guide_message(subject, interaction)
+    await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert interaction.followup.messages == [
         ("en guide", {"ephemeral": False, "wait": True})
@@ -5054,11 +5982,11 @@ async def test_public_register_guide_saves_manual_anchor_before_later_send_failu
             return await super().send(content, **kwargs)
 
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.render_announcement_messages",
+        "cogs.base.register_feature_channel_base.render_announcement_messages",
         fake_render_announcement_messages,
     )
     monkeypatch.setattr(
-        "cogs.base.feature_channel_base.save_manual_guide_anchor",
+        "cogs.base.register_feature_channel_base.save_manual_guide_anchor",
         fake_save_manual_guide_anchor,
         raising=False,
     )
@@ -5075,7 +6003,7 @@ async def test_public_register_guide_saves_manual_anchor_before_later_send_failu
     )
 
     with pytest.raises(RuntimeError, match="second send failed"):
-        await FeatureChannelBase.send_guide_message(subject, interaction)
+        await RegisterFeatureChannelBase.send_guide_message(subject, interaction)
 
     assert events == [
         ("send", "ja guide"),
@@ -5151,7 +6079,7 @@ async def test_shift_timeline_db_failure_sends_storage_followup() -> None:
         feature_display_name="Shift Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = failing_context
+    subject._get_register_feature_channel_context = failing_context
 
     await ShiftRegister.announce_timeline.callback(subject, interaction)
 
@@ -5182,11 +6110,8 @@ async def test_shift_timeline_delivery_timeout_is_not_classified_as_storage(
         "cogs.shift_register.render_shift_timeline_announcement_messages",
         fake_render_shift_timeline_announcement_messages,
     )
-    monkeypatch.setattr(
-        "cogs.shift_register._send_public_announcement_followups",
-        fail_delivery,
-    )
     interaction = FakeInteraction(locale="ja")
+    interaction.followup.send = fail_delivery
     subject = feature_channel_context_subject(
         feature_name="shift_register",
         ManagerType=ConfiguredShiftInfoManager,
@@ -5245,7 +6170,7 @@ async def test_team_summary_config_lookup_db_failure_sends_safe_storage_followup
         sheet_write_lock=RecordingLock(),
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context = failing_context
+    subject._get_register_feature_channel_context = failing_context
 
     await TeamRegister.summary.callback(subject, interaction)
 
@@ -5492,8 +6417,10 @@ async def test_team_delete_refreshes_after_waiting_for_channel_lock() -> None:
     async def get_configured_context(_context: object) -> SimpleNamespace:
         return SimpleNamespace(channel_id=222, manager=manager)
 
-    subject._get_feature_channel_context_or_none = get_feature_channel_context_or_none
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = (
+        get_feature_channel_context_or_none
+    )
+    subject._get_configured_register_feature_channel_context = get_configured_context
     interaction = FakeInteraction(locale="en-US", user_id=333)
     source = require_guild_channel_source(
         interaction,
@@ -5501,7 +6428,7 @@ async def test_team_delete_refreshes_after_waiting_for_channel_lock() -> None:
     )
 
     task = asyncio.create_task(
-        FeatureChannelUserBase._delete_user_data_after_confirmation(
+        RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
             subject,
             interaction,
             source,
@@ -5559,15 +6486,17 @@ async def test_shift_delete_fetches_metadata_inside_channel_transaction() -> Non
     async def get_configured_context(_context: object) -> SimpleNamespace:
         return SimpleNamespace(channel_id=222, manager=manager)
 
-    subject._get_feature_channel_context_or_none = get_feature_channel_context_or_none
-    subject._get_configured_feature_channel_context = get_configured_context
+    subject._get_register_feature_channel_context_or_none = (
+        get_feature_channel_context_or_none
+    )
+    subject._get_configured_register_feature_channel_context = get_configured_context
     interaction = FakeInteraction(locale="en-US", user_id=333)
     source = require_guild_channel_source(
         interaction,
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5603,7 +6532,7 @@ async def test_delete_callback_sends_confirmation_without_touching_storage(
         raise AssertionError
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_user_base,
         "ConfirmDeleteUserDataView",
         ConfirmView,
     )
@@ -5616,7 +6545,7 @@ async def test_delete_callback_sends_confirmation_without_touching_storage(
     )
     interaction = FakeInteraction(locale="en-US", user_id=333)
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    await RegisterFeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.response.deferred == []
     assert len(interaction.response.messages) == 1
@@ -5669,7 +6598,7 @@ async def test_delete_callback_cancel_or_timeout_skips_delete_and_lock(
         deleted.append(args)
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_user_base,
         "ConfirmDeleteUserDataView",
         ConfirmView,
     )
@@ -5682,7 +6611,7 @@ async def test_delete_callback_cancel_or_timeout_skips_delete_and_lock(
     )
     interaction = FakeInteraction(locale="en-US", user_id=333)
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    await RegisterFeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.followup.messages == expected_followups
     assert deleted == []
@@ -5717,7 +6646,7 @@ async def test_delete_after_confirmation_deletes_with_configured_context(
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5765,7 +6694,7 @@ async def test_delete_callback_confirm_edits_prompt_to_success(
         return "success"
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_user_base,
         "ConfirmDeleteUserDataView",
         ConfirmView,
     )
@@ -5776,7 +6705,7 @@ async def test_delete_callback_confirm_edits_prompt_to_success(
     subject._delete_user_data_after_confirmation = fake_delete_after_confirmation
     interaction = FakeInteraction(locale="en-US", user_id=333)
 
-    await FeatureChannelUserBase.delete_callback(subject, interaction)
+    await RegisterFeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.original_response_edits == [("success", {"view": None})]
     assert interaction.followup.messages == []
@@ -5805,7 +6734,7 @@ async def test_delete_after_confirmation_reports_missing_config_without_lock(
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5837,10 +6766,10 @@ async def test_delete_after_confirmation_disabled_feature_skips_delete_and_lock(
         assert (guild_id, channel_id, require_enabled) == (111, 222, True)
         return None
 
-    async def fake_get_feature_channel_context(_source: object) -> object:
+    async def fake_get_register_feature_channel_context(_source: object) -> object:
         return object()
 
-    async def fake_get_configured_feature_channel_context(
+    async def fake_get_configured_register_feature_channel_context(
         _context: object,
     ) -> SimpleNamespace:
         return SimpleNamespace(
@@ -5861,10 +6790,14 @@ async def test_delete_after_confirmation_disabled_feature_skips_delete_and_lock(
         FeatureChannelType=SimpleNamespace(sheet_write_lock=lock),
         _delete_user_data=fake_delete_user_data,
     )
-    subject._get_feature_channel_context_or_none = fake_get_enabled_context_or_none
-    subject._get_feature_channel_context = fake_get_feature_channel_context
-    subject._get_configured_feature_channel_context = (
-        fake_get_configured_feature_channel_context
+    subject._get_register_feature_channel_context_or_none = (
+        fake_get_enabled_context_or_none
+    )
+    subject._get_register_feature_channel_context = (
+        fake_get_register_feature_channel_context
+    )
+    subject._get_configured_register_feature_channel_context = (
+        fake_get_configured_register_feature_channel_context
     )
     interaction = FakeInteraction(locale="en-US")
     source = require_guild_channel_source(
@@ -5872,7 +6805,7 @@ async def test_delete_after_confirmation_disabled_feature_skips_delete_and_lock(
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5911,15 +6844,17 @@ async def test_delete_after_confirmation_missing_feature_row_reports_not_enabled
         feature_display_name="Team Register",
         logger=NullLogger(),
     )
-    subject._get_feature_channel_context_or_none = fake_get_enabled_context_or_none
-    subject._get_feature_channel_context = fail_stale_row_lookup
+    subject._get_register_feature_channel_context_or_none = (
+        fake_get_enabled_context_or_none
+    )
+    subject._get_register_feature_channel_context = fail_stale_row_lookup
     interaction = FakeInteraction(locale="en-US")
     source = require_guild_channel_source(
         interaction,
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5957,7 +6892,7 @@ async def test_delete_callback_uses_feature_catalog_in_zh_copy(
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -5994,7 +6929,7 @@ async def test_delete_callback_uses_feature_catalog_in_ja_copy(
         action="delete feature user data",
     )
 
-    result = await FeatureChannelUserBase._delete_user_data_after_confirmation(
+    result = await RegisterFeatureChannelUserBase._delete_user_data_after_confirmation(
         subject,
         interaction,
         source,
@@ -6028,7 +6963,7 @@ async def test_delete_callback_missing_channel_raises_before_defer() -> None:
             "Interaction guild or channel is None. Cannot delete feature user data."
         ),
     ):
-        await FeatureChannelUserBase.delete_callback(subject, interaction)
+        await RegisterFeatureChannelUserBase.delete_callback(subject, interaction)
 
     assert interaction.response.deferred == []
     assert interaction.response.messages == []
@@ -6046,7 +6981,7 @@ async def test_auto_guide_persistent_delete_button_reuses_delete_callback() -> N
         calls.append(interaction)
 
     subject.delete_callback = fake_delete_callback
-    view = FeatureChannelUserBase.build_auto_guide_delete_view(subject)
+    view = RegisterFeatureChannelUserBase.build_auto_guide_delete_view(subject)
     interaction = FakeInteraction()
 
     await view.children[0].callback(interaction)
@@ -6071,12 +7006,42 @@ def test_register_context_menu_names_use_feature_display_name() -> None:
 
     assert team_register.context_menu.name == "Team Register Upsert"
     assert shift_register.context_menu.name == "Shift Register Upsert"
+    assert [name for name, _listener in team_register.get_listeners()] == ["on_message"]
+    assert [name for name, _listener in shift_register.get_listeners()] == [
+        "on_message"
+    ]
+
+
+def test_message_context_menu_name_can_be_overridden_without_changing_defaults() -> (
+    None
+):
+    class NamedRecordingMessageSubject(RecordingMessageSubject):
+        context_menu_name = "部屋番号を設定"
+
+    custom = NamedRecordingMessageSubject(MessageParseResult.ignored())
+    team_register = TeamRegister(fake_bot())
+    shift_register = ShiftRegister(fake_bot())
+
+    assert custom.context_menu.name == "部屋番号を設定"
+    assert team_register.context_menu.name == "Team Register Upsert"
+    assert shift_register.context_menu.name == "Shift Register Upsert"
 
 
 def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
     assert not hasattr(FeatureChannelBase, "process_upsert_from_message")
     assert not hasattr(FeatureChannelBase, "_process_upsert_from_message_with_outcome")
-    assert hasattr(FeatureChannelBase, "_process_feature_channel_message_with_outcome")
+    assert not hasattr(
+        FeatureChannelBase, "_process_feature_channel_message_with_outcome"
+    )
+    assert not hasattr(FeatureChannelBase, "on_message")
+    assert not hasattr(FeatureChannelBase, "upsert_from_content_menu")
+    assert hasattr(
+        MessageUpsertFeatureChannelBase,
+        "_process_feature_channel_message_with_outcome",
+    )
+    assert hasattr(MessageUpsertFeatureChannelBase, "_parse_message_submission")
+    assert hasattr(MessageUpsertFeatureChannelBase, "on_message")
+    assert hasattr(MessageUpsertFeatureChannelBase, "upsert_from_content_menu")
     assert "process_upsert_from_message" not in TeamRegister.__dict__
     assert "process_upsert_from_message" not in ShiftRegister.__dict__
     assert "_process_upsert_from_message_with_outcome" not in TeamRegister.__dict__
@@ -6089,12 +7054,41 @@ def test_team_and_shift_use_inherited_message_upsert_orchestration() -> None:
     assert "_process_configured_message_submission" in ShiftRegister.__dict__
 
 
+def test_lifecycle_only_feature_does_not_register_message_surfaces() -> None:
+    class LifecycleOnlyFeature(
+        FeatureChannelBase,
+        group_name="lifecycle_only_test",
+    ):
+        feature_name = "lifecycle_only_test"
+        feature_display_name = "Lifecycle Only Test"
+
+        @override
+        async def setup_after_enable(self, interaction: Interaction) -> None:
+            del interaction
+
+    subject = LifecycleOnlyFeature(fake_bot())
+
+    assert not hasattr(subject, "context_menu")
+    assert subject.get_listeners() == []
+
+
+def test_four_generic_message_base_registers_only_shared_message_surfaces() -> None:
+    subject = RecordingMessageSubject(MessageParseResult.ignored())
+
+    assert [name for name, _listener in subject.get_listeners()] == ["on_message"]
+    assert subject.context_menu.name == "Team Register Test Upsert"
+    assert subject.context_menu.callback == subject.upsert_from_content_menu
+
+
 @pytest.mark.asyncio
 async def test_team_register_message_upsert_uses_integrated_manager_action() -> None:
     subject = TeamRegister(fake_bot())
     lock = RecordingLock()
     subject.sheet_write_lock = lock
-    manager = OrderedTeamUpsertManager(object(), "service.json")
+    manager = OrderedTeamUpsertManager(
+        feature_channel_row("team_register"),
+        "service.json",
+    )
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
     message = FakeRegisterMessage(content="150/740/33")
@@ -6115,7 +7109,10 @@ async def test_team_message_waits_then_refreshes_config_inside_channel_lock() ->
     subject = TeamRegister(fake_bot())
     channel_lock = GatedRecordingLock()
     subject.sheet_write_lock = channel_lock
-    manager = OrderedTeamUpsertManager(object(), "service.json")
+    manager = OrderedTeamUpsertManager(
+        feature_channel_row("team_register"),
+        "service.json",
+    )
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
     message = FakeRegisterMessage(content="150/740/33")
@@ -6151,7 +7148,10 @@ async def test_shift_message_waits_then_refreshes_config_inside_channel_lock(
     subject = ShiftRegister(fake_bot())
     channel_lock = GatedRecordingLock()
     subject.sheet_write_lock = channel_lock
-    manager = OrderedShiftUpsertManager(SimpleNamespace(id=77), "service.json")
+    manager = OrderedShiftUpsertManager(
+        feature_channel_row("shift_register"),
+        "service.json",
+    )
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
     message = FakeRegisterMessage(content="4-8")
@@ -6185,15 +7185,18 @@ async def test_shift_message_validates_with_fresh_recruitment_ranges(
         fake_enabled_feature_channel_by_id,
     )
     subject = ShiftRegister(fake_bot())
-    manager = OrderedShiftUpsertManager(SimpleNamespace(id=77), "service.json")
+    manager = OrderedShiftUpsertManager(
+        feature_channel_row("shift_register"),
+        "service.json",
+    )
 
-    async def get_fresh_sheet_config() -> SimpleNamespace:
-        return SimpleNamespace(
-            sheet_url=manager.current_sheet_url,
+    async def get_fresh_sheet_config() -> ShiftRegisterConfig:
+        return shift_test_config(
+            manager.current_sheet_url,
             recruitment_time_ranges=[{"start": 10, "end": 12}],
         )
 
-    manager.get_fresh_sheet_config = get_fresh_sheet_config  # type: ignore[method-assign]
+    monkeypatch.setattr(manager, "get_fresh_sheet_config", get_fresh_sheet_config)
     context = ordered_shift_upsert_context(manager)
     submission, user_info = shift_register_submission()
     message = FakeRegisterMessage(content="4-8")
@@ -6220,7 +7223,7 @@ async def test_team_register_message_upsert_preserves_pre_success_database_error
     subject = TeamRegister(fake_bot())
     raw_error = private_database_error()
     manager = OrderedTeamUpsertManager(
-        object(),
+        feature_channel_row("team_register"),
         "service.json",
         ensure_error=raw_error,
     )
@@ -6248,7 +7251,11 @@ async def test_team_register_message_upsert_preserves_classified_storage_error()
         StorageErrorKind.GOOGLE_SHEETS_TRANSIENT,
     )
     subject = TeamRegister(fake_bot())
-    manager = OrderedTeamUpsertManager(object(), "service.json", team_error=error)
+    manager = OrderedTeamUpsertManager(
+        feature_channel_row("team_register"),
+        "service.json",
+        team_error=error,
+    )
     context = ordered_team_upsert_context(manager)
     submission, user_info = team_register_submission()
     message = FakeRegisterMessage(content="150/740/33")
@@ -6272,7 +7279,7 @@ async def test_team_register_message_upsert_preserves_summary_database_error() -
     subject = TeamRegister(fake_bot())
     raw_error = private_database_error()
     manager = OrderedTeamUpsertManager(
-        object(),
+        feature_channel_row("team_register"),
         "service.json",
         summary_error=raw_error,
     )
@@ -6304,7 +7311,7 @@ async def test_shift_register_message_upsert_preserves_pre_success_database_erro
     subject = ShiftRegister(fake_bot())
     raw_error = private_database_error()
     manager = OrderedShiftUpsertManager(
-        SimpleNamespace(id=77),
+        feature_channel_row("shift_register"),
         "service.json",
         ensure_error=raw_error,
     )
@@ -6339,7 +7346,7 @@ async def test_shift_register_message_upsert_failure_uses_actual_id_change(
     raw_error = StorageError(StorageErrorKind.GOOGLE_SHEETS_TRANSIENT)
     subject = ShiftRegister(fake_bot())
     manager = OrderedShiftUpsertManager(
-        SimpleNamespace(id=77),
+        feature_channel_row("shift_register"),
         "service.json",
         upsert_error=raw_error,
         ensure_changes_ids=ids_changed,
@@ -6461,7 +7468,7 @@ async def test_team_settings_panel_passes_latest_guide_state_from_base_flow(
         return SimpleNamespace(is_enabled=True)
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         enabled_auto_guide_state,
     )
@@ -6547,7 +7554,7 @@ async def test_shift_settings_panel_passes_latest_guide_state_from_base_flow(
         return None
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         missing_auto_guide_state,
     )
@@ -6900,7 +7907,7 @@ async def test_shift_deadline_close_sends_then_cleans_up_and_completes(
         classmethod(lambda _cls, **_kwargs: _TimelineQuery(config_item)),
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         lambda _guild_id, _logger: asyncio.sleep(0, result=["zh_tw", "ja", "en"]),
     )
@@ -6923,9 +7930,9 @@ async def test_shift_deadline_close_sends_then_cleans_up_and_completes(
     assert len(channel.send_attempts) == 1
     assert channel.send_attempts[0]["nonce"] == 123
     assert [embed.title for embed in channel.send_attempts[0]["embeds"]] == [
-        "第2天｜班表登記已截止 🙇\n",
-        "2日目｜シフト募集を締め切りました 🙇\n",
-        "Day 2 | Shift registration is now closed 🙇\n",
+        "第2天｜班表登記已自動截止 🙇\n",
+        "2日目｜シフト登録の受付を自動で締め切りました 🙇\n",
+        "Day 2 | Shift registration has been automatically closed 🙇\n",
     ]
     assert channel.edit_names == ["〆shift"]
     assert cleanup_calls
@@ -6985,7 +7992,7 @@ async def test_shift_deadline_close_reuses_cached_message_when_mark_retries(
         classmethod(lambda _cls, **_kwargs: _TimelineQuery(config_item)),
     )
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_announcement_languages",
         lambda _guild_id, _logger: asyncio.sleep(0, result=["en"]),
     )
@@ -7067,7 +8074,7 @@ async def test_setup_after_enable_routes_panel_google_sheets_error_from_base(
         return None
 
     monkeypatch.setattr(
-        feature_channel_base,
+        register_feature_channel_base,
         "get_auto_guide_state",
         missing_auto_guide_state,
     )

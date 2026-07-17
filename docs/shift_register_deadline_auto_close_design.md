@@ -394,13 +394,13 @@ Timeline and Latest Guide.
 Title with day number:
 
 ```text
-{{ day_number }}日目｜シフト募集を締め切りました 🙇
+{{ day_number }}日目｜シフト登録の受付を自動で締め切りました 🙇
 ```
 
 Title without day number:
 
 ```text
-シフト募集を締め切りました 🙇
+シフト登録の受付を自動で締め切りました 🙇
 ```
 
 Description:
@@ -426,13 +426,13 @@ Footer:
 Title with day number:
 
 ```text
-第{{ day_number }}天｜班表登記已截止 🙇
+第{{ day_number }}天｜班表登記已自動截止 🙇
 ```
 
 Title without day number:
 
 ```text
-班表登記已截止 🙇
+班表登記已自動截止 🙇
 ```
 
 Description:
@@ -458,13 +458,13 @@ Footer:
 Title with day number:
 
 ```text
-Day {{ day_number }} | Shift registration is now closed 🙇
+Day {{ day_number }} | Shift registration has been automatically closed 🙇
 ```
 
 Title without day number:
 
 ```text
-Shift registration is now closed 🙇
+Shift registration has been automatically closed 🙇
 ```
 
 Description:
@@ -489,7 +489,7 @@ Submission deadline: {{ submission_deadline.day }} ({{ submission_deadline.weekd
 
 ```text
 ┌────────────────────────────────────────────────────────────┐
-│ 3日目｜シフト募集を締め切りました 🙇                       │
+│ 3日目｜シフト登録の受付を自動で締め切りました 🙇           │
 │                                                            │
 │ ご提出くださった皆さま、ありがとうございました！          │
 │ 定刻となりましたので、シフト募集を締め切らせていただきます。│
