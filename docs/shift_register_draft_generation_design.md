@@ -854,7 +854,7 @@ assigned participant's supporter total, longest adjacent assigned-hour run, and
 Encore hours. It does not report role switches, Honso column changes, or Split
 shift results because those baseline scalars become stale when the LLM replaces
 the schedule. `longest_consecutive_hours` remains an overwork reference even when
-an adjacent semantic role change separately constitutes a Split shift.
+an adjacent supporter-role change separately constitutes a Split shift.
 
 Administrator requirements appear once in a plain, explicitly delimited marker
 area outside JSON. The modal value is rendered there initially, and the
@@ -873,27 +873,31 @@ and joined with ` ⏎  ` without translating or rewriting the authored text.
 
 ### Roles, Constraints, And Priority
 
-The prompt defines the columns and roles as follows:
+The prompt uses three terms consistently: `supporter role` means `アンコ`, `本走`,
+or `待機`; `supporter position` means one of the five assignable TSV cells; and
+`Honso column` means the visual placement among `本走①`, `本走②`, and `本走③`.
 
 - `ランナー` is read from authoritative `runners_by_hour`, excluded from supporter
   competition in that hour, and absent from the LLM paste columns. A Runner may be
   a supporter in another available hour when not listed as that row's Runner.
-- `アンコ` has capacity one and requires `has_encore_role=true` plus effective
-  Power strictly greater than `encore_power_threshold`. When
+- `アンコ` is a supporter role with one position and requires
+  `has_encore_role=true` plus effective Power strictly greater than
+  `encore_power_threshold`. When
   `has_encore_team=true`, the complete `encore_isv`/`encore_power` pair applies;
   otherwise `main_isv`/`main_power` is the effective pair. Missing values are not
   guessed.
-- `本走①` through `本走③` are the three `main_isv` supporter positions.
-- `待機` is the backup supporter position. Lower Main ISV may be preferred only
-  when the other scheduling considerations are comparable; this is not a hard
-  rule.
+- `本走` is a supporter role with three `main_isv` positions: `本走①` through
+  `本走③`.
+- `待機` is the backup supporter role with one position. After Encore and up to
+  three Honso participants are selected, it prefers the highest Main ISV among
+  the remaining eligible participants.
 
 The following remain non-negotiable:
 
 - assign only exact supplied canonical names;
 - assign only during that participant's availability;
 - assign one position at most per participant per hour;
-- do not exceed role capacity or assign the Runner;
+- do not exceed supporter-position capacity or assign the Runner;
 - satisfy the strict Encore eligibility rule;
 - emit one five-cell row for every visible Draft hour. A non-recruitment baseline
   row with five blank supporter cells stays blank; a populated non-recruitment row
@@ -912,29 +916,40 @@ Requirement conflicts use this order:
 5. Participant preferences.
 6. General schedule-quality guidance.
 
-After applying the requirement priority above, ISV ordering is a soft scheduling
-signal rather than a hard rule. When other considerations are comparable, Encore
-prefers higher effective ISV, Honso prefers higher Main ISV, and standby prefers
-lower Main ISV. The LLM must not pursue those ordering preferences at the cost of
-participant requirements, continuity, workload, rest, or switching efficiency.
-It may therefore select a lower-ISV Encore or Honso participant, or a higher-ISV
-standby participant, when the whole schedule benefits. It should prefer keeping
-one person in one role for two consecutive hours, avoid excessive total or
-consecutive hours, and provide rest after long runs. The workload direction is
-Encore above Honso and Honso above standby.
+After applying requirement-priority items 1 through 5, the LLM compares complete
+candidate schedules by jointly weighing ISV appropriate to each supporter role,
+Split shifts, continuity, handoff and supporter-role-switch efficiency, workload,
+and rest. ISV is a high-weight signal, but the other quality factors do not require
+an exact ISV tie before they may affect the result.
+
+For each hour, the default direction is to prefer the highest eligible effective
+ISV for Encore, then select up to three Honso participants from the remaining pool
+by descending Main ISV, and finally prefer the highest Main ISV among the
+still-unassigned eligible participants for standby. The LLM must recheck the whole
+schedule instead of locking each hour greedily. It may select a lower corresponding
+ISV only when the complete schedule gains a concrete overall benefit, such as
+fewer Split shifts, an intact two-hour run, fewer handoffs or role switches,
+synchronized whole-supporter handoff, or better workload and rest. The audit must
+name the affected hours and roles and the benefit obtained.
+
+If a handoff is necessary, synchronized whole-supporter handoff is included in the
+efficiency tradeoff; the other quality factors need not be exactly equal before it
+is considered. It must not violate a higher-priority rule or interrupt an otherwise
+available two-hour run. The workload direction remains Encore above Honso and
+Honso above standby.
 
 The prompt uses `Split shift` for discontinuous scheduling: an unassigned gap
-between appearances, crossing a non-recruitment row, or changing semantic role
+between appearances, crossing a non-recruitment row, or changing supporter role
 among Encore, Honso, and standby. Movement among `本走①`, `本走②`, and `本走③` is
-visual column movement within one role and is not a Split shift. A clearly
-understood `飛び❌` participant requirement forbids Split shifts; otherwise they
-remain a quality concern to minimize and report.
+visual column movement within one supporter role and is not a Split shift. A
+clearly understood `飛び❌` participant requirement forbids Split shifts;
+otherwise they remain a quality concern to minimize and report.
 
-After semantic assignments are fixed, the LLM permutes only the three Honso cells
-to improve visual continuity. It first minimizes the number of continuing people
-who change Honso columns, then total movement distance, then deviation from the
-baseline order. This visual pass cannot change hours, people, semantic roles, or
-protected rows. The LLM decides how strictly to apply other quality guidelines,
+After supporter-role assignments are fixed, the LLM permutes only the three Honso
+cells to improve visual continuity. It first minimizes the number of continuing
+people who change Honso columns, then total movement distance, then deviation from
+the baseline order. This visual pass cannot change hours, people, supporter roles,
+or protected rows. The LLM decides how strictly to apply other quality guidelines,
 but it cannot relax non-negotiable rules. Editable recruitment rows may be fully
 rearranged; protected rows may not.
 
@@ -948,8 +963,13 @@ Before responding, the LLM must independently recheck its proposed schedule for:
 - Runner use and role-capacity violations;
 - Encore role, effective ISV, and strict Power eligibility;
 - every administrator requirement and every participant requirement or preference;
-- candidate total hours, longest consecutive hours, Encore hours, Split shifts,
-  rest, and Honso visual continuity;
+- total hours, longest consecutive hours, Encore hours, Split shifts, and rest for
+  every participant;
+- the Encore-to-Honso-to-standby selection order and every
+  lower-ISV-over-higher-ISV exception and its reason;
+- avoidable omissions as an important audit item, especially whether a participant
+  with available hours but zero assigned hours was unnecessarily omitted;
+- Honso visual continuity;
 - exact preservation of every populated non-recruitment baseline row;
 - shortages, ambiguous text, conflicting requirements, and ignored needs; and
 - the principal changes from the bot baseline.
@@ -960,21 +980,24 @@ invalid assignment and names every unsatisfied or ambiguous item with its reason
 It must not silently claim success after skipping a requirement.
 
 The final response contains a Traditional Chinese validation summary followed by
-these exact markers:
+this fixed structure:
 
-```text
+````text
 <<<GOOGLE_SHEETS_TSV_BEGIN:C2>>>
-<<<GOOGLE_SHEETS_TSV_END>>>
+```tsv
+<exact TSV rows>
 ```
+<<<GOOGLE_SHEETS_TSV_END>>>
+````
 
-The LLM inserts the TSV rows between those marker lines without a header or code
-fence. The enclosed block has exactly `N` rows and five columns in this order:
+Only the `tsv` code-fence content has the `N` rows and five columns, in this order:
 `アンコ`, `本走①`, `本走②`, `本走③`, `待機`, where `N` is the number of visible
 Draft hour rows. Normal recruitment cells contain only exact supplied
 `canonical_name` values or blanks. A blank non-recruitment baseline row remains
 five blank cells; a populated one is copied exactly and is the only exception to
-the canonical-output rule. The administrator copies only the content between the
-markers and pastes it at `C2`, preserving the bot-owned JST and Runner columns.
+the canonical-output rule. The administrator copies only the code-fence content
+and pastes it at `C2`, preserving the bot-owned JST and Runner columns; neither
+marker nor the Markdown fence is pasted.
 
 When Team Source is unavailable, the prompt exposes the missing-data state, does
 not guess ISV, Power, roles, or registration, and requires editable Encore cells
@@ -1106,11 +1129,11 @@ scheduling-prompt extension above. The audit additionally identifies mistakes in
 the current Draft and the corrections made to editable rows.
 
 The final response remains a Traditional Chinese audit followed by the exact
-five-column `C2:G...` TSV markers. The command never asks the LLM to emit or replace
-JST or Runner. When Team Source is unavailable, it retains the existing safe
-fallback: no capability values are guessed, Encore output stays blank, and the
-prompt and Discord report state the limitation. Any protected non-recruitment row
-still remains exact.
+five-column `C2:G...` TSV marker and code-fence structure. The command never asks
+the LLM to emit or replace JST or Runner. When Team Source is unavailable, it
+retains the existing safe fallback: no capability values are guessed, Encore
+output stays blank, and the prompt and Discord report state the limitation. Any
+protected non-recruitment row still remains exact.
 
 ### Discord Result And Failure Behavior
 

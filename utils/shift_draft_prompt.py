@@ -28,7 +28,7 @@ _ADMIN_REQUIREMENTS_END = "<<<ADMINISTRATOR_REQUIREMENTS_END>>>"
 _PASTE_BEGIN = "<<<GOOGLE_SHEETS_TSV_BEGIN:C2>>>"
 _PASTE_END = "<<<GOOGLE_SHEETS_TSV_END>>>"
 _TEAM_SOURCE_UNAVAILABLE_RULE = (
-    "Team Source 不可用時，不得猜測 ISV、Power、role 或登録狀態；"
+    "Team Source 不可用時，不得猜測 ISV、Power、角色資格或登録狀態；"
     "可重新安排的募集時段中，所有 `アンコ` 儲存格必須留白。"
 )
 _SLOT_LABELS = (
@@ -317,20 +317,21 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 {administrator_requirements}
 {_ADMIN_REQUIREMENTS_END}
 
-【崗位與硬性規則】
+【支援角色、支援位置與硬性規則】
+- `アンコ`、`本走`、`待機` 是三種支援角色；TSV 五欄是五個支援位置。
 - `runners_by_hour` 是逐時固定 Runner，也是唯一具有約束力的 Runner 資料。
   `discord_username` 用來對照 `participants`；`canonical_name` 是該人的精確名稱。
-- 同一人只在擔任 Runner 的該時段不得排入支援崗位；其他 `available_hours` 仍可排。
+- 同一人只在擔任 Runner 的該時段不得排入任何支援位置；其他 `available_hours` 仍可排。
 - Runner 只限制該時段，不得把某一列的 Runner 誤當成全時段 Runner。Runner 不在
   貼上欄位內，也不得出現在最終 TSV。
-- `アンコ` 容量 1。人員必須具有 `has_encore_role=true`，且有效 Power 必須嚴格
-  大於 `encore_power_threshold`（本次為 {encore_power_threshold:g}）。若
+- `アンコ` 是容量 1 的支援角色。人員必須具有 `has_encore_role=true`，且有效
+  Power 必須嚴格大於 `encore_power_threshold`（本次為 {encore_power_threshold:g}）。若
   `has_encore_team=true`，使用完整的 `encore_isv`／`encore_power` 配對；否則使用
   `main_isv`／`main_power`。任一必要值缺失或不合格時不得排入 `アンコ`。
 - `本走①`、`本走②`、`本走③` 是三個同屬 `本走` 的支援位置，使用 `main_isv`。
-- `待機` 容量 1，是備援支援崗位。
+- `待機` 是容量 1 的備援支援角色。
 - 每人只能排在自己的 `available_hours`，同一小時最多一個支援位置。
-- 不得超過各崗位容量、使用未知人名或自行補造資料。無可行人選時必須留白。
+- 不得超過各支援位置容量、使用未知人名或自行補造資料。無可行人選時必須留白。
 - {_TEAM_SOURCE_UNAVAILABLE_RULE}
   受保護非募集列仍依下方規則保留。
 
@@ -370,9 +371,9 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 【Split shift 與連續性】
 - 同一人的兩次排班中間有一個以上未排入的可見時段，是 `Split shift`。
 - 同一人在非募集時段前後都有排班，也算 `Split shift`。
-- 在 `アンコ`、`本走`、`待機` 三種語意角色之間變更，即使時段相鄰，也算
+- 在 `アンコ`、`本走`、`待機` 三種支援角色之間變更，即使時段相鄰，也算
   `Split shift`。
-- `本走①`、`本走②`、`本走③` 是同一語意角色；三欄之間的視覺換欄不是
+- `本走①`、`本走②`、`本走③` 是同一支援角色；三欄之間的視覺換欄不是
   `Split shift`。
 - 可明確理解為 `飛び❌` 的參加者需求禁止任何 `Split shift`。沒有這項禁止時，
   仍應盡量減少並在稽核摘要列出發生者。
@@ -380,16 +381,28 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 【負荷、ISV 與品質準則】
 - `schedule_baseline.participant_metrics` 只描述 baseline，不是重新排班後的結果。
   `total_hours`、`longest_consecutive_hours`、`encore_hours` 分別是支援總時數、
-  相鄰時段持續有支援崗位的過勞參考、`アンコ` 時數；語意角色變更仍可同時構成
-  `Split shift`。
+  相鄰時段持續排入任一支援位置的過勞參考、`アンコ` 時數；支援角色變更仍可
+  同時構成 `Split shift`。
 - 一般負荷觀念為：`アンコ` 高於 `本走`，`本走` 高於 `待機`。
-- 最好讓同一個人同一個崗位連續兩小時。避免頻繁變更語意角色，因為會拖慢效率；
+- 最好讓同一個人連續兩小時維持同一支援角色。避免頻繁變更支援角色，
+  因為會拖慢效率；
   避免總時數或連續時數過長，長班後安排休息。
-- ISV 排序是軟性判斷，不是硬性規定。
-- 條件相近時，アンコ可優先較高有效 ISV，本走可優先較高 Main ISV。
-- 待機可在其他條件相近時優先考慮 Main ISV 較低者；這項偏好不是硬性規則。
-- 不得只為追求最高 ISV 而忽視參加者需求、Split shift、連續性、負荷或休息。
-  `アンコ`、`本走`、`待機` 都不保證由 ISV 最高或最低者擔任。
+- 在遵守下方【需求衝突優先順序】第 1–5 項後，比較完整候選班表時，
+  應綜合權衡支援角色對應 ISV、Split shift、連續性、換人／支援角色變更的效率、
+  負荷與休息。
+  ISV 是高權重因素，但不要求 ISV 完全相同後才可比較其他品質因素。
+- 每個時段的支援角色以以下順序作為預設判斷：
+  1. `アンコ` 從符合資格且尚未分配的人員中，優先選擇有效 ISV 較高者。
+  2. `本走` 從其餘尚未分配的人員中，依 Main ISV 由高至低選擇最多三人。
+  3. `待機` 再從其餘尚未分配的人員中，優先選擇 Main ISV 最高者。
+- 這個順序必須用於完整候選班表的比較；不得逐時選完後不再回頭檢查。
+- 原則上優先選擇支援角色對應 ISV 較高者；
+  只有當較低 ISV 的完整候選班表能帶來明確的整體改善，例如減少 Split shift、
+  維持連續兩小時、減少換人或變更支援角色、促成同一時段整組支援人員同步交接，
+  或改善負荷與休息時，才可採用。
+  稽核摘要必須說明哪些時段／支援角色選用了較低 ISV 人員，以及換得哪些改善。
+- 若確實需要換班，應將整組同步交接納入效率權衡，不必等所有品質項目完全相同
+  才考慮；但不得為此違反更高優先規則，或中斷原本可完成的連續兩小時。
 
 【需求衝突優先順序】
 1. 既有非募集時段資料保留規則。
@@ -400,10 +413,10 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 6. 一般排班品質準則。
 
 【本走欄位的視覺排列】
-- 先確定每個時段的人員與 `アンコ`、`本走`、`待機` 語意角色，再排列
+- 先確定每個時段的人員與 `アンコ`、`本走`、`待機` 支援角色，再排列
   `本走①`、`本走②`、`本走③`。
 - 在同一個可重新安排的募集列中，只能交換已決定擔任本走的人員；不得為視覺
-  排列改變任何人的時段、語意角色、總時數或需求判斷。
+  排列改變任何人的時段、支援角色、總時數或需求判斷。
 - 同一人在前後募集列持續擔任本走時，盡量留在同一欄。存在多種排列時，依序選擇
   換欄人數最少、總移動距離最短、最接近 `schedule_baseline.rows` 的排列。
 - 移動距離定義為 `本走①↔本走② = 1`、`本走②↔本走③ = 1`、
@@ -421,9 +434,14 @@ def build_shift_draft_llm_prompt(  # noqa: PLR0913
 - `row_count`、`visible_hours`、五欄順序、空白 cell 與精確 canonical name；
 - 受保護非募集列是否五欄完全原樣保留；
 - `available_hours`、同時重複、`runners_by_hour`、容量與未知名字；
-- `アンコ` role、有效 ISV/Power 與 Power 嚴格門檻；
+- `アンコ` 角色資格（`has_encore_role`）、有效 ISV/Power 與 Power 嚴格門檻；
 - 管理者追加要望，以及每位參加者完整 `original_message` 中的需求與偏好；
-- 候選結果中每人的總時數、最長連續時數、`アンコ` 時數、休息與 Split shift；
+- 候選結果中所有參加者的總時數、最長連續時數、`アンコ` 時數、休息與
+  Split shift；
+- 每個時段是否遵守 `アンコ` → `本走` → `待機` 的選擇順序，以及所有由較低
+  ISV 人員取代較高 ISV 人員的例外與原因；
+- 漏排是重要的檢查項目；
+  檢查所有參加者，尤其是仍有可排時段但候選結果為 0 小時者，是否存在可避免的漏排；
 - 本走欄位是否已改善視覺連續性；
 - 人力不足、文字歧義、需求衝突、無法滿足或被忽視的需求；
 - 相較 `schedule_baseline` 的主要變動。
