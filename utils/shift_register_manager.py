@@ -1991,7 +1991,14 @@ class ShiftRegisterManager(
         async with worksheet_transactions(resources):
             sheet = await self.get_google_sheet()
             grids = await sheet.batch_get_worksheet_values([draft_worksheet])
-            schedule = build_final_schedule(grids[draft_worksheet.id], request)
+            runner_colors = await final_worksheet.get_effective_background_colors(
+                _final_runner_range(request)
+            )
+            schedule = build_final_schedule(
+                grids[draft_worksheet.id],
+                request,
+                reserved_colors=runner_colors,
+            )
             requests = _final_typed_requests(final_worksheet, request, schedule)
             await sheet.batch_update_grid((), worksheet_requests=requests)
             await self._persist_final_schedule_anchor(request.anchor_to_persist)
@@ -3251,6 +3258,11 @@ def _final_role_range(request: ScheduleUpdateRequest) -> str:
         f"{column_letter(request.main_anchor.column + 1)}{request.main_anchor.row}:"
         f"{column_letter(request.main_range.end.column)}{request.main_range.end.row}"
     )
+
+
+def _final_runner_range(request: ScheduleUpdateRequest) -> str:
+    column = column_letter(request.main_anchor.column)
+    return f"{column}{request.main_anchor.row}:{column}{request.main_range.end.row}"
 
 
 def _final_required_rows(request: ScheduleUpdateRequest) -> int:

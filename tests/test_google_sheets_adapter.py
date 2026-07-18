@@ -1140,6 +1140,124 @@ async def test_adapter_reads_worksheet_conditional_format_rules() -> None:
 
 
 @pytest.mark.asyncio
+async def test_adapter_reads_effective_background_colors_from_exact_range() -> None:
+    raw = RawWorksheet(
+        worksheet_id=42,
+        title="Shift Final Schedule",
+        metadata={
+            "properties": {
+                "spreadsheetTheme": {
+                    "themeColors": [
+                        {
+                            "colorType": "ACCENT1",
+                            "color": {"rgbColor": {"red": 1.0, "green": 0.5}},
+                        }
+                    ]
+                }
+            },
+            "sheets": [
+                {
+                    "properties": {"sheetId": 42},
+                    "data": [
+                        {
+                            "rowData": [
+                                {
+                                    "values": [
+                                        {
+                                            "effectiveFormat": {
+                                                "backgroundColorStyle": {
+                                                    "rgbColor": {"blue": 1.0}
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {},
+                                {
+                                    "values": [
+                                        {
+                                            "effectiveFormat": {
+                                                "backgroundColorStyle": {
+                                                    "themeColor": "ACCENT1"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                {
+                                    "values": [
+                                        {
+                                            "effectiveFormat": {
+                                                "backgroundColorStyle": {
+                                                    "rgbColor": {"blue": 1.0}
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                            ]
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    assert await adapter.get_effective_background_colors("B2:B5") == [
+        "#0000FF",
+        "#FF8000",
+    ]
+    assert raw.ws.client.metadata_calls == [
+        {
+            "ranges": "'Shift Final Schedule'!B2:B5",
+            "fields": (
+                "properties.spreadsheetTheme.themeColors,"
+                "sheets(properties.sheetId,data.rowData.values."
+                "effectiveFormat.backgroundColorStyle)"
+            ),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_classifies_invalid_effective_background_color() -> None:
+    raw = RawWorksheet(
+        metadata={
+            "sheets": [
+                {
+                    "properties": {"sheetId": 1},
+                    "data": [
+                        {
+                            "rowData": [
+                                {
+                                    "values": [
+                                        {
+                                            "effectiveFormat": {
+                                                "backgroundColorStyle": {
+                                                    "rgbColor": {"red": 2.0}
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    adapter = AsyncioGspreadWorksheet(raw)
+
+    with pytest.raises(GoogleSheetsError) as error:
+        await adapter.get_effective_background_colors("A1")
+
+    assert error.value.kind is GoogleSheetsErrorKind.UNKNOWN
+    assert error.value.operation == "read_worksheet"
+
+
+@pytest.mark.asyncio
 async def test_adapter_batches_entry_presentation_requests_atomically() -> None:
     raw = RawWorksheet()
     adapter = AsyncioGspreadWorksheet(raw)

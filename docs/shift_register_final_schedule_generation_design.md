@@ -192,8 +192,14 @@ Physically returned cells in `H+` are not interpreted, validated, logged, cleare
 formatted, or written. Header and data are not fetched in separate calls, and no
 worksheet-local reader or fallback is allowed.
 
-Final worksheet values are never read. Worksheet metadata may be used to plan
-required row or column growth.
+Final worksheet values are never read. One narrow `spreadsheets.get` request
+reads only the current destination Runner range's
+`effectiveFormat.backgroundColorStyle` plus the spreadsheet theme colors needed
+to resolve theme-backed fills to concrete RGB. Default-format cells contribute no
+color, duplicate colors are collapsed, and cells outside the current Runner range
+are not inspected. Worksheet metadata may also be used to plan required row or
+column growth. A failed or malformed format read follows the normal classified
+Sheets error path; it does not fall back to the old fixed palette.
 
 ## Draft Validation
 
@@ -306,6 +312,15 @@ ties.
 This maximizes the minimum hue spacing for the known set and keeps early visual
 neighbors distinct without a dependency or graph-coloring system.
 
+When the current Final Runner range contains administrator-defined chromatic
+backgrounds, treat their concrete RGB hues as already occupied. Keep the complete
+equal-spaced split palette intact and test each whole-degree rotation, selecting
+the rotation that maximizes the minimum circular hue distance between every split
+color and every occupied Runner hue. The smallest rotation wins ties, so a run
+with no chromatic Runner background preserves the existing palette exactly.
+White, black, and low-saturation gray backgrounds do not reserve a hue. Runner
+labels remain excluded from split detection.
+
 Use Python's standard-library `colorsys`; do not add a color dependency.
 
 ## Final Formatting Ownership
@@ -345,6 +360,7 @@ hold Shift channel lock
 → refresh configuration
 → lock Draft and Final worksheet resources
 → batch-read Draft
+→ read the exact Final Runner effective-background range
 → validate and build Final plan
 → atomic Sheets batchUpdate
 → save a changed explicit Final anchor
@@ -447,11 +463,14 @@ Add focused pure tests for:
 
 The implemented manager/adapter tests cover:
 
-- one complete Draft value batch read and no Final value read;
+- one complete Draft value batch read, no Final value read, and one exact Final
+  Runner effective-background read;
 - one atomic typed batch containing values, selective format fields, optional date,
   and growth;
 - literal leading-`=` values and formulas never re-created in Final;
 - no Runner format fields and no writes outside the current rectangle/date cell;
+- split-palette stability without Runner colors and deterministic rotation away
+  from RGB and theme-backed Runner colors;
 - date omission, invalidity, overlap, and grid growth;
 - Sheets failure leaving DB unchanged; and
 - post-Sheet DB failure returning explicit partial success.
@@ -479,8 +498,8 @@ full pytest with the repository coverage gate, compileall, and `git diff --check
 - exact source/destination/date disclosure and Sheet links;
 - permissions, cancellation, timeout, and configuration drift;
 - Draft structure and duplicate-role errors with zero mutation;
-- literal values, Honso continuity across gray gaps, split colors, Encore red text,
-  and preserved Runner formatting;
+- literal values, Honso continuity across gray gaps, Runner-aware split colors,
+  Encore red text, and preserved Runner formatting;
 - current-rectangle-only overwrite and a shorter rerun's retained old tail;
 - default/custom/invalid/missing/overlapping date behavior;
 - grid growth;
@@ -497,7 +516,8 @@ The implementation and documentation now:
 - replace the global Final ownership language in
   `docs/manual_integration_validation.md` with per-command ownership;
 - clarify that `generate_draft` excludes Final from its read plan while
-  `update_schedule_from_draft` reads Draft and still never reads Final values; and
+  `update_schedule_from_draft` reads Draft values plus only the exact Final Runner
+  effective-background range, never Final values; and
 - mark Final Schedule generation complete in `docs/runtime_architecture_review.md`.
 
 The Timeline migration's historical instruction to leave Final unchanged, Team
