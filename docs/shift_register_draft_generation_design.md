@@ -922,21 +922,33 @@ Split shifts, continuity, handoff and supporter-role-switch efficiency, workload
 and rest. ISV is a high-weight signal, but the other quality factors do not require
 an exact ISV tie before they may affect the result.
 
+For Encore and Honso, continuity means avoiding isolated one-hour assignments and
+preserving reasonable runs when higher-priority requirements, workload, and rest
+allow. Two hours is a reference, not a maximum, fixed grouping, or boundary where a
+run must be split; the same person may continue for three or more hours. Standby is
+temporary backup and is exempt from the two-hour continuity and synchronized-handoff
+preferences. It still follows hourly Main ISV selection, participant requirements,
+total workload, and rest. Moving into or out of standby remains a supporter-role
+change and a Split shift under the existing definition.
+
 For each hour, the default direction is to prefer the highest eligible effective
 ISV for Encore, then select up to three Honso participants from the remaining pool
 by descending Main ISV, and finally prefer the highest Main ISV among the
 still-unassigned eligible participants for standby. The LLM must recheck the whole
 schedule instead of locking each hour greedily. It may select a lower corresponding
 ISV only when the complete schedule gains a concrete overall benefit, such as
-fewer Split shifts, an intact two-hour run, fewer handoffs or role switches,
-synchronized whole-supporter handoff, or better workload and rest. The audit must
-name the affected hours and roles and the benefit obtained.
+fewer Split shifts, a reasonable Encore or Honso run that may exceed two hours,
+fewer handoffs or role switches, synchronized Encore and Honso handoff, or better
+workload and rest. The audit must name the affected hours and roles and the benefit
+obtained.
 
-If a handoff is necessary, synchronized whole-supporter handoff is included in the
-efficiency tradeoff; the other quality factors need not be exactly equal before it
-is considered. It must not violate a higher-priority rule or interrupt an otherwise
-available two-hour run. The workload direction remains Encore above Honso and
-Honso above standby.
+If Encore or Honso handoff is necessary, synchronized handoff among Encore and Honso
+supporters is included in the efficiency tradeoff; standby is excluded from this
+preference and need not start or finish with Encore or Honso. The other quality
+factors need not be exactly equal before synchronized handoff is considered. It
+must not violate a higher-priority rule or unnecessarily interrupt an Encore or
+Honso run that still satisfies requirements, workload, and rest. The workload
+direction remains Encore above Honso and Honso above standby.
 
 The prompt uses `Split shift` for discontinuous scheduling: an unassigned gap
 between appearances, crossing a non-recruitment row, or changing supporter role
@@ -969,6 +981,8 @@ Before responding, the LLM must independently recheck its proposed schedule for:
   lower-ISV-over-higher-ISV exception and its reason;
 - avoidable omissions as an important audit item, especially whether a participant
   with available hours but zero assigned hours was unnecessarily omitted;
+- accidental use of two hours as a cap or fixed grouping, and any incorrect demand
+  that standby continue for two hours or synchronize with Encore or Honso;
 - Honso visual continuity;
 - exact preservation of every populated non-recruitment baseline row;
 - shortages, ambiguous text, conflicting requirements, and ignored needs; and

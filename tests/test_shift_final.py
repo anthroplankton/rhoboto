@@ -433,3 +433,37 @@ def test_split_palette_is_equal_hue_and_farthest_first() -> None:
         "C": "#CBEBCE",
         "D": "#EBCBE9",
     }
+
+
+def test_split_palette_rotates_away_from_reserved_runner_colors() -> None:
+    plan = build_final_schedule(
+        grid_for_rows(
+            (4, "", "A", ("B", "", ""), ""),
+            (5, "", "", ("", "", ""), ""),
+            (6, "", "A", ("B", "", ""), ""),
+        ),
+        request_for_hours(4, 7),
+        reserved_colors=("#FF0000",),
+    )
+
+    assert plan.split_colors == {
+        "A": "#DBEBCB",
+        "B": "#DBCBEB",
+    }
+
+
+def test_split_palette_ignores_neutral_runner_colors() -> None:
+    plan = build_final_schedule(
+        grid_for_rows(
+            (4, "", "A", ("B", "", ""), ""),
+            (5, "", "", ("", "", ""), ""),
+            (6, "", "A", ("B", "", ""), ""),
+        ),
+        request_for_hours(4, 7),
+        reserved_colors=("#FFFFFF", "#808080", "#000000"),
+    )
+
+    assert plan.split_colors == {
+        "A": "#EBDECB",
+        "B": "#CBD9EB",
+    }

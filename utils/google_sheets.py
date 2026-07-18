@@ -265,6 +265,27 @@ class AsyncioGspreadWorksheet:
         )
         return list(sheet.get("conditionalFormats", []))
 
+    async def get_effective_background_colors(self, range_name: str) -> list[str]:
+        """Return concrete effective background colors from one worksheet range."""
+        try:
+            metadata = await self._worksheet.agcm._call(  # noqa: SLF001
+                self._worksheet.ws.client.fetch_sheet_metadata,
+                self._worksheet.ws.spreadsheet_id,
+                params={
+                    "ranges": absolute_range_name(self.title, range_name),
+                    "fields": (
+                        "properties.spreadsheetTheme.themeColors,"
+                        "sheets(properties.sheetId,data.rowData.values."
+                        "effectiveFormat.backgroundColorStyle)"
+                    ),
+                },
+            )
+            return _effective_background_colors(metadata, self.id)
+        except GoogleSheetsError:
+            raise
+        except GOOGLE_SHEETS_EXTERNAL_EXCEPTIONS as exc:
+            _raise_google_sheets_error(exc, "read_worksheet")
+
     def typed_update_requests(  # noqa: PLR0913
         self,
         data: list[dict[str, object]],
@@ -502,6 +523,53 @@ def _hex_rgb(value: str) -> dict[str, float]:
         name: int(value[start : start + 2], 16) / RGB_CHANNEL_MAX
         for name, start in (("red", 1), ("green", 3), ("blue", 5))
     }
+
+
+def _rgb_hex_string(value: dict[str, object]) -> str:
+    channels: list[int] = []
+    for name in ("red", "green", "blue"):
+        channel = value.get(name, 0)
+        if (
+            isinstance(channel, bool)
+            or not isinstance(channel, int | float)
+            or not 0 <= channel <= 1
+        ):
+            msg = "Invalid Google Sheets RGB channel."
+            raise ValueError(msg)
+        channels.append(round(channel * RGB_CHANNEL_MAX))
+    return "#" + "".join(f"{channel:02X}" for channel in channels)
+
+
+def _effective_background_colors(
+    metadata: dict[str, object],
+    worksheet_id: int,
+) -> list[str]:
+    theme_colors = {
+        item.get("colorType"): item.get("color", {}).get("rgbColor")
+        for item in metadata.get("properties", {})
+        .get("spreadsheetTheme", {})
+        .get("themeColors", [])
+        if isinstance(item, dict) and isinstance(item.get("color"), dict)
+    }
+    sheet = next(
+        (
+            item
+            for item in metadata.get("sheets", [])
+            if item.get("properties", {}).get("sheetId") == worksheet_id
+        ),
+        {},
+    )
+    colors: list[str] = []
+    for data in sheet.get("data", []):
+        for row in data.get("rowData", []):
+            for cell in row.get("values", []):
+                style = cell.get("effectiveFormat", {}).get("backgroundColorStyle", {})
+                rgb = style.get("rgbColor")
+                if rgb is None:
+                    rgb = theme_colors.get(style.get("themeColor"))
+                if isinstance(rgb, dict):
+                    colors.append(_rgb_hex_string(rgb))
+    return list(dict.fromkeys(colors))
 
 
 def _column_dimension_request(

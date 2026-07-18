@@ -52,6 +52,9 @@ class FinalBatchWorksheet:
         self.row_count = row_count
         self.col_count = col_count
         self.typed_calls: list[dict[str, object]] = []
+        self.effective_background_colors: list[str] = []
+        self.effective_background_calls: list[str] = []
+        self.effective_background_error: Exception | None = None
 
     def typed_update_requests(
         self,
@@ -60,6 +63,12 @@ class FinalBatchWorksheet:
     ) -> list[dict[str, object]]:
         self.typed_calls.append({"data": data, **kwargs})
         return list(data)
+
+    async def get_effective_background_colors(self, range_name: str) -> list[str]:
+        self.effective_background_calls.append(range_name)
+        if self.effective_background_error is not None:
+            raise self.effective_background_error
+        return list(self.effective_background_colors)
 
 
 class FinalValueSheet:
@@ -387,6 +396,47 @@ async def test_update_from_draft_reads_only_draft_and_writes_one_batch() -> None
     assert len(sheet.batch_updates) == 1
     assert final.typed_calls[0]["formula_ranges"] == set()
     assert final.typed_calls[0]["data"][0]["range"] == "B2:G3"
+
+
+@pytest.mark.asyncio
+async def test_update_from_draft_avoids_final_runner_background_colors() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    final.effective_background_colors = ["#FF0000"]
+    sheet = FinalValueSheet(draft, final, draft_grid=draft_grid_for_event())
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    result = await manager.update_schedule_from_draft(
+        metadata,
+        request=make_event_request(),
+    )
+
+    assert final.effective_background_calls == ["B2:B4"]
+    assert result.schedule.split_colors["Encore"] == "#EBDFCB"
+    assert all(
+        not range_name.startswith("B")
+        for range_name, _color in final.typed_calls[0]["background_updates"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_from_draft_does_not_write_when_runner_color_read_fails() -> None:
+    draft = FinalBatchWorksheet(2, "Shift Draft")
+    final = FinalBatchWorksheet(3, "Shift Final Schedule")
+    final.effective_background_error = GoogleSheetsError(
+        GoogleSheetsErrorKind.TRANSIENT,
+        "retry",
+        operation="read_worksheet",
+    )
+    sheet = FinalValueSheet(draft, final)
+    metadata = make_metadata(draft, final)
+    manager = make_manager(sheet, metadata)
+
+    with pytest.raises(GoogleSheetsError):
+        await manager.update_schedule_from_draft(metadata, request=make_request())
+
+    assert sheet.batch_updates == []
 
 
 @pytest.mark.asyncio

@@ -23,6 +23,7 @@ GOOGLE_SHEETS_MAX_ROWS = 10_000_000
 GOOGLE_SHEETS_MAX_COLUMNS = 18_278
 FINAL_ANCHOR_MAX_LENGTH = 8
 DEFAULT_EVENT_DAY_FORMAT = "{MM}月{DD}日 {dddd_ja} {dddd_en}, {MMMM_en} {DD}"
+MIN_RESERVED_COLOR_SATURATION = 0.1
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,8 @@ def build_schedule_update_request(  # noqa: PLR0913
 def build_final_schedule(
     grid: Sequence[Sequence[object]],
     request: ScheduleUpdateRequest,
+    *,
+    reserved_colors: Sequence[str] = (),
 ) -> FinalSchedulePlan:
     inspection = inspect_draft_schedule_rows(
         grid,
@@ -362,7 +365,7 @@ def build_final_schedule(
     split_names = _split_names(ordered_rows)
     return FinalSchedulePlan(
         rows=tuple(ordered_rows),
-        split_colors=_split_palette(split_names),
+        split_colors=_split_palette(split_names, reserved_colors=reserved_colors),
     )
 
 
@@ -599,10 +602,30 @@ def _split_names(rows: list[FinalScheduleRow]) -> list[str]:
     return split_names
 
 
-def _split_palette(names: list[str]) -> dict[str, str]:
+def _split_palette(
+    names: list[str],
+    *,
+    reserved_colors: Sequence[str] = (),
+) -> dict[str, str]:
     if not names:
         return {}
     hues = [35 + index * 360 / len(names) for index in range(len(names))]
+    reserved_hues = tuple(
+        hue for color in reserved_colors if (hue := _chromatic_hue(color)) is not None
+    )
+    if reserved_hues:
+        rotation = max(
+            range(360),
+            key=lambda offset: (
+                min(
+                    _hue_distance((hue + offset) % 360, reserved_hue)
+                    for hue in hues
+                    for reserved_hue in reserved_hues
+                ),
+                -offset,
+            ),
+        )
+        hues = [(hue + rotation) % 360 for hue in hues]
     assigned = {names[0]: hues[0]}
     for name in names[1:]:
         candidate = max(
@@ -617,6 +640,12 @@ def _split_palette(names: list[str]) -> dict[str, str]:
         )
         assigned[name] = candidate
     return {name: _hsl_hex(hue) for name, hue in assigned.items()}
+
+
+def _chromatic_hue(color: str) -> float | None:
+    channels = tuple(int(color[index : index + 2], 16) / 255 for index in (1, 3, 5))
+    hue, _lightness, saturation = colorsys.rgb_to_hls(*channels)
+    return hue * 360 if saturation >= MIN_RESERVED_COLOR_SATURATION else None
 
 
 def _hue_distance(first: float, second: float) -> float:
