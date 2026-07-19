@@ -46,6 +46,7 @@ def test_vendored_assets_and_complete_licenses_exist() -> None:
         ASSET_DIR / "NotoSans-VF.ttf",
         ASSET_DIR / "NotoSansSymbols2-Regular.ttf",
         ASSET_DIR / "NotoColorEmoji.ttf",
+        ASSET_DIR / "NotoEmoji-VF.ttf",
         ASSET_DIR / "unifont.otf",
         *(ASSET_DIR / "twemoji" / name for name in TWEMOJI_FILENAMES),
     ]
@@ -92,10 +93,12 @@ def test_attribution_records_pins_paths_digests_and_unmodified_bytes() -> None:
     assert "notofonts/latin-greek-cyrillic@" in text
     assert "notofonts/symbols@" in text
     assert "googlefonts/noto-emoji@" in text
+    assert "google/fonts@b979dba422e445492b0eb9951ac52ee0b4d648c3" in text
+    assert "NotoEmoji-VF.ttf" in text
     assert "unifoundry.com/unifont" in text
     assert "jdecked/twemoji@v17.0.3" in text
     assert all(filename in text for filename in TWEMOJI_FILENAMES)
-    assert text.count("sha256:") == 17
+    assert text.count("sha256:") == 19
     assert "unmodified" in text.lower()
     assert "render time" in text.lower()
 
