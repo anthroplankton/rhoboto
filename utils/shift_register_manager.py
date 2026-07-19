@@ -1590,7 +1590,7 @@ class ShiftRegisterManager(
                 shift_register__feature_channel_id=self.feature_channel.id,
             )
             .using_db(connection)
-            .select_for_update()
+            .select_for_update(of=("shift_timeline_event_state",))
             .first()
         )
 
