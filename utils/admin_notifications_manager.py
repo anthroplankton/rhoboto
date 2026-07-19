@@ -69,7 +69,7 @@ async def _get_config_with_feature(
         query = query.using_db(using_db)
     query = query.select_related("feature_channel")
     if lock:
-        query = query.select_for_update()
+        query = query.select_for_update(of=("admin_notifications_config",))
     config = await query.first()
     if config is None:
         return None
@@ -200,7 +200,7 @@ async def replace_unavailable_destination(
             AdminNotificationsConfig.filter(id=config_id)
             .using_db(connection)
             .select_related("feature_channel")
-            .select_for_update()
+            .select_for_update(of=("admin_notifications_config",))
             .first()
         )
         if config is None:
@@ -233,7 +233,7 @@ async def _get_locked_config(
         AdminNotificationsConfig.filter(id=config_id)
         .using_db(connection)
         .select_related("feature_channel")
-        .select_for_update()
+        .select_for_update(of=("admin_notifications_config",))
         .first()
     )
     if config is None:

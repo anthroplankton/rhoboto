@@ -5,6 +5,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from tortoise.queryset import QuerySet
 
 from models.admin_notifications import (
     AdminNotificationDelivery,
@@ -104,6 +105,49 @@ async def test_claim_destination_creates_one_incomplete_atomic_reservation() -> 
         assert (
             await FeatureChannel.filter(feature_name="admin_notifications").count() == 1
         )
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_locked_config_queries_scope_for_update_to_config_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_scopes: list[tuple[str, ...]] = []
+    select_for_update = QuerySet.select_for_update
+
+    def record_lock_scope(
+        query: QuerySet,
+        *,
+        nowait: bool = False,
+        skip_locked: bool = False,
+        of: tuple[str, ...] = (),
+        no_key: bool = False,
+    ) -> QuerySet:
+        if query.model is AdminNotificationsConfig:
+            lock_scopes.append(of)
+        return select_for_update(
+            query,
+            nowait=nowait,
+            skip_locked=skip_locked,
+            of=of,
+            no_key=no_key,
+        )
+
+    monkeypatch.setattr(QuerySet, "select_for_update", record_lock_scope)
+    db_url = await _start_db()
+    try:
+        claim = await claim_destination(1001, 2001)
+        config = await AdminNotificationsConfig.get(id=claim.config_id)
+        await complete_setup(
+            config.id,
+            expected_updated_at=config.updated_at,
+            expected_lead=None,
+            new_lead=10,
+        )
+        await replace_unavailable_destination(config.id, 2001, 2002)
+
+        assert lock_scopes == [("admin_notifications_config",)] * 3
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 

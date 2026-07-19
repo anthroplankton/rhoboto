@@ -264,6 +264,7 @@ class ShiftNotice(FeatureChannelBase, group_name=SHIFT_NOTICE_FEATURE_NAME):
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
         try:
             claim = await claim_destination(source.guild.id, source.channel.id)
         except Exception as exc:  # noqa: BLE001
@@ -277,18 +278,16 @@ class ShiftNotice(FeatureChannelBase, group_name=SHIFT_NOTICE_FEATURE_NAME):
 
         if claim.owns_requested_destination:
             self._reschedule_future_tick(source.guild.id)
-            await interaction.response.send_message(
-                f"Feature {self.feature_display_name} enabled in this channel.",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=f"Feature {self.feature_display_name} enabled in this channel."
             )
             await self.setup_after_enable(interaction)
             return
 
         stored_channel = source.guild.get_channel(claim.channel_id)
         if is_usable_shift_notice_destination(stored_channel, source.guild):
-            await interaction.response.send_message(
-                configured_elsewhere_message(claim.channel_id),
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=configured_elsewhere_message(claim.channel_id)
             )
             return
 
@@ -303,9 +302,8 @@ class ShiftNotice(FeatureChannelBase, group_name=SHIFT_NOTICE_FEATURE_NAME):
             )
             return
         if config is None or config.id != claim.config_id:
-            await interaction.response.send_message(
-                STALE_SETTINGS_MESSAGE,
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=STALE_SETTINGS_MESSAGE,
             )
             return
         view = ReplaceShiftNoticeDestinationView(
@@ -316,10 +314,9 @@ class ShiftNotice(FeatureChannelBase, group_name=SHIFT_NOTICE_FEATURE_NAME):
             replacement_channel_id=source.channel.id,
             actions=self._ui_actions(),
         )
-        await interaction.response.send_message(
-            REPLACEMENT_PROMPT,
+        await interaction.edit_original_response(
+            content=REPLACEMENT_PROMPT,
             view=view,
-            ephemeral=True,
         )
 
     @app_commands.command(

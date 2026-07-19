@@ -269,31 +269,37 @@ async def test_first_enable_claims_current_channel_and_offers_setup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     manager = _manager(catalog=_catalog(start=None, end=None))
+    guild = FakeGuild([FakeTextChannel(222)])
+    interaction = _interaction(guild)
+    deferred_at_claim: list[tuple[bool, ...]] = []
+
+    async def claim_destination(_guild_id: int, _channel_id: int) -> object:
+        deferred_at_claim.append(tuple(interaction.response.deferred))
+        return SimpleNamespace(
+            config_id=10,
+            feature_channel_id=20,
+            channel_id=222,
+            created=True,
+            owns_requested_destination=True,
+        )
+
     monkeypatch.setattr(
         shift_notice,
         "claim_destination",
-        AsyncMock(
-            return_value=SimpleNamespace(
-                config_id=10,
-                feature_channel_id=20,
-                channel_id=222,
-                created=True,
-                owns_requested_destination=True,
-            )
-        ),
+        claim_destination,
     )
     monkeypatch.setattr(
         shift_notice,
         "get_destination_config",
         AsyncMock(return_value=_config(minute=None)),
     )
-    guild = FakeGuild([FakeTextChannel(222)])
-    interaction = _interaction(guild)
     cog = ShiftNotice(_bot(), manager=manager)
 
     await cog.enable.callback(cog, interaction)
 
-    assert interaction.response.messages[0][0] == (
+    assert deferred_at_claim == [(True,)]
+    assert interaction.response.deferred == [True]
+    assert interaction.original_response_edits[0][0] == (
         "Feature Shift Notice enabled in this channel."
     )
     followup = interaction.followup.messages[0]
@@ -324,10 +330,11 @@ async def test_usable_existing_destination_rejects_second_claim_with_pointer(
 
     await cog.enable.callback(cog, interaction)
 
-    assert interaction.response.messages[0][0] == configured_elsewhere_message(777)
-    assert "<#777>" in interaction.response.messages[0][0]
-    assert "/shift_notice settings" in interaction.response.messages[0][0]
-    assert interaction.response.messages[0][1].get("view") is None
+    content, kwargs = interaction.original_response_edits[0]
+    assert content == configured_elsewhere_message(777)
+    assert "<#777>" in content
+    assert "/shift_notice settings" in content
+    assert kwargs.get("view") is None
 
 
 @pytest.mark.asyncio
@@ -358,7 +365,7 @@ async def test_unusable_existing_destination_offers_bound_destructive_replacemen
 
     await cog.enable.callback(cog, interaction)
 
-    content, kwargs = interaction.response.messages[0]
+    content, kwargs = interaction.original_response_edits[0]
     assert content.startswith("‼️")
     assert isinstance(kwargs["view"], ReplaceShiftNoticeDestinationView)
     assert kwargs["view"].requesting_user_id == interaction.user.id

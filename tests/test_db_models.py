@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 from tortoise import Tortoise
 from tortoise.exceptions import IntegrityError
+from tortoise.queryset import QuerySet
 
 import utils.shift_register_manager as shift_register_manager_module
 from models.admin_notifications import (
@@ -895,6 +896,54 @@ async def _create_deadline_manager(
         config,
         ShiftRegisterManager(feature_channel, "service.json"),
     )
+
+
+@pytest.mark.asyncio
+async def test_deadline_event_lock_scopes_for_update_to_event_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_scopes: list[tuple[str, ...]] = []
+    select_for_update = QuerySet.select_for_update
+
+    def record_lock_scope(
+        query: QuerySet,
+        *,
+        nowait: bool = False,
+        skip_locked: bool = False,
+        of: tuple[str, ...] = (),
+        no_key: bool = False,
+    ) -> QuerySet:
+        if query.model is ShiftTimelineEventState:
+            lock_scopes.append(of)
+        return select_for_update(
+            query,
+            nowait=nowait,
+            skip_locked=skip_locked,
+            of=of,
+            no_key=no_key,
+        )
+
+    monkeypatch.setattr(QuerySet, "select_for_update", record_lock_scope)
+    db_url = "sqlite://:memory:"
+    await asyncio.wait_for(init_db(db_url), timeout=3)
+    try:
+        deadline = dt.datetime(2026, 8, 1, 12, tzinfo=dt.UTC)
+        _channel, config, manager = await _create_deadline_manager(deadline=deadline)
+        state = await ShiftTimelineEventState.create(
+            shift_register=config,
+            event_kind=ShiftTimelineEventKind.SUBMISSION_DEADLINE,
+            scheduled_at=deadline,
+            delivery_nonce=123,
+        )
+
+        assert await manager.mark_submission_deadline_sent(
+            event_state_id=state.id,
+            delivery_nonce=state.delivery_nonce,
+            message_id=456,
+        )
+        assert lock_scopes == [("shift_timeline_event_state",)]
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
 
 
 @pytest.mark.asyncio
