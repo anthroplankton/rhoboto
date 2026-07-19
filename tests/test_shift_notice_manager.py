@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from tortoise.queryset import QuerySet
 
 from models.feature_channel import FeatureChannel
 from models.shift_notice import ShiftNoticeConfig
@@ -66,6 +67,50 @@ async def test_first_claim_creates_one_feature_channel_and_config_pair() -> None
         assert await get_destination_config(1001, 2001) is not None
         assert await ShiftNoticeConfig.filter(guild_id=1001).count() == 1
         assert await FeatureChannel.filter(feature_name="shift_notice").count() == 1
+    finally:
+        await asyncio.wait_for(close_db(db_url), timeout=3)
+
+
+@pytest.mark.asyncio
+async def test_locked_config_queries_scope_for_update_to_config_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock_scopes: list[tuple[str, ...]] = []
+    select_for_update = QuerySet.select_for_update
+
+    def record_lock_scope(
+        query: QuerySet,
+        *,
+        nowait: bool = False,
+        skip_locked: bool = False,
+        of: tuple[str, ...] = (),
+        no_key: bool = False,
+    ) -> QuerySet:
+        if query.model is ShiftNoticeConfig:
+            lock_scopes.append(of)
+        return select_for_update(
+            query,
+            nowait=nowait,
+            skip_locked=skip_locked,
+            of=of,
+            no_key=no_key,
+        )
+
+    monkeypatch.setattr(QuerySet, "select_for_update", record_lock_scope)
+    db_url = await _start_db()
+    try:
+        claim = await claim_destination(1001, 2001)
+        config = await ShiftNoticeConfig.get(id=claim.config_id)
+        config = await save_minute(
+            config.id,
+            expected_updated_at=config.updated_at,
+            expected_minute=None,
+            new_minute=15,
+            setup_only=True,
+        )
+        await replace_unavailable_destination(config.id, 2001, 2002)
+
+        assert lock_scopes == [("shift_notice_config",)] * 3
     finally:
         await asyncio.wait_for(close_db(db_url), timeout=3)
 
