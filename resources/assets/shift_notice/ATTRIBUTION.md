@@ -1,7 +1,7 @@
 # Shift Notice Render Assets
 
-These files are vendored from tag-pinned upstream releases. The font and PNG
-bytes are unmodified. PNG resizing occurs only in memory at render time.
+These files are vendored from tag- or commit-pinned upstream releases. The font
+and PNG bytes are unmodified. PNG resizing occurs only in memory at render time.
 
 ## Noto Sans CJK JP
 
@@ -57,6 +57,21 @@ release `OFL.txt` is stored as `OFL-NOTO-SYMBOLS.txt`.
   `sha256:500bb1ccf43df7bbb522112f9133a52b16e1c35e809632f5d8609b179152de5b`
 
 The complete upstream `LICENSE` is stored as `OFL-NOTO-EMOJI.txt`.
+
+## Noto Emoji
+
+- Distribution repository/commit:
+  `google/fonts@b979dba422e445492b0eb9951ac52ee0b4d648c3`
+- Font path: `ofl/notoemoji/NotoEmoji[wght].ttf`
+- Font version: 3.002
+- License path: `ofl/notoemoji/OFL.txt`
+- `NotoEmoji-VF.ttf` —
+  `sha256:de6c18832938afc99caf132b39d6a30a19bac7f2e812e28db2535b4608d27551`
+- `OFL-NOTO-EMOJI.txt` —
+  `sha256:500bb1ccf43df7bbb522112f9133a52b16e1c35e809632f5d8609b179152de5b`
+
+The complete distribution `OFL.txt` is byte-identical to the existing
+`OFL-NOTO-EMOJI.txt` file.
 
 ## GNU Unifont
 
